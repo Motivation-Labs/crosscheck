@@ -34,6 +34,7 @@ program
   .command('review <pr-url>')
   .description('Manually trigger a review for a single PR URL')
   .option('-c, --config <path>', 'config file path')
-  .action((prUrl: string, opts: { config?: string }) => void runReview(prUrl, opts.config))
+  .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
 
 program.parse()

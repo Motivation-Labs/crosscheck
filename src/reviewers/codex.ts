@@ -1,10 +1,11 @@
 import { execa } from 'execa'
-import { mkdtempSync, writeFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig } from '../config/schema.js'
 
-const TIER_MODELS: Record<string, string> = {
+// Models for API-key auth. When using ChatGPT subscription auth, omit model override.
+const TIER_MODELS_API: Record<string, string> = {
   fast: 'gpt-4o-mini',
   balanced: 'o4-mini',
   thorough: 'o3',
@@ -16,28 +17,34 @@ export async function runCodexReview(
   prTitle: string,
   quality: QualityConfig,
   overrideModel?: string,
+  authMode: 'subscription' | 'api-key' = 'subscription',
   onLog?: (msg: string) => void,
 ): Promise<string> {
-  const model = overrideModel ?? TIER_MODELS[quality.tier] ?? 'o4-mini'
-  const focusLine = quality.focus.length > 0
-    ? `Focus areas: ${quality.focus.join(', ')}.`
-    : ''
-  const customLine = quality.custom_prompt ?? ''
-  const prompt = [
-    `Review this pull request: "${prTitle}".`,
-    focusLine,
-    customLine,
-    'Be concise. Group findings by severity (critical / warning / suggestion).',
-  ].filter(Boolean).join(' ')
-
+  // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
+  const model = authMode === 'api-key'
+    ? (overrideModel ?? TIER_MODELS_API[quality.tier] ?? 'o4-mini')
+    : undefined
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
 
+  // --base and [PROMPT] are mutually exclusive in codex review;
+  // inject focus instructions via a .codex/instructions file instead
+  const focusNote = quality.focus.length > 0
+    ? `Focus areas: ${quality.focus.join(', ')}. `
+    : ''
+  const customNote = quality.custom_prompt ?? ''
+  const instructionsNote = [focusNote, customNote].filter(Boolean).join('')
+  if (instructionsNote) {
+    mkdirSync(`${repoDir}/.codex`, { recursive: true })
+    writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
+  }
+
   try {
-    onLog?.(`  running: codex review --base ${baseBranch} -c model="${model}"`)
+    const modelArgs = model ? ['-c', `model="${model}"`] : []
+    onLog?.(`  running: codex review --base ${baseBranch}${model ? ` -c model="${model}"` : ''}`)
 
     const result = await execa(
       'codex',
-      ['review', '--base', baseBranch, '--title', prTitle, '-c', `model="${model}"`, prompt],
+      ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
       {
         cwd: repoDir,
         timeout: 120_000,

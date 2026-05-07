@@ -17,7 +17,7 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
-export async function runReview(prUrl: string, configPath?: string) {
+export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
   const config = loadConfig(configPath)
   const token = getGithubToken()
   const octokit = createGithubClient(token)
@@ -33,15 +33,20 @@ export async function runReview(prUrl: string, configPath?: string) {
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
   spinner.succeed(`PR #${number}: ${pr.title}`)
 
-  const origin = detectPROrigin(pr.body ?? '', config)
-  const reviewer = assignReviewer(origin, config)
+  let reviewer: 'claude' | 'codex' | null
 
-  if (!reviewer) {
-    console.log(chalk.dim(`  PR origin: ${origin} — no reviewer assigned (check mode/routing config)`))
-    return
+  if (forceReviewer === 'codex' || forceReviewer === 'claude') {
+    reviewer = forceReviewer
+    console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
+  } else {
+    const origin = detectPROrigin(pr.body ?? '', config)
+    reviewer = assignReviewer(origin, config)
+    if (!reviewer) {
+      console.log(chalk.dim(`  PR origin: ${origin} — no reviewer assigned (use --reviewer codex|claude to force)`))
+      return
+    }
+    console.log(chalk.dim(`  PR origin: ${origin} → assigned reviewer: ${reviewer}`))
   }
-
-  console.log(chalk.dim(`  PR origin: ${origin} → assigned reviewer: ${reviewer}`))
 
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
@@ -63,6 +68,7 @@ export async function runReview(prUrl: string, configPath?: string) {
         pr.title,
         config.quality,
         config.vendors.codex.model,
+        config.vendors.codex.auth,
         msg => reviewSpinner.text = msg,
       )
     } else {

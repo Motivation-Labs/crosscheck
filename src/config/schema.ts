@@ -38,6 +38,11 @@ export const ServerConfigSchema = z.object({
   webhook_path: z.string().default('/webhook'),
 })
 
+export const LogsConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  retention_days: z.number().int().min(1).max(30).default(7),
+})
+
 export const ConfigSchema = z.object({
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
@@ -50,8 +55,10 @@ export const ConfigSchema = z.object({
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),
+  logs: LogsConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
+export type LogsConfig = z.infer<typeof LogsConfigSchema>

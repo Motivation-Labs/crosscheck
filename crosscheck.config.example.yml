@@ -73,3 +73,10 @@ server:
   port: 7891
   webhook_path: /webhook
   # pid_file: ~/.crosscheck/crosscheck.pid  # for daemon management
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+# Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson
+# Each line is a JSON object: { ts, level, event, ...context }
+logs:
+  enabled: true
+  retention_days: 7   # delete files older than N days (min: 1, max: 30)

@@ -10,6 +10,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
+import { initLogger, log as fileLog } from '../lib/logger.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -19,6 +20,8 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
 
 export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
   const config = loadConfig(configPath)
+  initLogger(config.logs)
+  fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
   const token = getGithubToken()
   const octokit = createGithubClient(token)
 
@@ -32,6 +35,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const spinner = ora(`Fetching PR #${number}...`).start()
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
   spinner.succeed(`PR #${number}: ${pr.title}`)
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 
   let reviewer: 'claude' | 'codex' | null
 
@@ -59,6 +63,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     spinner2.succeed('Repo ready')
 
     let reviewText: string
+    const reviewStart = Date.now()
+    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     const reviewSpinner = ora(`Running ${reviewer} review...`).start()
 
     if (reviewer === 'codex') {
@@ -84,9 +90,15 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     reviewSpinner.succeed('Review complete')
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, duration_ms: Date.now() - reviewStart })
     await postReviewComment(octokit, owner, repo, number, reviewText, reviewer)
+    fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    fileLog({ level: 'error', event: 'error', repo: `${owner}/${repo}`, pr: number, message, stack: err instanceof Error ? err.stack : undefined })
+    throw err
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

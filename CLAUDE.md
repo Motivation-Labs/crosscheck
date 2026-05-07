@@ -49,7 +49,13 @@ One logical change per commit. Do not batch unrelated changes.
 
 ### 5. PR
 
-Push the branch and open a PR targeting `main`. Every PR must include:
+Push the branch and open a PR targeting **`staging`** — never `main`.
+
+```bash
+gh pr create --base staging
+```
+
+Every PR must include:
 
 - **What changed** — one-paragraph summary
 - **Why** — the problem it solves or the capability it adds
@@ -57,9 +63,25 @@ Push the branch and open a PR targeting `main`. Every PR must include:
 
 Do not merge the PR yourself.
 
+### 6. Branch flow
+
+```
+feature branch → staging → main
+```
+
+| Branch | Purpose | How to get there |
+|---|---|---|
+| `feat/*` / `fix/*` | Active development | PR → `staging` |
+| `staging` | Integration + pre-release validation | PR → `main` when ready to release |
+| `main` | Production — triggers `@latest` npm publish | Merge from `staging` only |
+
+- Merging to `staging` triggers CI and publishes `@beta` to npm.
+- Merging `staging` → `main` triggers the production workflow and publishes `@latest` (requires manual approval in GitHub Actions).
+
 ### Enforcement
 
-- **Never commit directly to `main`**
+- **Never commit directly to `staging` or `main`**
+- **Never open a PR targeting `main` directly from a feature branch**
 - **Never open a PR with failing typecheck or build**
 - **Never ship a breaking change to the CLI API without a major version bump**
 
@@ -176,4 +198,13 @@ Follow semver strictly.
 | Bug fix, internal refactor | `patch` |
 | Removed/renamed command, flag, or config field | `major` |
 
-Before publishing: `npm run typecheck && npm run build && npm version <patch|minor|major> && npm publish`
+Publishing is handled by CI/CD — do not run `npm publish` manually.
+
+- `@beta` publishes automatically when `staging` is merged to `main` via the staging workflow.
+- `@latest` publishes when a `v*` tag is pushed to `main` and approved in the production workflow:
+
+```bash
+git checkout main && git pull
+npm version patch   # or minor / major — updates package.json and creates a git tag
+git push origin main --follow-tags
+```

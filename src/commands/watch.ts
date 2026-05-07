@@ -266,7 +266,8 @@ export async function runWatch(configPath?: string) {
       const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
       log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
       if (isCreds) {
-        log(chalk.dim(`    token invalid or expired — regenerate at github.com/settings/tokens`))
+        log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
+        log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
       } else if (isScope) {
         log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
       } else {

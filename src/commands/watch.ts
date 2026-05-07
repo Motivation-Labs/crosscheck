@@ -221,8 +221,18 @@ export async function runWatch(configPath?: string) {
       log(chalk.green(`  ✓ webhook registered for ${label}`))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-      log(chalk.yellow(`  ⚠ could not register webhook for ${label}: ${msg}`))
-      log(chalk.dim(`    register manually: ${webhookUrl}`))
+      const isCreds = /bad credentials|401/i.test(msg)
+      const isScope = /admin:org_hook|forbidden|403/i.test(msg)
+      log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
+      if (isCreds) {
+        log(chalk.dim(`    token invalid or expired — regenerate at github.com/settings/tokens`))
+      } else if (isScope) {
+        log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
+      } else {
+        log(chalk.dim(`    ${msg}`))
+      }
+      log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
+      log(chalk.dim(`    https://github.com/organizations/${label}/settings/hooks`))
     }
   }
 

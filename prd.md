@@ -15,12 +15,14 @@ Published as `@motivation-labs/crosscheck` on npm.
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
 - **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
 - **Org-level coverage** — one webhook covers all repos in an org
+- **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
 
 ## Non-Goals
 
 - Not a replacement for human code review
 - Not a merge gate — posts comments, does not block PRs
 - Not a hosted service — runs on your machine
+- Not a one-size-fits-all reviewer — instructions should adapt to your stack and team conventions
 
 ---
 
@@ -72,6 +74,75 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 ## Build Queue
 
 ### 🔜 Next Up
+
+- [ ] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
+  - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.
+  - **Acceptance Criteria:**
+    - `crosscheck diagnose` reads all log files in `~/.crosscheck/logs/`; accepts `--since YYYY-MM-DD` to limit range.
+    - Groups `error` entries by pattern: `command_not_found` (which command, which reviewer), `base_branch_missing` (which branch), `timeout`, `auth_failure`, `other`.
+    - Reports review outcome distribution: APPROVE / NEEDS WORK / BLOCK counts and percentages.
+    - Reports per-reviewer success rate (attempts vs successes).
+    - Reports repos and file types seen in reviewed PRs (for language detection in `optimize`).
+    - Produces a `suggestions[]` array: each suggestion has `type` (`add_constraint`, `investigate`, `config_change`), a human-readable `reason`, and an optional `instruction` string ready to paste.
+    - `--json` flag outputs the full structured report as JSON to stdout; default outputs a formatted terminal report.
+    - Exit 0 always (it is a reporting tool, not a gate).
+  - **Technical Notes:**
+    - New file: `src/commands/diagnose.ts`.
+    - Parser reads NDJSON line-by-line; tolerates malformed lines (skip + count).
+    - Language detection: scan `repo` field in log entries; for each unique repo, check if a `package.json` / `tsconfig.json` / `requirements.txt` / `Cargo.toml` / `go.mod` / `pom.xml` exists in the clone tmpDir path logged with the entry (or fall back to heuristics from the PR diff path names).
+    - Suggestion rules (seeded set — grows over time via AGENT.md improvements):
+      - `command_not_found: tsc|npx|jest|vitest` → suggest adding "Do not run tsc / npm / jest." to instructions
+      - `command_not_found: pytest|pip` → suggest Python constraint
+      - `command_not_found: cargo` → suggest Rust constraint
+      - `base_branch_missing` → flag as known infrastructure bug, link to fix
+      - `timeout` → suggest increasing `timeout_ms` in config or reducing quality tier
+    - Wire into `cli.ts` as `crosscheck diagnose [--json] [--since <date>]`.
+  - **Tests Required:** parse a fixture NDJSON file with known errors → correct pattern counts; `--json` output is valid JSON matching schema; `--since` filters correctly; tolerates empty log dir.
+
+- [ ] **`crosscheck optimize`** — run `diagnose` internally, feed the report into `claude --print` using the bundled `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
+  - **User:** Anyone who wants crosscheck to adapt to their repos and fix recurring review failures without manual config editing.
+  - **Acceptance Criteria:**
+    - `crosscheck optimize` (no flags) runs diagnose, generates improved instructions via claude, prints a unified diff of old vs new `instructions.md`, and exits without writing.
+    - `crosscheck optimize --apply` writes the improved `~/.crosscheck/instructions.md`.
+    - `crosscheck optimize --dry-run` is a synonym for the default no-flag behavior.
+    - On first run (no existing `instructions.md`), the diff shows the full new file as additions.
+    - If `diagnose` finds no errors and no suggestions, optimize still runs and may refine wording; it never produces an empty instructions file (preserves at minimum the VERDICT format constraint).
+    - Prints what was changed: "+ added constraint for tsc", "~ refined focus instructions", etc.
+    - Respects a project-level `AGENT.md` override at `{cwd}/AGENT.md` or `{cwd}/.crosscheck/AGENT.md`; falls back to the bundled `AGENT.md`.
+    - If `claude` CLI is not available, exits 1 with a clear error.
+  - **Technical Notes:**
+    - New file: `src/commands/optimize.ts`.
+    - Calls `runOptimize(diagnoseReport, currentInstructions, agentMdContent)` → returns new instructions string.
+    - AGENT.md lookup order: `{cwd}/AGENT.md` → `{cwd}/.crosscheck/AGENT.md` → `{packageRoot}/AGENT.md`.
+    - Invokes claude as: `claude --print "<agentMd>\n\n<diagnoseJson>\n\nCurrent instructions.md:\n<current>"`.
+    - Diff: use Node's built-in or a small inline unified-diff helper (no new dependency).
+    - Wire into `cli.ts` as `crosscheck optimize [--apply] [--dry-run] [--since <date>]`.
+  - **Tests Required:** optimize with no existing instructions → produces non-empty output; diff rendering shows +/- lines correctly; AGENT.md lookup respects override order.
+
+- [ ] **`AGENT.md` — bundled optimize harness** — ship a well-crafted `AGENT.md` at the repo root that guides claude during `optimize`. This file defines how to read diagnose output, detect languages, write good constraints, and stay within quality guardrails.
+  - **User:** crosscheck itself (read by `optimize`); power users who want to fork and customize the optimization logic.
+  - **Acceptance Criteria:**
+    - `AGENT.md` exists at the project root and is included in the npm package (`files` in `package.json`).
+    - Contains: purpose, input format spec, output format spec, language-detection mapping table, rules for good/bad instructions, VERDICT format preservation rule, reversibility rule (remove stale constraints), and worked examples.
+    - Produces instructions that pass `npm run typecheck` after being applied (i.e., no instructions that break the `.codex/instructions` format).
+    - Can be overridden by placing `AGENT.md` or `.crosscheck/AGENT.md` in the project root.
+  - **Technical Notes:**
+    - File is plain Markdown; no build step.
+    - `optimize.ts` reads it at runtime via `fs.readFileSync` resolved from `import.meta.url` (package root).
+    - Keep it under 400 lines — longer files reduce claude's instruction-following accuracy.
+
+- [ ] **Adaptive instructions file** — both `codex.ts` and `claude.ts` read `~/.crosscheck/instructions.md` and append its content to the review prompt / `.codex/instructions`. Seeded with safe defaults on first run. Replaces the hardcoded `noBuildToolsNote` in `codex.ts`.
+  - **User:** Anyone running `watch`/`serve` — they get out-of-box sane constraints and can improve them via `optimize`.
+  - **Acceptance Criteria:**
+    - `~/.crosscheck/instructions.md` is created on first review if it doesn't exist, seeded with the default no-build-tools constraint.
+    - Project-level `.crosscheck/instructions.md` overrides the user-level file if present.
+    - Both `codex.ts` and `claude.ts` append the instructions content; neither has hardcoded constraint strings.
+    - If the file is empty or missing, reviews still work (graceful degradation).
+    - `crosscheck status` shows the instructions file path and whether it exists.
+  - **Technical Notes:**
+    - New helper `src/lib/instructions.ts`: `readInstructions(repoDir?: string): string` — checks project-level then user-level; seeds default if neither exists; returns empty string on any read error.
+    - Default seed content: the current `noBuildToolsNote` plus a header comment explaining the file is managed by `crosscheck optimize` but can be edited manually.
+    - Remove `noBuildToolsNote` constant from `codex.ts`.
 
 - [ ] **Local debug log file** — persist structured runtime logs to `~/.crosscheck/logs/` for debugging. Enabled by default; configurable retention (default 7 days, max 30).
   - **User:** Anyone running `watch`/`serve` in production or debugging a failed review.

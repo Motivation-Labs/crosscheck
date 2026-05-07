@@ -141,7 +141,7 @@ export async function runWatch(configPath?: string) {
       const reviewStart = Date.now()
       try {
         spinner.start('cloning...')
-        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
+        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
         execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         spinner.succeed('cloned')
@@ -262,11 +262,12 @@ export async function runWatch(configPath?: string) {
       fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-      const isCreds = /bad credentials|401/i.test(msg)
-      const isScope = /admin:org_hook|forbidden|403/i.test(msg)
+      const isCreds = /bad credentials|\[401\]/i.test(msg)
+      const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
       log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
       if (isCreds) {
-        log(chalk.dim(`    token invalid or expired — regenerate at github.com/settings/tokens`))
+        log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
+        log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
       } else if (isScope) {
         log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
       } else {

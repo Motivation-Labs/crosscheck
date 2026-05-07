@@ -65,7 +65,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const spinner2 = ora('Cloning repo for review...').start()
 
   try {
-    execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
+    execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
     execSync(`git fetch origin pull/${number}/head:pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
     execSync(`git checkout pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
     spinner2.succeed('Repo ready')

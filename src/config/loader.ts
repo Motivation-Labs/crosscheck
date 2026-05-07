@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { execSync } from 'child_process'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
@@ -25,9 +26,21 @@ export function loadConfig(explicitPath?: string): Config {
 }
 
 export function getGithubToken(): string {
-  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  if (!token) throw new Error('GITHUB_TOKEN or GH_TOKEN environment variable is required')
-  return token
+  // Env var takes priority — use it if set
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (envToken) return envToken
+
+  // Fall back to the token stored by `gh auth login`
+  try {
+    const ghToken = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
+    if (ghToken) return ghToken
+  } catch { /* gh not available or not authenticated */ }
+
+  throw new Error(
+    'No GitHub token found.\n' +
+    '  Option 1: set GITHUB_TOKEN in your shell profile or .env file\n' +
+    '  Option 2: run: gh auth login'
+  )
 }
 
 const SECRET_FILE = join(homedir(), '.crosscheck', 'webhook-secret')

@@ -26,20 +26,21 @@ export function loadConfig(explicitPath?: string): Config {
 }
 
 export function getGithubToken(): string {
-  // Env var takes priority — use it if set
-  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  if (envToken) return envToken
-
-  // Fall back to the token stored by `gh auth login`
+  // gh CLI keyring is always fresh — prefer it so a stale GITHUB_TOKEN env var
+  // never shadows an active gh auth login session
   try {
     const ghToken = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
     if (ghToken) return ghToken
   } catch { /* gh not available or not authenticated */ }
 
+  // Fall back to env var — useful in CI where gh is not set up
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (envToken) return envToken
+
   throw new Error(
     'No GitHub token found.\n' +
-    '  Option 1: set GITHUB_TOKEN in your shell profile or .env file\n' +
-    '  Option 2: run: gh auth login'
+    '  Option 1: run: gh auth login\n' +
+    '  Option 2: set GITHUB_TOKEN in your shell profile or .env file'
   )
 }
 

@@ -42,8 +42,19 @@ budget:
   codex_monthly_usd: 20     # null = unlimited (use if on subscription)
   per_review_usd: 2.00      # hard stop per single review
 
+# ── Orgs (watch/serve mode) ───────────────────────────────────────────────────
+# Monitor entire orgs — all repos get covered with one webhook per org.
+# Takes priority over `repos` when both are set.
+orgs:
+  - motivation-labs
+  - codatta
+
 # ─── Repos ───────────────────────────────────────────────────────────────────
 # Omit entirely to auto-detect from `git remote` (useful in watch mode)
+# repos: still works for monitoring specific repos only
+# repos:
+#   - owner: acme
+#     name: specific-repo
 repos:
   - owner: codatta
     name: my-repo

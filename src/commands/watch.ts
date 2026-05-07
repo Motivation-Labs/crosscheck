@@ -2,7 +2,14 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import SmeeClient from 'smee-client'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import { createGithubClient, postReviewComment } from '../github/client.js'
+import {
+  createGithubClient,
+  postReviewComment,
+  registerRepoWebhook,
+  deleteRepoWebhook,
+  registerOrgWebhook,
+  deleteOrgWebhook,
+} from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
@@ -27,54 +34,12 @@ async function createSmeeChannel(): Promise<string> {
   return location
 }
 
-async function registerGithubWebhook(
-  owner: string,
-  repo: string,
-  webhookUrl: string,
-  secret: string,
-  token: string,
-): Promise<number> {
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      name: 'web',
-      active: true,
-      events: ['pull_request'],
-      config: { url: webhookUrl, content_type: 'json', secret },
-    }),
-  })
-  if (!res.ok) {
-    const err = await res.json() as { message?: string }
-    throw new Error(`Failed to register webhook: ${err.message ?? res.status}`)
-  }
-  const data = await res.json() as { id: number }
-  return data.id
-}
-
-async function deleteGithubWebhook(owner: string, repo: string, hookId: number, token: string) {
-  await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${hookId}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
-  })
-}
-
 export async function runWatch(configPath?: string) {
   const config = loadConfig(configPath)
   const token = getGithubToken()
   const webhookSecret = getWebhookSecret()
 
   const log = (msg: string) => console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
-
-  const currentRepo = detectCurrentRepo()
-  if (!currentRepo) {
-    console.error(chalk.red('Could not detect a GitHub repo from git remote. Run inside a git repo or set repos in config.'))
-    process.exit(1)
-  }
 
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
@@ -146,20 +111,67 @@ export async function runWatch(configPath?: string) {
   const smee = new SmeeClient({ source: smeeUrl, target, logger: { info: () => {}, error: console.error } })
   const smeeEvents = smee.start()
 
-  // Register webhook on GitHub
-  log(`Registering webhook on ${currentRepo.owner}/${currentRepo.repo}...`)
-  let hookId: number | null = null
-  try {
-    hookId = await registerGithubWebhook(currentRepo.owner, currentRepo.repo, smeeUrl, webhookSecret, token)
-    log(chalk.green(`Webhook registered (id ${hookId})`))
-  } catch (err: unknown) {
-    const error = err as { message?: string }
-    log(chalk.yellow(`Could not auto-register webhook: ${error.message ?? 'unknown'}`))
-    log(chalk.dim(`Register manually: ${smeeUrl} → ${target}`))
+  // Track registered hooks for cleanup: [{type, key, hookId}]
+  type RegisteredHook =
+    | { type: 'org'; org: string; hookId: number }
+    | { type: 'repo'; owner: string; repo: string; hookId: number }
+
+  const registeredHooks: RegisteredHook[] = []
+
+  if (config.orgs.length > 0) {
+    // Org-level webhooks take priority
+    for (const org of config.orgs) {
+      log(`Registering org webhook for ${org}...`)
+      try {
+        const hookId = await registerOrgWebhook(org, smeeUrl, webhookSecret, token)
+        registeredHooks.push({ type: 'org', org, hookId })
+        log(chalk.green(`  ✓ org webhook registered for ${org} (id ${hookId})`))
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        log(chalk.yellow(`  Could not register org webhook for ${org}: ${error.message ?? 'unknown'}`))
+        log(chalk.dim(`  Register manually at: https://github.com/organizations/${org}/settings/hooks`))
+      }
+    }
+  } else if (config.repos.length > 0) {
+    // Explicit repo list
+    for (const { owner, name } of config.repos) {
+      log(`Registering repo webhook for ${owner}/${name}...`)
+      try {
+        const hookId = await registerRepoWebhook(owner, name, smeeUrl, webhookSecret, token)
+        registeredHooks.push({ type: 'repo', owner, repo: name, hookId })
+        log(chalk.green(`  ✓ repo webhook registered for ${owner}/${name} (id ${hookId})`))
+      } catch (err: unknown) {
+        const error = err as { message?: string }
+        log(chalk.yellow(`  Could not register webhook for ${owner}/${name}: ${error.message ?? 'unknown'}`))
+      }
+    }
+  } else {
+    // Auto-detect from git remote
+    const currentRepo = detectCurrentRepo()
+    if (!currentRepo) {
+      console.error(chalk.red('Could not detect a GitHub repo from git remote. Run inside a git repo or set repos/orgs in config.'))
+      smeeEvents.close()
+      server.close(() => process.exit(1))
+      return
+    }
+    log(`Registering webhook on ${currentRepo.owner}/${currentRepo.repo}...`)
+    try {
+      const hookId = await registerRepoWebhook(currentRepo.owner, currentRepo.repo, smeeUrl, webhookSecret, token)
+      registeredHooks.push({ type: 'repo', owner: currentRepo.owner, repo: currentRepo.repo, hookId })
+      log(chalk.green(`Webhook registered (id ${hookId})`))
+    } catch (err: unknown) {
+      const error = err as { message?: string }
+      log(chalk.yellow(`Could not auto-register webhook: ${error.message ?? 'unknown'}`))
+      log(chalk.dim(`Register manually: ${smeeUrl} → ${target}`))
+    }
   }
 
   console.log(chalk.bold('\ncrosscheck watch\n'))
-  console.log(`  repo      ${chalk.cyan(`${currentRepo.owner}/${currentRepo.repo}`)}`)
+  if (config.orgs.length > 0) {
+    console.log(`  orgs      ${chalk.cyan(config.orgs.join(', '))}`)
+  } else if (config.repos.length > 0) {
+    console.log(`  repos     ${chalk.cyan(config.repos.map(r => `${r.owner}/${r.name}`).join(', '))}`)
+  }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
   console.log(`  tunnel    ${chalk.cyan(smeeUrl)}`)
@@ -169,9 +181,16 @@ export async function runWatch(configPath?: string) {
   const cleanup = async () => {
     console.log('\nCleaning up...')
     smeeEvents.close()
-    if (hookId !== null) {
-      await deleteGithubWebhook(currentRepo.owner, currentRepo.repo, hookId, token)
-      console.log('  webhook deregistered')
+    for (const hook of registeredHooks) {
+      try {
+        if (hook.type === 'org') {
+          await deleteOrgWebhook(hook.org, hook.hookId, token)
+          console.log(`  org webhook deregistered for ${hook.org}`)
+        } else {
+          await deleteRepoWebhook(hook.owner, hook.repo, hook.hookId, token)
+          console.log(`  repo webhook deregistered for ${hook.owner}/${hook.repo}`)
+        }
+      } catch { /* best-effort cleanup */ }
     }
     server.close(() => process.exit(0))
   }

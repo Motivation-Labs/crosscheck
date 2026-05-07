@@ -21,7 +21,7 @@ program
 
 program
   .command('serve')
-  .description('Always-on webhook server (mac-mini / home server mode)')
+  .description('[BETA] Always-on webhook server (mac-mini / home server mode)')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => runServe(opts.config))
 

@@ -58,22 +58,29 @@ Used for cloning PR branches and (in watch mode) registering webhooks automatica
 
 ## Install
 
-**npm — recommended for permanent install:**
+**Stable (recommended):**
 
 ```bash
 npm install -g crosscheck
 ```
 
-**npx — no install, always latest:**
+**Beta (latest features, may have rough edges):**
+
+```bash
+npm install -g crosscheck@beta
+```
+
+**npx — no install:**
 
 ```bash
 npx crosscheck <command>
+npx crosscheck@beta <command>
 ```
 
 **From source:**
 
 ```bash
-git clone https://github.com/beingzy/crosscheck
+git clone https://github.com/Motivation-Labs/crosscheck
 cd crosscheck
 npm install && npm run build && npm link
 ```
@@ -142,17 +149,20 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### Watch mode — for your development machine
 
-Starts a local server, creates a smee.io tunnel, and registers the webhook on your GitHub repo automatically. Runs while your terminal is open.
+Starts a local server, creates a smee.io tunnel, and registers webhooks automatically. Supports org-level coverage (one webhook covers all repos in the org) or per-repo. Runs while your terminal is open.
 
 ```bash
-cd /path/to/your/repo
+# Monitor entire orgs (set in crosscheck.config.yml)
 crosscheck watch
+
+# Or run inside a repo — auto-detects from git remote
+cd /path/to/your/repo && crosscheck watch
 ```
 
 ```
 crosscheck watch
 
-  repo      owner/repo
+  orgs      motivation-labs, codatta
   mode      cross-vendor
   quality   balanced
   tunnel    https://smee.io/abc123xyz
@@ -160,11 +170,15 @@ crosscheck watch
 Waiting for PR events — Ctrl+C to stop and clean up.
 ```
 
-When you press `Ctrl+C`, the GitHub webhook is automatically deleted. No leftover hooks in your repo settings.
+When you press `Ctrl+C`, all registered webhooks are automatically deleted.
 
-### Serve mode — for an always-on machine (mac-mini, home server)
+**Token scope for org webhooks:** `GITHUB_TOKEN` needs `admin:org_hook` to register org-level webhooks. For repo-level, `admin:repo_hook` is sufficient. Falls back to printing the smee URL for manual registration if the scope is missing.
 
-Listens on a fixed port. You register the webhook manually once and it stays registered.
+### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
+
+> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/Motivation-Labs/crosscheck/issues](https://github.com/Motivation-Labs/crosscheck/issues).
+
+Listens on a fixed port. You register the webhook(s) manually once and they stay registered.
 
 ```bash
 crosscheck serve
@@ -172,14 +186,23 @@ crosscheck serve
 
 ```
 crosscheck serving
+⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues
 
   mode      cross-vendor
   quality   balanced
   port      7891
   endpoint  http://your-machine.local:7891/webhook
+
+Register the endpoint above as a GitHub org webhook (content-type: application/json).
+  → https://github.com/organizations/motivation-labs/settings/hooks
+  → https://github.com/organizations/codatta/settings/hooks
 ```
 
-Register the endpoint shown as a GitHub webhook at `https://github.com/owner/repo/settings/hooks`:
+**For org-level coverage** (covers all repos in the org), register at:
+`https://github.com/organizations/<org>/settings/hooks`
+
+**For repo-level coverage**, register at:
+`https://github.com/<owner>/<repo>/settings/hooks`
 
 - Payload URL: `http://your-machine:7891/webhook`
 - Content type: `application/json`
@@ -292,9 +315,9 @@ Requires `GITHUB_TOKEN` with `admin:repo_hook` scope for auto-registration. Fall
 
 ---
 
-### `crosscheck serve`
+### `crosscheck serve` [BETA]
 
-Always-on mode. Listens on a fixed port; you register the webhook once manually.
+Always-on mode. Listens on a fixed port; you register webhooks once manually.
 
 ```bash
 crosscheck serve
@@ -386,10 +409,17 @@ budget:
   codex_monthly_usd: 20     # null = unlimited; only applies when auth: api-key
   per_review_usd: 2.00      # passed to claude --max-budget-usd
 
-# ── Repos (serve mode) ────────────────────────────────────────────────────────
+# ── Orgs — covers all repos in each org with one webhook ─────────────────────
+# Takes priority over `repos` when both are set.
+orgs:
+  - motivation-labs
+  - codatta
+
+# ── Repos — for monitoring specific repos only ────────────────────────────────
+# Omit when using `orgs`. In watch mode, auto-detected from git remote if empty.
 repos:
   - owner: acme
-    name: backend
+    name: specific-repo
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
@@ -509,10 +539,11 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 ### Watch vs serve
 
-| | `watch` | `serve` |
+| | `watch` | `serve` [BETA] |
 |---|---|---|
 | Tunnel | smee.io (auto-created) | None — direct port |
 | Webhook | Auto-registered, deleted on exit | Manual, permanent |
+| Scope | Org-level or repo-level | Org-level or repo-level |
 | Machine | Developer laptop | mac-mini / server |
 | Lifecycle | Tied to terminal | Daemon / service |
 

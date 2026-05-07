@@ -36,5 +36,16 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "keywords": ["code-review", "ai", "claude", "codex", "github", "pull-request", "automation", "cli"],
+  "homepage": "https://github.com/Motivation-Labs/crosscheck",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Motivation-Labs/crosscheck.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Motivation-Labs/crosscheck/issues"
+  },
+  "author": "Motivation Labs",
+  "license": "MIT"
 }

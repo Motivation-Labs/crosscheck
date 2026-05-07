@@ -89,15 +89,24 @@ npm install && npm run build && npm link
 
 ## Environment variables
 
-One variable is required. Add it to your shell profile (`~/.zshrc` or `~/.bashrc`):
+### GitHub auth — two options (pick one)
+
+**Option 1 — gh CLI (recommended):** authenticate once and crosscheck picks up the token automatically:
 
 ```bash
-# Required for all commands that touch GitHub
+gh auth login
+```
+
+**Option 2 — Personal access token:** useful in CI or if you prefer an explicit token:
+
+```bash
 export GITHUB_TOKEN=ghp_...
 ```
 
-`GITHUB_TOKEN` needs `repo` and `write:org` scopes (org-level webhooks require `write:org`; repo-level only needs `repo`).
+A classic PAT needs `repo` and `admin:org_hook` scopes (org-level webhooks require `admin:org_hook`; repo-level only needs `repo`).
 Generate one at [github.com/settings/tokens](https://github.com/settings/tokens).
+
+If both are present, crosscheck prefers the `gh` keyring token (always fresh) and uses `GITHUB_TOKEN` as a fallback.
 
 ### Webhook secret — auto-managed
 
@@ -131,7 +140,7 @@ crosscheck — environment check
   ✓ codex CLI            codex-cli 0.128.0 — authenticated
   ✓ claude CLI           2.1.x (Claude Code)
   ✓ gh CLI               gh version 2.65.0
-  ✓ GITHUB_TOKEN         set
+  ✓ GITHUB_TOKEN         set (gh auth login)
   ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
 ```
 

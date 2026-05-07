@@ -70,8 +70,15 @@ export async function runClaudeReview(
     })
     return readFileSync(outputFile, 'utf8').trim()
   } catch (err: unknown) {
-    const error = err as { stdout?: string; stderr?: string; message?: string }
-    throw new Error(`claude review failed: ${error.stderr ?? error.message ?? 'unknown error'}`)
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const rawStderr = execa.stderr?.trim() ?? ''
+    const summary = (rawStderr.split('\n').filter(Boolean).at(-1)) ?? execa.message ?? 'unknown error'
+    const thrown = Object.assign(new Error(`claude: ${summary}`), {
+      exitCode: execa.exitCode,
+      timedOut: execa.timedOut,
+      stderr: rawStderr,
+    })
+    throw thrown
   }
 }
 

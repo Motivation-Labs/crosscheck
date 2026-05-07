@@ -89,18 +89,31 @@ npm install && npm run build && npm link
 
 ## Environment variables
 
-Two variables are required at runtime. Add them to your shell profile (`~/.zshrc` or `~/.bashrc`):
+One variable is required. Add it to your shell profile (`~/.zshrc` or `~/.bashrc`):
 
 ```bash
 # Required for all commands that touch GitHub
 export GITHUB_TOKEN=ghp_...
-
-# Required for serve and watch (must match the secret you set on the webhook)
-export CROSSCHECK_WEBHOOK_SECRET=any-random-string
 ```
 
-`GITHUB_TOKEN` needs `repo` and `pull-requests:write` scopes.
+`GITHUB_TOKEN` needs `repo` and `write:org` scopes (org-level webhooks require `write:org`; repo-level only needs `repo`).
 Generate one at [github.com/settings/tokens](https://github.com/settings/tokens).
+
+### Webhook secret — auto-managed
+
+`CROSSCHECK_WEBHOOK_SECRET` is **optional**. If you don't set it, crosscheck generates a random secret on first use and saves it to `~/.crosscheck/webhook-secret` (readable only by you). It's reused automatically on every subsequent run.
+
+To retrieve it later (e.g. to register a webhook manually):
+
+```bash
+cat ~/.crosscheck/webhook-secret
+```
+
+To use your own secret instead, set it in your shell profile:
+
+```bash
+export CROSSCHECK_WEBHOOK_SECRET=your-secret
+```
 
 ---
 
@@ -119,8 +132,7 @@ crosscheck — environment check
   ✓ claude CLI           2.1.x (Claude Code)
   ✓ gh CLI               gh version 2.65.0
   ✓ GITHUB_TOKEN         set
-  ✗ WEBHOOK_SECRET       missing (only needed for serve/watch)
-      → Set CROSSCHECK_WEBHOOK_SECRET
+  ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
 ```
 
 Fix any failures before continuing.

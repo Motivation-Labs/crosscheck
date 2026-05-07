@@ -1,6 +1,7 @@
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
+import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
 import { ConfigSchema, type Config } from './schema.js'
 
@@ -29,8 +30,24 @@ export function getGithubToken(): string {
   return token
 }
 
+const SECRET_FILE = join(homedir(), '.crosscheck', 'webhook-secret')
+
 export function getWebhookSecret(): string {
-  const secret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
-  if (!secret) throw new Error('CROSSCHECK_WEBHOOK_SECRET environment variable is required')
-  return secret
+  // Env var takes precedence
+  const fromEnv = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
+  if (fromEnv) return fromEnv
+
+  // Persist and reuse an auto-generated secret
+  if (existsSync(SECRET_FILE)) {
+    return readFileSync(SECRET_FILE, 'utf8').trim()
+  }
+
+  const generated = randomBytes(32).toString('hex')
+  mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
+  writeFileSync(SECRET_FILE, generated, { mode: 0o600 })
+  return generated
+}
+
+export function getWebhookSecretPath(): string {
+  return SECRET_FILE
 }

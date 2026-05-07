@@ -89,18 +89,31 @@ npm install && npm run build && npm link
 
 ## Environment variables
 
-Two variables are required at runtime. Add them to your shell profile (`~/.zshrc` or `~/.bashrc`):
+One variable is required. Add it to your shell profile (`~/.zshrc` or `~/.bashrc`):
 
 ```bash
 # Required for all commands that touch GitHub
 export GITHUB_TOKEN=ghp_...
-
-# Required for serve and watch (must match the secret you set on the webhook)
-export CROSSCHECK_WEBHOOK_SECRET=any-random-string
 ```
 
-`GITHUB_TOKEN` needs `repo` and `pull-requests:write` scopes.
+`GITHUB_TOKEN` needs `repo` and `write:org` scopes (org-level webhooks require `write:org`; repo-level only needs `repo`).
 Generate one at [github.com/settings/tokens](https://github.com/settings/tokens).
+
+### Webhook secret — auto-managed
+
+`CROSSCHECK_WEBHOOK_SECRET` is **optional**. If you don't set it, crosscheck generates a random secret on first use and saves it to `~/.crosscheck/webhook-secret` (readable only by you). It's reused automatically on every subsequent run.
+
+To retrieve it later (e.g. to register a webhook manually):
+
+```bash
+cat ~/.crosscheck/webhook-secret
+```
+
+To use your own secret instead, set it in your shell profile:
+
+```bash
+export CROSSCHECK_WEBHOOK_SECRET=your-secret
+```
 
 ---
 
@@ -119,8 +132,7 @@ crosscheck — environment check
   ✓ claude CLI           2.1.x (Claude Code)
   ✓ gh CLI               gh version 2.65.0
   ✓ GITHUB_TOKEN         set
-  ✗ WEBHOOK_SECRET       missing (only needed for serve/watch)
-      → Set CROSSCHECK_WEBHOOK_SECRET
+  ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
 ```
 
 Fix any failures before continuing.
@@ -149,7 +161,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### Watch mode — for your development machine
 
-Starts a local server, creates a smee.io tunnel, and registers webhooks automatically. Supports org-level coverage (one webhook covers all repos in the org) or per-repo. Runs while your terminal is open.
+Starts a local server and uses `gh webhook forward` to receive events — no external tunnel service required. Supports org-level coverage (one forward covers all repos in the org) or per-repo. Runs while your terminal is open.
 
 ```bash
 # Monitor entire orgs (set in crosscheck.config.yml)
@@ -165,14 +177,14 @@ crosscheck watch
   orgs      motivation-labs, codatta
   mode      cross-vendor
   quality   balanced
-  tunnel    https://smee.io/abc123xyz
+  port      7891
 
 Waiting for PR events — Ctrl+C to stop and clean up.
 ```
 
-When you press `Ctrl+C`, all registered webhooks are automatically deleted.
+When you press `Ctrl+C`, the `gh webhook forward` processes are killed and webhooks are cleaned up automatically.
 
-**Token scope for org webhooks:** `GITHUB_TOKEN` needs `admin:org_hook` to register org-level webhooks. For repo-level, `admin:repo_hook` is sufficient. Falls back to printing the smee URL for manual registration if the scope is missing.
+**Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
 ### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
 
@@ -307,7 +319,7 @@ cd /path/to/your/repo
 crosscheck watch
 ```
 
-Requires `GITHUB_TOKEN` with `admin:repo_hook` scope for auto-registration. Falls back to printing the smee URL for manual registration if the scope is missing.
+Uses `gh webhook forward` under the hood — no external tunnel service required. Requires `GITHUB_TOKEN` with `write:org` scope for org-level coverage, or `repo` scope for repo-level.
 
 | Flag | Description |
 |---|---|
@@ -541,8 +553,8 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 | | `watch` | `serve` [BETA] |
 |---|---|---|
-| Tunnel | smee.io (auto-created) | None — direct port |
-| Webhook | Auto-registered, deleted on exit | Manual, permanent |
+| Tunnel | `gh webhook forward` (no external service) | None — direct port |
+| Webhook | Auto-managed, cleaned up on exit | Manual, permanent |
 | Scope | Org-level or repo-level | Org-level or repo-level |
 | Machine | Developer laptop | mac-mini / server |
 | Lifecycle | Tied to terminal | Daemon / service |

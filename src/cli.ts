@@ -27,7 +27,7 @@ program
 
 program
   .command('watch')
-  .description('Local dev mode — listen for PRs on the current repo')
+  .description('Local dev mode — listen for PRs via gh webhook forward')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runWatch(opts.config))
 

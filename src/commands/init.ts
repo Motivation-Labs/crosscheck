@@ -1,10 +1,10 @@
 import { execSync } from 'child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { existsSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import chalk from 'chalk'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { getWebhookSecret, getWebhookSecretPath } from '../config/loader.js'
 
 interface CheckResult {
   label: string
@@ -46,9 +46,13 @@ async function runChecks(): Promise<CheckResult[]> {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
   results.push({ label: 'GITHUB_TOKEN', ok: !!token, detail: token ? 'set' : 'missing', fix: 'Set GITHUB_TOKEN in your shell profile' })
 
-  // Check CROSSCHECK_WEBHOOK_SECRET
-  const secret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
-  results.push({ label: 'WEBHOOK_SECRET', ok: !!secret, detail: secret ? 'set' : 'missing (only needed for serve/watch)', fix: 'Set CROSSCHECK_WEBHOOK_SECRET' })
+  // Check WEBHOOK_SECRET — auto-generated if missing, so always ok
+  const fromEnv = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
+  const secretDetail = fromEnv
+    ? 'set via env'
+    : `auto-managed at ${getWebhookSecretPath()}`
+  getWebhookSecret() // ensure it's generated/persisted
+  results.push({ label: 'WEBHOOK_SECRET', ok: true, detail: secretDetail })
 
   return results
 }

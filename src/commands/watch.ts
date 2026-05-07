@@ -1,15 +1,8 @@
-import { execSync } from 'child_process'
+import { execSync, spawn } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
-import SmeeClient from 'smee-client'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import {
-  createGithubClient,
-  postReviewComment,
-  registerRepoWebhook,
-  deleteRepoWebhook,
-  registerOrgWebhook,
-  deleteOrgWebhook,
-} from '../github/client.js'
+import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
@@ -27,17 +20,23 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
   return null
 }
 
-async function createSmeeChannel(): Promise<string> {
-  const res = await fetch('https://smee.io/new', { method: 'HEAD', redirect: 'manual' })
-  const location = res.headers.get('location')
-  if (!location) throw new Error('Could not create smee.io channel')
-  return location
+function spawnGhForward(target: string, secret: string, scope: { org: string } | { owner: string; repo: string }): ChildProcess {
+  const scopeArg = 'org' in scope
+    ? `--org=${scope.org}`
+    : `--repo=${scope.owner}/${scope.repo}`
+
+  return spawn(
+    'gh',
+    ['webhook', 'forward', '--events=pull_request', `--url=${target}`, `--secret=${secret}`, scopeArg],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  )
 }
 
 export async function runWatch(configPath?: string) {
   const config = loadConfig(configPath)
   const token = getGithubToken()
   const webhookSecret = getWebhookSecret()
+  const target = `http://localhost:${config.server.port}${config.server.webhook_path}`
 
   const log = (msg: string) => console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
 
@@ -103,67 +102,41 @@ export async function runWatch(configPath?: string) {
 
   await new Promise<void>(resolve => server.listen(config.server.port, resolve))
 
-  // Create smee.io channel and start proxy
-  log('Creating smee.io tunnel...')
-  const smeeUrl = await createSmeeChannel()
-  const target = `http://localhost:${config.server.port}${config.server.webhook_path}`
-
-  const smee = new SmeeClient({ source: smeeUrl, target, logger: { info: () => {}, error: console.error } })
-  const smeeEvents = smee.start()
-
-  // Track registered hooks for cleanup: [{type, key, hookId}]
-  type RegisteredHook =
-    | { type: 'org'; org: string; hookId: number }
-    | { type: 'repo'; owner: string; repo: string; hookId: number }
-
-  const registeredHooks: RegisteredHook[] = []
+  // Determine scopes to forward
+  type Scope = { org: string } | { owner: string; repo: string }
+  const scopes: Scope[] = []
 
   if (config.orgs.length > 0) {
-    // Org-level webhooks take priority
-    for (const org of config.orgs) {
-      log(`Registering org webhook for ${org}...`)
-      try {
-        const hookId = await registerOrgWebhook(org, smeeUrl, webhookSecret, token)
-        registeredHooks.push({ type: 'org', org, hookId })
-        log(chalk.green(`  ✓ org webhook registered for ${org} (id ${hookId})`))
-      } catch (err: unknown) {
-        const error = err as { message?: string }
-        log(chalk.yellow(`  Could not register org webhook for ${org}: ${error.message ?? 'unknown'}`))
-        log(chalk.dim(`  Register manually at: https://github.com/organizations/${org}/settings/hooks`))
-      }
-    }
+    for (const org of config.orgs) scopes.push({ org })
   } else if (config.repos.length > 0) {
-    // Explicit repo list
-    for (const { owner, name } of config.repos) {
-      log(`Registering repo webhook for ${owner}/${name}...`)
-      try {
-        const hookId = await registerRepoWebhook(owner, name, smeeUrl, webhookSecret, token)
-        registeredHooks.push({ type: 'repo', owner, repo: name, hookId })
-        log(chalk.green(`  ✓ repo webhook registered for ${owner}/${name} (id ${hookId})`))
-      } catch (err: unknown) {
-        const error = err as { message?: string }
-        log(chalk.yellow(`  Could not register webhook for ${owner}/${name}: ${error.message ?? 'unknown'}`))
-      }
-    }
+    for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
   } else {
-    // Auto-detect from git remote
-    const currentRepo = detectCurrentRepo()
-    if (!currentRepo) {
+    const detected = detectCurrentRepo()
+    if (!detected) {
       console.error(chalk.red('Could not detect a GitHub repo from git remote. Run inside a git repo or set repos/orgs in config.'))
-      smeeEvents.close()
       server.close(() => process.exit(1))
       return
     }
-    log(`Registering webhook on ${currentRepo.owner}/${currentRepo.repo}...`)
-    try {
-      const hookId = await registerRepoWebhook(currentRepo.owner, currentRepo.repo, smeeUrl, webhookSecret, token)
-      registeredHooks.push({ type: 'repo', owner: currentRepo.owner, repo: currentRepo.repo, hookId })
-      log(chalk.green(`Webhook registered (id ${hookId})`))
-    } catch (err: unknown) {
-      const error = err as { message?: string }
-      log(chalk.yellow(`Could not auto-register webhook: ${error.message ?? 'unknown'}`))
-      log(chalk.dim(`Register manually: ${smeeUrl} → ${target}`))
-    }
+    scopes.push({ owner: detected.owner, repo: detected.repo })
+  }
+
+  // Spawn gh webhook forward for each scope
+  const forwarders: ChildProcess[] = []
+  for (const scope of scopes) {
+    const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+    log(`Starting webhook forwarder for ${label}...`)
+    const proc = spawnGhForward(target, webhookSecret, scope)
+    forwarders.push(proc)
+    proc.stderr?.on('data', (d: Buffer) => {
+      const line = d.toString().trim()
+      if (line) log(chalk.dim(`  [gh forward ${label}] ${line}`))
+    })
+    proc.on('exit', (code) => {
+      if (code !== 0 && code !== null) {
+        log(chalk.yellow(`  webhook forwarder for ${label} exited (code ${code})`))
+      }
+    })
+    log(chalk.green(`  ✓ forwarding webhooks for ${label}`))
   }
 
   console.log(chalk.bold('\ncrosscheck watch\n'))
@@ -174,27 +147,16 @@ export async function runWatch(configPath?: string) {
   }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
-  console.log(`  tunnel    ${chalk.cyan(smeeUrl)}`)
+  console.log(`  port      ${chalk.cyan(String(config.server.port))}`)
   console.log()
   console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop and clean up.\n'))
 
-  const cleanup = async () => {
+  const cleanup = () => {
     console.log('\nCleaning up...')
-    smeeEvents.close()
-    for (const hook of registeredHooks) {
-      try {
-        if (hook.type === 'org') {
-          await deleteOrgWebhook(hook.org, hook.hookId, token)
-          console.log(`  org webhook deregistered for ${hook.org}`)
-        } else {
-          await deleteRepoWebhook(hook.owner, hook.repo, hook.hookId, token)
-          console.log(`  repo webhook deregistered for ${hook.owner}/${hook.repo}`)
-        }
-      } catch { /* best-effort cleanup */ }
-    }
+    for (const proc of forwarders) proc.kill()
     server.close(() => process.exit(0))
   }
 
-  process.on('SIGINT', () => { void cleanup() })
-  process.on('SIGTERM', () => { void cleanup() })
+  process.on('SIGINT', cleanup)
+  process.on('SIGTERM', cleanup)
 }

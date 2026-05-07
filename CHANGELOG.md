@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] — 2026-05-08
+
+### Added
+
+- **Structured debug logs** at `~/.crosscheck/logs/` — one NDJSON file per UTC day, configurable retention (default 7 days, max 30), toggle off with `logs.enabled: false` in config. Every PR event, review start/complete, and error is recorded.
+- **Error classification** in the logger — errors are bucketed into `auth | permission | rate_limit | timeout | network | subprocess | unknown` for faster diagnosis.
+- **`crosscheck status` — Logs section** showing whether logging is enabled, log directory path, retention, and today's file size.
+- **Review verdict banner** — the first line of each PR comment now shows a coloured verdict badge (`✅ APPROVE`, `⚠️ NEEDS WORK`, `🚫 BLOCK`) parsed from the reviewer's last output line.
+- **Fortune cookie welcome** — `crosscheck serve` prints a rotating one-liner on startup.
+- **Elapsed-time counter** on the review spinner — shows seconds since the review started so you know it is still working.
+- **`crosscheck watch` — localhost.run SSH tunnel** replaces the previous smee.io dependency. No account needed; works behind NAT.
+- **`crosscheck serve`** — `EADDRINUSE` is caught and reported with a clear error instead of an unhandled exception crash.
+
+### Fixed
+
+- **Base-branch missing in shallow clone** — `git fetch origin <base>:<base>` is now run after PR checkout, so Codex can diff against the correct base (was causing `fatal: no such branch: 'staging'` failures silently).
+- **GitHub token resolution** — token is now resolved from `gh auth login` keyring when `GITHUB_TOKEN` env var is absent; resolved token is pinned into every subprocess call so a stale env var cannot shadow a valid keyring credential.
+- **`crosscheck status` / `crosscheck init`** — `GITHUB_TOKEN` now shows ✓ when `gh auth login` covers it (previously showed ✗ even when authentication was fully functional).
+- **Webhook scope-error misclassification** — HTTP status is embedded in webhook error messages; the scope-failure regex is broadened to catch real GitHub error strings (`admin:org`, `write:org`, `resource not accessible`, etc.).
+- **Codex terminal output on failure** — the review spinner now shows one actionable error line (e.g. `fatal: no such branch: 'main'`) instead of dumping the full Codex session trace.
+- **Codex running build tools in temp clone** — Codex is instructed not to run `tsc`, `npm`, `yarn`, `jest`, etc., since those tools are not available in the temporary clone. `node_modules/.bin` is also added to PATH so local tools are findable when `node_modules` does exist.
+- **Log entry bloat** — messages are capped at 2 000 chars and stacks at 1 000 chars to prevent 200 KB log entries from Codex failures.
+- **Process-level error coverage** — `uncaughtException` and `unhandledRejection` handlers write to the log before printing and exiting, so crashes leave a trace.
+
+### Changed
+
+- `crosscheck.config.yml` — added `logs:` section with `enabled` and `retention_days` fields (both have defaults; existing configs continue to work unchanged).
+- `crosscheck watch` — webhook registration error hint now suggests `gh auth refresh -s admin:org` for scope failures.
+
+---
+
 ## [0.1.0] — 2025
 
 ### Initial release

@@ -95,3 +95,4 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [x] npm publish as `@motivation-labs/crosscheck`
 - [x] CI (typecheck + build) + CD (staging @beta, production @latest) workflows
 - [x] get-started.md — full documentation
+- [x] `crosscheck init` gh CLI check accepts `GITHUB_TOKEN` env var as valid auth (no false failure when token is set but `gh auth login` was never run)

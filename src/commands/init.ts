@@ -33,17 +33,19 @@ async function runChecks(): Promise<CheckResult[]> {
     results.push({ label: 'claude CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @anthropic-ai/claude-code' })
   }
 
-  // Check gh CLI
+  // Check gh CLI — authenticated if stored credentials OR GITHUB_TOKEN env var is set
+  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
   try {
     const version = execSync('gh --version 2>&1', { encoding: 'utf8' }).split('\n')[0]
     const auth = execSync('gh auth status 2>&1', { encoding: 'utf8' })
-    results.push({ label: 'gh CLI', ok: auth.includes('Logged in'), detail: version })
+    const authed = auth.includes('Logged in') || !!token
+    const detail = !!token && !auth.includes('Logged in')
+      ? `${version} — authenticated via GITHUB_TOKEN`
+      : version
+    results.push({ label: 'gh CLI', ok: authed, detail, fix: authed ? undefined : 'Run: brew install gh && gh auth login' })
   } catch {
-    results.push({ label: 'gh CLI', ok: false, detail: 'not found or not authed', fix: 'Install: brew install gh && gh auth login' })
+    results.push({ label: 'gh CLI', ok: false, detail: 'not found', fix: 'Install: brew install gh && gh auth login' })
   }
-
-  // Check GITHUB_TOKEN
-  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
   results.push({ label: 'GITHUB_TOKEN', ok: !!token, detail: token ? 'set' : 'missing', fix: 'Set GITHUB_TOKEN in your shell profile' })
 
   // Check WEBHOOK_SECRET — auto-generated if missing, so always ok

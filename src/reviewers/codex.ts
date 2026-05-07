@@ -4,6 +4,21 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig } from '../config/schema.js'
 
+// Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
+function extractErrorSummary(stderr: string): string | undefined {
+  const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]
+    if (/^(fatal|error):/i.test(l)) return l
+  }
+  // Fall back to last non-boilerplate line
+  return lines.filter(l =>
+    !l.startsWith('---') &&
+    !/^(workdir|model|provider|approval|sandbox|reasoning|session\s+id):/i.test(l) &&
+    !/^OpenAI Codex/i.test(l)
+  ).at(-1)
+}
+
 // Models for API-key auth. When using ChatGPT subscription auth, omit model override.
 const TIER_MODELS_API: Record<string, string> = {
   fast: 'gpt-4o-mini',
@@ -59,8 +74,15 @@ export async function runCodexReview(
 
     return result.stdout.trim() || result.stderr.trim()
   } catch (err: unknown) {
-    const error = err as { stdout?: string; stderr?: string; message?: string }
-    throw new Error(`codex review failed: ${error.stderr ?? error.message ?? 'unknown error'}`)
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const rawStderr = execa.stderr ?? ''
+    const summary = extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error'
+    const thrown = Object.assign(new Error(`codex: ${summary}`), {
+      exitCode: execa.exitCode,
+      timedOut: execa.timedOut,
+      stderr: rawStderr,
+    })
+    throw thrown
   } finally {
     try { rmSync(tmpFile, { force: true, recursive: true }) } catch { /* ignore */ }
   }

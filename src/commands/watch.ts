@@ -214,31 +214,7 @@ export async function runWatch(configPath?: string) {
     process.exit(1)
   })
 
-  // Open SSH tunnel via localhost.run
-  log('Opening tunnel via localhost.run...')
-  let tunnelUrl: string
-  let tunnelProc: ChildProcess
-  try {
-    ;({ url: tunnelUrl, proc: tunnelProc } = await openTunnel(config.server.port))
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error(chalk.red(`\n✗ Could not open tunnel: ${msg}`))
-    server.close(() => process.exit(1))
-    return
-  }
-
-  const webhookUrl = `${tunnelUrl}${webhookPath}`
-  log(chalk.green(`  ✓ tunnel ready: ${chalk.cyan(tunnelUrl)}`))
-  fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
-
-  tunnelProc.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
-      log(chalk.yellow('  tunnel disconnected'))
-      fileLog({ level: 'warn', event: 'tunnel_closed', code })
-    }
-  })
-
-  // Determine scopes
+  // Determine scopes once — these don't change between tunnel reconnects
   type Scope = { org: string } | { owner: string; repo: string }
   const scopes: Scope[] = []
 
@@ -250,50 +226,47 @@ export async function runWatch(configPath?: string) {
     const detected = detectCurrentRepo()
     if (!detected) {
       console.error(chalk.red('No repos or orgs configured. Run inside a git repo or set repos/orgs in config.'))
-      tunnelProc.kill()
       server.close(() => process.exit(1))
       return
     }
     scopes.push({ owner: detected.owner, repo: detected.repo })
   }
 
-  // Register GitHub webhooks
   type RegisteredHook =
     | { type: 'org'; org: string; hookId: number }
     | { type: 'repo'; owner: string; repo: string; hookId: number }
-  const registered: RegisteredHook[] = []
 
-  for (const scope of scopes) {
-    const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
-    try {
-      if ('org' in scope) {
-        const hookId = await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
-        registered.push({ type: 'org', org: scope.org, hookId })
-      } else {
-        const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
-        registered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
-      }
-      log(chalk.green(`  ✓ webhook registered for ${label}`))
-      fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const isCreds = /bad credentials|\[401\]/i.test(msg)
-      const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-      log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
-      if (isCreds) {
-        log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
-        log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
-      } else if (isScope) {
-        log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
-      } else {
-        log(chalk.dim(`    ${msg}`))
-      }
-      log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
-      log(chalk.dim(`    https://github.com/organizations/${label}/settings/hooks`))
+  // Mutable tunnel session state — replaced on each reconnect
+  let currentTunnelProc: ChildProcess | null = null
+  let currentRegistered: RegisteredHook[] = []
+  let running = true
+
+  async function deleteCurrentWebhooks(): Promise<void> {
+    for (const hook of currentRegistered) {
+      try {
+        if (hook.type === 'org') {
+          await deleteOrgWebhook(hook.org, hook.hookId, token)
+        } else {
+          await deleteRepoWebhook(hook.owner, hook.repo, hook.hookId, token)
+        }
+      } catch { /* best-effort */ }
     }
+    currentRegistered = []
   }
 
-  // Summary banner
+  const cleanup = async () => {
+    running = false
+    console.log('\nCleaning up...')
+    currentTunnelProc?.kill()
+    await deleteCurrentWebhooks()
+    fileLog({ level: 'info', event: 'session_end', command: 'watch' })
+    server.close(() => process.exit(0))
+  }
+
+  process.on('SIGINT', () => { void cleanup() })
+  process.on('SIGTERM', () => { void cleanup() })
+
+  // Print banner once at startup
   console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
   console.log(chalk.bold('crosscheck watch\n'))
   if (config.orgs.length > 0) {
@@ -304,27 +277,78 @@ export async function runWatch(configPath?: string) {
   }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
-  console.log(`  tunnel    ${chalk.cyan(tunnelUrl)}`)
   console.log()
-  console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
 
-  // Cleanup on exit
-  const cleanup = async () => {
-    console.log('\nCleaning up...')
-    tunnelProc.kill()
-    for (const hook of registered) {
-      try {
-        if (hook.type === 'org') {
-          await deleteOrgWebhook(hook.org, hook.hookId, token)
-        } else {
-          await deleteRepoWebhook(hook.owner, hook.repo, hook.hookId, token)
-        }
-      } catch { /* best-effort */ }
+  // Tunnel reconnect loop — runs until SIGINT/SIGTERM
+  let reconnectDelay = 5_000
+  while (running) {
+    log('Opening tunnel via localhost.run...')
+    let tunnelUrl: string
+    let tunnelProc: ChildProcess
+    try {
+      ;({ url: tunnelUrl, proc: tunnelProc } = await openTunnel(config.server.port))
+    } catch (err: unknown) {
+      if (!running) break
+      const msg = err instanceof Error ? err.message : String(err)
+      log(chalk.yellow(`  ✗ tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
+      fileLog({ level: 'warn', event: 'tunnel_error', message: msg })
+      await new Promise(r => setTimeout(r, reconnectDelay))
+      reconnectDelay = Math.min(reconnectDelay * 2, 60_000)
+      continue
     }
-    fileLog({ level: 'info', event: 'session_end', command: 'watch' })
-    server.close(() => process.exit(0))
-  }
+    reconnectDelay = 5_000  // reset backoff on success
 
-  process.on('SIGINT', () => { void cleanup() })
-  process.on('SIGTERM', () => { void cleanup() })
+    currentTunnelProc = tunnelProc
+    const webhookUrl = `${tunnelUrl}${webhookPath}`
+    log(chalk.green(`  ✓ tunnel ready: ${chalk.cyan(tunnelUrl)}`))
+    console.log(`  tunnel    ${chalk.cyan(tunnelUrl)}`)
+    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
+
+    // Register webhooks for this tunnel session
+    currentRegistered = []
+    for (const scope of scopes) {
+      const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+      try {
+        if ('org' in scope) {
+          const hookId = await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
+          currentRegistered.push({ type: 'org', org: scope.org, hookId })
+        } else {
+          const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
+          currentRegistered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
+        }
+        log(chalk.green(`  ✓ webhook registered for ${label}`))
+        fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const isCreds = /bad credentials|\[401\]/i.test(msg)
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+        log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
+        if (isCreds) {
+          log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
+          log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
+        } else if (isScope) {
+          log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
+        } else {
+          log(chalk.dim(`    ${msg}`))
+        }
+        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
+        log(chalk.dim(`    https://github.com/organizations/${label}/settings/hooks`))
+      }
+    }
+
+    // Wait for this tunnel session to end
+    await new Promise<void>(resolve => {
+      tunnelProc.on('exit', resolve)
+      tunnelProc.on('error', resolve)
+    })
+
+    if (!running) break
+
+    // Clean up webhooks tied to the old URL before reconnecting
+    await deleteCurrentWebhooks()
+    log(chalk.yellow('  tunnel disconnected — reconnecting in 5s...'))
+    fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true })
+    await new Promise(r => setTimeout(r, reconnectDelay))
+  }
 }

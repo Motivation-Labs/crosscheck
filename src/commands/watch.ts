@@ -141,7 +141,7 @@ export async function runWatch(configPath?: string) {
       const reviewStart = Date.now()
       try {
         spinner.start('cloning...')
-        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
+        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
         execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         spinner.succeed('cloned')

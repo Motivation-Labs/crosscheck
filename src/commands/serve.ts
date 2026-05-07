@@ -48,7 +48,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const reviewStart = Date.now()
   try {
     log('  → cloning...')
-    execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
+    execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
     execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
     execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
     log('  → running review...')

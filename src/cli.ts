@@ -29,7 +29,8 @@ program
   .command('watch')
   .description('Local dev mode — listen for PRs on the current repo')
   .option('-c, --config <path>', 'config file path')
-  .action((opts: { config?: string }) => void runWatch(opts.config))
+  .option('--tunnel-url <url>', 'use an existing smee.io channel URL instead of auto-creating one')
+  .action((opts: { config?: string; tunnelUrl?: string }) => void runWatch(opts.config, opts.tunnelUrl))
 
 program
   .command('review <pr-url>')

@@ -319,11 +319,18 @@ cd /path/to/your/repo
 crosscheck watch
 ```
 
-Requires `GITHUB_TOKEN` with `admin:repo_hook` scope for auto-registration. Falls back to printing the smee URL for manual registration if the scope is missing.
+Requires `GITHUB_TOKEN` with `write:org` scope for org-level webhooks, or `repo` scope for repo-level. Falls back to printing the smee URL for manual registration if the scope is missing.
+
+If smee.io is unreachable (VPN, firewall), create a channel manually at [smee.io](https://smee.io) and pass it:
+
+```bash
+crosscheck watch --tunnel-url https://smee.io/your-channel
+```
 
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Use a specific config file |
+| `--tunnel-url <url>` | Use an existing smee.io channel instead of auto-creating one |
 
 ---
 

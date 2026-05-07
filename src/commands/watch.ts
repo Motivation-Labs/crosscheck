@@ -28,13 +28,23 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
 }
 
 async function createSmeeChannel(): Promise<string> {
-  const res = await fetch('https://smee.io/new', { method: 'HEAD', redirect: 'manual' })
-  const location = res.headers.get('location')
-  if (!location) throw new Error('Could not create smee.io channel')
-  return location
+  try {
+    const res = await fetch('https://smee.io/new', { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(10000) })
+    const location = res.headers.get('location')
+    if (!location) throw new Error('no redirect location')
+    return location
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `Could not reach smee.io (${msg}).\n\n` +
+      `  Option 1: open https://smee.io in your browser, click "Start a new channel", copy the URL,\n` +
+      `            then run: crosscheck watch --tunnel-url https://smee.io/your-channel\n\n` +
+      `  Option 2: check if your network/VPN blocks smee.io`
+    )
+  }
 }
 
-export async function runWatch(configPath?: string) {
+export async function runWatch(configPath?: string, tunnelUrl?: string) {
   const config = loadConfig(configPath)
   const token = getGithubToken()
   const webhookSecret = getWebhookSecret()
@@ -104,8 +114,14 @@ export async function runWatch(configPath?: string) {
   await new Promise<void>(resolve => server.listen(config.server.port, resolve))
 
   // Create smee.io channel and start proxy
-  log('Creating smee.io tunnel...')
-  const smeeUrl = await createSmeeChannel()
+  let smeeUrl: string
+  if (tunnelUrl) {
+    smeeUrl = tunnelUrl
+    log(`Using tunnel: ${chalk.cyan(smeeUrl)}`)
+  } else {
+    log('Creating smee.io tunnel...')
+    smeeUrl = await createSmeeChannel()
+  }
   const target = `http://localhost:${config.server.port}${config.server.webhook_path}`
 
   const smee = new SmeeClient({ source: smeeUrl, target, logger: { info: () => {}, error: console.error } })

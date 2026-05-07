@@ -78,6 +78,71 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
+- [ ] **Live review progress + verdict** — show structured progress during a review and post a clear verdict. See design below.
+- [ ] **Fortune cookie welcome message** — one-line witty quote on startup. See design below.
+
+---
+
+### Feature designs
+
+#### Live review progress + verdict
+
+**Problem:** once a PR event arrives, the terminal goes quiet for 30–90s while the AI runs. No feedback on what's happening or whether it passed.
+
+**Solution — progress log:**
+
+Use `ora` (already a dep) to show a spinner per stage, collapsing to a checkmark on success:
+
+```
+3:14:22 PM  PR #42 opened: fix: remove unused import
+  ⠸ cloning motivation-labs/my-repo...
+  ✓ cloned
+  ⠸ codex reviewing...
+  ✓ review complete
+  ⠸ posting comment...
+  ✓ posted → github.com/motivation-labs/my-repo/pull/42
+  verdict  ✅ APPROVE
+```
+
+**Solution — verdict:**
+
+Add a `## Verdict` section to the review prompt:
+
+```
+At the end of your review, add exactly this line:
+VERDICT: APPROVE | NEEDS WORK | BLOCK
+
+APPROVE    — no issues or trivial nits only
+NEEDS WORK — addressable issues but not blocking
+BLOCK      — security risk, data loss, broken API contract, or correctness bug
+```
+
+Parse the last `VERDICT:` line from the review text before posting. Display in the terminal with color (green / yellow / red). Strip the `VERDICT:` line before posting to GitHub so the comment stays clean — or keep it as a bold header at the top of the comment for visibility.
+
+**Implementation files:** `src/reviewers/claude.ts`, `src/reviewers/codex.ts` (prompt addition), `src/commands/watch.ts` (progress spinner + verdict display), `src/commands/review.ts` (same for manual reviews).
+
+---
+
+#### Fortune cookie welcome message
+
+**Problem:** startup feels cold and mechanical.
+
+**Solution:** print one random quote before the watch/serve banner. Quotes are stored as a static array in `src/lib/fortune.ts` — no network call, no external dependency.
+
+```
+crosscheck  "The best code review is the one that ships."
+
+crosscheck watch
+  orgs    motivation-labs
+  ...
+```
+
+Style: dim text, italic if the terminal supports it. One quote per startup, randomly selected. ~20 quotes in the initial set — mix of original lines about code review, AI, and shipping. No attribution needed (original quotes only, avoids copyright edge cases).
+
+**Implementation files:** `src/lib/fortune.ts` (quote array + `randomFortune()` helper), `src/commands/watch.ts`, `src/commands/serve.ts` (call `randomFortune()` before the banner).
+
+---
+
 ### 🔭 Backlog
 
 - [ ] **Retry logic** — if `codex review` or `claude` subprocess fails, retry once with exponential backoff

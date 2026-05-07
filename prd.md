@@ -73,8 +73,8 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ### 🔜 Next Up
 
-- [ ] **Fix `watch` mode tunnel** — `gh webhook forward` is not available in gh CLI 2.65.0 (command not found). Need a replacement tunneling strategy that avoids external services. Options: (1) `cloudflared tunnel --url localhost:PORT` (Cloudflare quick tunnel, no account, just install); (2) `ssh -R 80:localhost:PORT nokey@localhost.run` (SSH, no install needed); (3) fall back to smee.io with a clear error if nothing is found. Preferred: auto-detect `cloudflared`, fall back to `localhost.run`. Update watch output to show tunnel URL once established.
-- [ ] **Clean up `watch` output** — subprocess stderr should be buffered and shown as a single formatted line, not split across multiple log entries. Suppress raw `gh` usage dumps; replace with a one-line diagnostic + actionable fix hint.
+- [x] **Fix `watch` mode tunnel** — replaced `gh webhook forward` (not available in gh 2.65.0) with `localhost.run` SSH tunnel. SSH is pre-installed on macOS/Linux, no account needed. Tunnel URL shown in watch banner; webhooks auto-registered and deleted on exit.
+- [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 

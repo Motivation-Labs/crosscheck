@@ -3,8 +3,8 @@
 Cross-vendor AI code review orchestrator. When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. Runs locally using your existing subscriptions — no separate API billing required.
 
 ```bash
-npm install -g crosscheck          # stable
-npm install -g crosscheck@beta     # latest features
+npm install -g @motivation-labs/crosscheck          # stable
+npm install -g @motivation-labs/crosscheck@beta     # latest features
 crosscheck init
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
@@ -22,6 +22,9 @@ Covers prerequisites, install, all commands and flags, full config reference, an
 **1. Install CLIs and authenticate**
 
 ```bash
+# crosscheck
+npm install -g @motivation-labs/crosscheck
+
 # Claude Code — uses your claude.ai Pro/Max subscription
 npm install -g @anthropic-ai/claude-code && claude
 

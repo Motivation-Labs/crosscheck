@@ -61,20 +61,20 @@ Used for cloning PR branches and (in watch mode) registering webhooks automatica
 **Stable (recommended):**
 
 ```bash
-npm install -g crosscheck
+npm install -g @motivation-labs/crosscheck
 ```
 
 **Beta (latest features, may have rough edges):**
 
 ```bash
-npm install -g crosscheck@beta
+npm install -g @motivation-labs/crosscheck@beta
 ```
 
 **npx — no install:**
 
 ```bash
-npx crosscheck <command>
-npx crosscheck@beta <command>
+npx @motivation-labs/crosscheck <command>
+npx @motivation-labs/crosscheck@beta <command>
 ```
 
 **From source:**

@@ -262,8 +262,8 @@ export async function runWatch(configPath?: string) {
       fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-      const isCreds = /bad credentials|401/i.test(msg)
-      const isScope = /admin:org_hook|forbidden|403/i.test(msg)
+      const isCreds = /bad credentials|\[401\]/i.test(msg)
+      const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
       log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
       if (isCreds) {
         log(chalk.dim(`    token invalid or expired — regenerate at github.com/settings/tokens`))

@@ -2,8 +2,8 @@ name: Publish
 
 on:
   push:
-    branches: [main]        # → staging (beta tag)
-    tags: ['v*']            # → production (latest tag)
+    branches: [staging]     # → @beta publish
+    tags: ['v*']            # → @latest publish
   workflow_dispatch:
     inputs:
       environment:
@@ -14,11 +14,11 @@ on:
         options: [staging, production]
 
 jobs:
-  # ── Staging — publish @beta on every merge to main ───────────────────────────
+  # ── Staging — publish @beta on every merge to staging ────────────────────────
   staging:
     name: Publish @beta
     if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/staging') ||
       (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging')
     runs-on: ubuntu-latest
     environment: staging

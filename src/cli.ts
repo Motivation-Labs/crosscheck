@@ -27,10 +27,9 @@ program
 
 program
   .command('watch')
-  .description('Local dev mode — listen for PRs on the current repo')
+  .description('Local dev mode — listen for PRs via gh webhook forward')
   .option('-c, --config <path>', 'config file path')
-  .option('--tunnel-url <url>', 'use an existing smee.io channel URL instead of auto-creating one')
-  .action((opts: { config?: string; tunnelUrl?: string }) => void runWatch(opts.config, opts.tunnelUrl))
+  .action((opts: { config?: string }) => void runWatch(opts.config))
 
 program
   .command('review <pr-url>')

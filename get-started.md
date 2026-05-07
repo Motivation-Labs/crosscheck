@@ -161,7 +161,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### Watch mode — for your development machine
 
-Starts a local server, creates a smee.io tunnel, and registers webhooks automatically. Supports org-level coverage (one webhook covers all repos in the org) or per-repo. Runs while your terminal is open.
+Starts a local server and uses `gh webhook forward` to receive events — no external tunnel service required. Supports org-level coverage (one forward covers all repos in the org) or per-repo. Runs while your terminal is open.
 
 ```bash
 # Monitor entire orgs (set in crosscheck.config.yml)
@@ -177,14 +177,14 @@ crosscheck watch
   orgs      motivation-labs, codatta
   mode      cross-vendor
   quality   balanced
-  tunnel    https://smee.io/abc123xyz
+  port      7891
 
 Waiting for PR events — Ctrl+C to stop and clean up.
 ```
 
-When you press `Ctrl+C`, all registered webhooks are automatically deleted.
+When you press `Ctrl+C`, the `gh webhook forward` processes are killed and webhooks are cleaned up automatically.
 
-**Token scope for org webhooks:** `GITHUB_TOKEN` needs `admin:org_hook` to register org-level webhooks. For repo-level, `admin:repo_hook` is sufficient. Falls back to printing the smee URL for manual registration if the scope is missing.
+**Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
 ### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
 
@@ -319,18 +319,11 @@ cd /path/to/your/repo
 crosscheck watch
 ```
 
-Requires `GITHUB_TOKEN` with `write:org` scope for org-level webhooks, or `repo` scope for repo-level. Falls back to printing the smee URL for manual registration if the scope is missing.
-
-If smee.io is unreachable (VPN, firewall), create a channel manually at [smee.io](https://smee.io) and pass it:
-
-```bash
-crosscheck watch --tunnel-url https://smee.io/your-channel
-```
+Uses `gh webhook forward` under the hood — no external tunnel service required. Requires `GITHUB_TOKEN` with `write:org` scope for org-level coverage, or `repo` scope for repo-level.
 
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Use a specific config file |
-| `--tunnel-url <url>` | Use an existing smee.io channel instead of auto-creating one |
 
 ---
 
@@ -560,8 +553,8 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 | | `watch` | `serve` [BETA] |
 |---|---|---|
-| Tunnel | smee.io (auto-created) | None — direct port |
-| Webhook | Auto-registered, deleted on exit | Manual, permanent |
+| Tunnel | `gh webhook forward` (no external service) | None — direct port |
+| Webhook | Auto-managed, cleaned up on exit | Manual, permanent |
 | Scope | Org-level or repo-level | Org-level or repo-level |
 | Machine | Developer laptop | mac-mini / server |
 | Lifecycle | Tied to terminal | Daemon / service |

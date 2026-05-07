@@ -61,7 +61,7 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "[crosscheck] ${{ github.ref_name }} is waiting for your approval"
-          to: yi@inductive.network
+          to: ${{ secrets.MAIL_USERNAME }}
           from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
           body: |
             crosscheck ${{ github.ref_name }} has been tagged and is waiting for production deployment approval.

@@ -17,6 +17,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
+import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -70,11 +71,36 @@ function openTunnel(localPort: number): Promise<{ url: string; proc: ChildProces
 
 export async function runWatch(configPath?: string) {
   const config = loadConfig(configPath)
-  const token = getGithubToken()
+  initLogger(config.logs)
+
+  process.on('uncaughtException', (err) => {
+    logUncaught('uncaughtException', err)
+    console.error(chalk.red(`\n✗ Uncaught exception: ${err.message}`))
+    process.exit(2)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logUncaught('unhandledRejection', reason)
+    console.error(chalk.red(`\n✗ Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`))
+    process.exit(2)
+  })
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err) {
+    logError({ command: 'watch', phase: 'auth' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  fileLog({ level: 'info', event: 'session_start', command: 'watch' })
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
 
-  const log = (msg: string) => console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
+  const log = (msg: string) => {
+    console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
+    fileLog({ level: 'info', event: 'message', message: msg })
+  }
 
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
@@ -100,6 +126,8 @@ export async function runWatch(configPath?: string) {
       const origin = detectPROrigin(pr.body ?? '', config)
       const reviewer = assignReviewer(origin, config)
 
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+
       if (!reviewer) {
         log(chalk.dim(`  origin=${origin} — skipping (no reviewer assigned)`))
         inFlight.delete(key)
@@ -110,6 +138,7 @@ export async function runWatch(configPath?: string) {
 
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
       const spinner = ora({ indent: 2 })
+      const reviewStart = Date.now()
       try {
         spinner.start('cloning...')
         execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
@@ -117,6 +146,7 @@ export async function runWatch(configPath?: string) {
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         spinner.succeed('cloned')
 
+        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
         spinner.start(`${reviewer} reviewing...`)
         let rawReview: string
         if (reviewer === 'codex') {
@@ -128,21 +158,27 @@ export async function runWatch(configPath?: string) {
 
         const { verdict, clean } = parseVerdict(rawReview)
         const commentBody = prependVerdictToComment(clean, verdict)
+        fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - reviewStart })
 
         spinner.start('posting comment...')
         const octokit = createGithubClient(token)
         await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
-        spinner.succeed(`posted → github.com/${owner}/${repoName}/pull/${prNumber}`)
+        const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
+        spinner.succeed(`posted → ${commentUrl}`)
+        fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
 
         log(formatVerdict(verdict))
       } catch (err: unknown) {
-        spinner.fail(err instanceof Error ? err.message : String(err))
+        const message = err instanceof Error ? err.message : String(err)
+        spinner.fail(message)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
         inFlight.delete(key)
       }
     },
     log,
+    fileLog,
   )
 
   await new Promise<void>((resolve, reject) => {
@@ -178,9 +214,13 @@ export async function runWatch(configPath?: string) {
 
   const webhookUrl = `${tunnelUrl}${webhookPath}`
   log(chalk.green(`  ✓ tunnel ready: ${chalk.cyan(tunnelUrl)}`))
+  fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
 
   tunnelProc.on('exit', (code) => {
-    if (code !== 0 && code !== null) log(chalk.yellow('  tunnel disconnected'))
+    if (code !== 0 && code !== null) {
+      log(chalk.yellow('  tunnel disconnected'))
+      fileLog({ level: 'warn', event: 'tunnel_closed', code })
+    }
   })
 
   // Determine scopes
@@ -219,6 +259,7 @@ export async function runWatch(configPath?: string) {
         registered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
       }
       log(chalk.green(`  ✓ webhook registered for ${label}`))
+      fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       const isCreds = /bad credentials|401/i.test(msg)
@@ -264,6 +305,7 @@ export async function runWatch(configPath?: string) {
         }
       } catch { /* best-effort */ }
     }
+    fileLog({ level: 'info', event: 'session_end', command: 'watch' })
     server.close(() => process.exit(0))
   }
 

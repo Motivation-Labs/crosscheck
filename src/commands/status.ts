@@ -1,8 +1,10 @@
 import { execSync } from 'child_process'
+import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
 import { loadConfig } from '../config/loader.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { getLogDir, getTodayLogPath } from '../lib/logger.js'
 
 function row(label: string, value: string, ok?: boolean) {
   const indicator = ok === undefined ? ' ' : ok ? chalk.green('✓') : chalk.red('✗')
@@ -43,6 +45,21 @@ export async function runStatus(configPath?: string) {
 
   if (config.quality.focus.length > 0) {
     row('focus', config.quality.focus.join(', '))
+  }
+
+  // Logs
+  console.log()
+  console.log(chalk.dim('  Logs'))
+  row('enabled', String(config.logs.enabled), config.logs.enabled)
+  row('retention', `${config.logs.retention_days} days`)
+  row('log dir', getLogDir())
+  const todayLog = getTodayLogPath()
+  if (existsSync(todayLog)) {
+    const bytes = statSync(todayLog).size
+    const kb = (bytes / 1024).toFixed(1)
+    row('today', `${kb} KB — ${todayLog}`)
+  } else {
+    row('today', 'no log yet today')
   }
 
   // CLI versions

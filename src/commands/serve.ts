@@ -11,6 +11,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
+import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -33,6 +34,8 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const origin = detectPROrigin(pr.body ?? '', config)
   const reviewer = assignReviewer(origin, config)
 
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+
   if (!reviewer) {
     log(`  → origin=${origin}, no reviewer — skipping`)
     inFlight.delete(key)
@@ -42,6 +45,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   log(`  → origin=${origin}, reviewer=${reviewer}`)
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  const reviewStart = Date.now()
   try {
     log('  → cloning...')
     execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
@@ -49,6 +53,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
     log('  → running review...')
 
+    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
     let rawReview: string
     if (reviewer === 'codex') {
       rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, log)
@@ -58,13 +63,16 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
     const { verdict, clean } = parseVerdict(rawReview)
     const commentBody = prependVerdictToComment(clean, verdict)
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - reviewStart })
 
     const octokit = createGithubClient(token)
     await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
     log(`  ✓ review posted to PR #${prNumber}  ${formatVerdict(verdict)}`)
+    fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://github.com/${owner}/${repoName}/pull/${prNumber}` })
   } catch (err: unknown) {
-    const error = err as { message?: string }
-    log(`  ✗ review failed: ${error.message ?? 'unknown error'}`)
+    const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
+    log(`  ✗ review failed: ${message}`)
+    logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
     inFlight.delete(key)
@@ -73,16 +81,42 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
 export function runServe(configPath?: string) {
   const config = loadConfig(configPath)
-  const token = getGithubToken()
+  initLogger(config.logs)
+
+  process.on('uncaughtException', (err) => {
+    logUncaught('uncaughtException', err)
+    console.error(chalk.red(`\n✗ Uncaught exception: ${err.message}`))
+    process.exit(2)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logUncaught('unhandledRejection', reason)
+    console.error(chalk.red(`\n✗ Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`))
+    process.exit(2)
+  })
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err) {
+    logError({ command: 'serve', phase: 'auth' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  fileLog({ level: 'info', event: 'session_start', command: 'serve' })
   const webhookSecret = getWebhookSecret()
 
-  const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`)
+  const log = (msg: string) => {
+    console.log(`[${new Date().toISOString()}] ${msg}`)
+    fileLog({ level: 'info', event: 'message', message: msg })
+  }
 
   const server = createWebhookServer(
     config,
     webhookSecret,
     (event) => { void handlePR(event, config, token, log) },
     log,
+    fileLog,
   )
 
   server.listen(config.server.port, () => {
@@ -108,6 +142,7 @@ export function runServe(configPath?: string) {
 
   process.on('SIGINT', () => {
     console.log('\nShutting down...')
+    fileLog({ level: 'info', event: 'session_end', command: 'serve' })
     server.close(() => process.exit(0))
   })
 }

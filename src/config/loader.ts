@@ -26,12 +26,17 @@ export function loadConfig(explicitPath?: string): Config {
 }
 
 export function getGithubToken(): string {
-  // gh CLI keyring is always fresh — prefer it so a stale GITHUB_TOKEN env var
-  // never shadows an active gh auth login session
+  // Strip GITHUB_TOKEN / GH_TOKEN from the subprocess env before calling
+  // `gh auth token`. If those vars are present (even invalid/expired), gh
+  // treats them as the active credential and echoes them back — bypassing the
+  // keyring entirely and defeating the purpose of this call.
   try {
-    const ghToken = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
+    const ghToken = execSync('gh auth token 2>/dev/null', {
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },
+    }).trim()
     if (ghToken) return ghToken
-  } catch { /* gh not available or not authenticated */ }
+  } catch { /* gh not available or no keyring session */ }
 
   // Fall back to env var — useful in CI where gh is not set up
   const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN

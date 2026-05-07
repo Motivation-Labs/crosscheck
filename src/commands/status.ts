@@ -1,8 +1,10 @@
 import { execSync } from 'child_process'
+import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
 import { loadConfig } from '../config/loader.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
+import { getLogDir, getTodayLogPath } from '../lib/logger.js'
 
 function row(label: string, value: string, ok?: boolean) {
   const indicator = ok === undefined ? ' ' : ok ? chalk.green('✓') : chalk.red('✗')
@@ -20,8 +22,18 @@ export async function runStatus(configPath?: string) {
   row('codex', codexAuth.detail || 'authenticated', codexAuth.ok)
   row('claude', claudeAuth.detail || 'authenticated', claudeAuth.ok)
 
-  const ghToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  row('GITHUB_TOKEN', ghToken ? 'set' : 'missing', !!ghToken)
+  // Mirror getGithubToken() priority: gh CLI keyring first, env var as fallback
+  let ghTokenDetail = 'missing'
+  let ghTokenOk = false
+  try {
+    const ghCliOut = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
+    if (ghCliOut) { ghTokenDetail = 'set (gh auth login)'; ghTokenOk = true }
+  } catch { /* gh unavailable */ }
+  if (!ghTokenOk) {
+    const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+    if (envToken) { ghTokenDetail = 'set (env)'; ghTokenOk = true }
+  }
+  row('GITHUB_TOKEN', ghTokenDetail, ghTokenOk)
 
   const webhookSecret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
   row('WEBHOOK_SECRET', webhookSecret ? 'set' : 'missing (needed for serve/watch)', !!webhookSecret)
@@ -43,6 +55,21 @@ export async function runStatus(configPath?: string) {
 
   if (config.quality.focus.length > 0) {
     row('focus', config.quality.focus.join(', '))
+  }
+
+  // Logs
+  console.log()
+  console.log(chalk.dim('  Logs'))
+  row('enabled', String(config.logs.enabled), config.logs.enabled)
+  row('retention', `${config.logs.retention_days} days`)
+  row('log dir', getLogDir())
+  const todayLog = getTodayLogPath()
+  if (existsSync(todayLog)) {
+    const bytes = statSync(todayLog).size
+    const kb = (bytes / 1024).toFixed(1)
+    row('today', `${kb} KB — ${todayLog}`)
+  } else {
+    row('today', 'no log yet today')
   }
 
   // CLI versions

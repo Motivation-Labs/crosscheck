@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { execSync } from 'child_process'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
@@ -25,9 +26,22 @@ export function loadConfig(explicitPath?: string): Config {
 }
 
 export function getGithubToken(): string {
-  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  if (!token) throw new Error('GITHUB_TOKEN or GH_TOKEN environment variable is required')
-  return token
+  // gh CLI keyring is always fresh — prefer it so a stale GITHUB_TOKEN env var
+  // never shadows an active gh auth login session
+  try {
+    const ghToken = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
+    if (ghToken) return ghToken
+  } catch { /* gh not available or not authenticated */ }
+
+  // Fall back to env var — useful in CI where gh is not set up
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (envToken) return envToken
+
+  throw new Error(
+    'No GitHub token found.\n' +
+    '  Option 1: run: gh auth login\n' +
+    '  Option 2: set GITHUB_TOKEN in your shell profile or .env file'
+  )
 }
 
 const SECRET_FILE = join(homedir(), '.crosscheck', 'webhook-secret')

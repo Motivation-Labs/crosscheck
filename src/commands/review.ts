@@ -9,7 +9,7 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
-import type { Config } from '../config/schema.js'
+import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -19,7 +19,18 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
 
 export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
   const config = loadConfig(configPath)
-  const token = getGithubToken()
+  initLogger(config.logs)
+  fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err) {
+    logError({ command: 'review', phase: 'auth' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
   const octokit = createGithubClient(token)
 
   const parsed = parsePRUrl(prUrl)
@@ -32,6 +43,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const spinner = ora(`Fetching PR #${number}...`).start()
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
   spinner.succeed(`PR #${number}: ${pr.title}`)
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 
   let reviewer: 'claude' | 'codex' | null
 
@@ -53,40 +65,58 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const spinner2 = ora('Cloning repo for review...').start()
 
   try {
-    execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
+    execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
     execSync(`git fetch origin pull/${number}/head:pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
     execSync(`git checkout pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
+    try {
+      execSync(`git fetch origin ${pr.base.ref}:${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+    } catch {
+      fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref })
+    }
     spinner2.succeed('Repo ready')
 
     let reviewText: string
+    const reviewStart = Date.now()
+    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
+    let elapsed = 0
     const reviewSpinner = ora(`Running ${reviewer} review...`).start()
+    const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
 
-    if (reviewer === 'codex') {
-      reviewText = await runCodexReview(
-        tmpDir,
-        pr.base.ref,
-        pr.title,
-        config.quality,
-        config.vendors.codex.model,
-        config.vendors.codex.auth,
-        msg => reviewSpinner.text = msg,
-      )
-    } else {
-      reviewText = await runClaudeReview(
-        tmpDir,
-        pr.base.ref,
-        pr.title,
-        config.quality,
-        config.vendors.claude,
-        config.budget.per_review_usd,
-        msg => reviewSpinner.text = msg,
-      )
+    try {
+      if (reviewer === 'codex') {
+        reviewText = await runCodexReview(
+          tmpDir,
+          pr.base.ref,
+          pr.title,
+          config.quality,
+          config.vendors.codex.model,
+          config.vendors.codex.auth,
+          msg => { reviewSpinner.text = msg },
+        )
+      } else {
+        reviewText = await runClaudeReview(
+          tmpDir,
+          pr.base.ref,
+          pr.title,
+          config.quality,
+          config.vendors.claude,
+          config.budget.per_review_usd,
+          msg => { reviewSpinner.text = msg },
+        )
+      }
+    } finally {
+      clearInterval(elapsedTimer)
     }
 
-    reviewSpinner.succeed('Review complete')
+    reviewSpinner.succeed(`Review complete (${elapsed}s)`)
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, duration_ms: Date.now() - reviewStart })
     await postReviewComment(octokit, owner, repo, number, reviewText, reviewer)
+    fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
+  } catch (err: unknown) {
+    logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
+    throw err
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

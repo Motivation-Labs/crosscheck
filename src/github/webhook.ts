@@ -19,11 +19,18 @@ export interface PREvent {
   }
 }
 
+export interface WebhookFileLogEntry {
+  level: 'info' | 'warn' | 'error'
+  event: string
+  [key: string]: unknown
+}
+
 export function createWebhookServer(
   config: Config,
   webhookSecret: string,
   onPR: (event: PREvent) => void,
   onLog: (msg: string) => void,
+  onFileLog?: (entry: WebhookFileLogEntry) => void,
 ) {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const { pathname } = new URL(req.url ?? '/', `http://localhost`)
@@ -45,6 +52,7 @@ export function createWebhookServer(
     const signature = req.headers['x-hub-signature-256'] as string ?? ''
     if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
       onLog('⚠  Rejected request with invalid webhook signature')
+      onFileLog?.({ level: 'warn', event: 'webhook_sig_invalid', ip: req.socket.remoteAddress })
       res.writeHead(401).end()
       return
     }
@@ -59,6 +67,7 @@ export function createWebhookServer(
     try {
       body = JSON.parse(rawBody) as PREvent
     } catch {
+      onFileLog?.({ level: 'error', event: 'webhook_parse_error', ip: req.socket.remoteAddress })
       res.writeHead(400).end()
       return
     }

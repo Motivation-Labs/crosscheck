@@ -4,6 +4,21 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig } from '../config/schema.js'
 
+// Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
+function extractErrorSummary(stderr: string): string | undefined {
+  const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]
+    if (/^(fatal|error):/i.test(l)) return l
+  }
+  // Fall back to last non-boilerplate line
+  return lines.filter(l =>
+    !l.startsWith('---') &&
+    !/^(workdir|model|provider|approval|sandbox|reasoning|session\s+id):/i.test(l) &&
+    !/^OpenAI Codex/i.test(l)
+  ).at(-1)
+}
+
 // Models for API-key auth. When using ChatGPT subscription auth, omit model override.
 const TIER_MODELS_API: Record<string, string> = {
   fast: 'gpt-4o-mini',
@@ -32,11 +47,19 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  const instructionsNote = [focusNote, customNote].filter(Boolean).join('')
-  if (instructionsNote) {
-    mkdirSync(`${repoDir}/.codex`, { recursive: true })
-    writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
-  }
+  const verdictNote = [
+    'On the very last line of your response, write exactly one of:',
+    'VERDICT: APPROVE',
+    'VERDICT: NEEDS WORK',
+    'VERDICT: BLOCK',
+    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
+  ].join('\n')
+  // Prevent codex from running build/compile tools that are not installed in the
+  // temporary clone (no node_modules, no global tsc/jest/etc).
+  const noBuildToolsNote = 'Do not run tsc, npm, yarn, pnpm, jest, pytest, or any build, compile, or test commands. Base your review solely on reading source files and the diff.'
+  const instructionsNote = [focusNote, customNote, noBuildToolsNote, verdictNote].filter(Boolean).join('\n\n')
+  mkdirSync(`${repoDir}/.codex`, { recursive: true })
+  writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 
   try {
     const modelArgs = model ? ['-c', `model="${model}"`] : []
@@ -48,14 +71,25 @@ export async function runCodexReview(
       {
         cwd: repoDir,
         timeout: 120_000,
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
+          PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+        },
       },
     )
 
     return result.stdout.trim() || result.stderr.trim()
   } catch (err: unknown) {
-    const error = err as { stdout?: string; stderr?: string; message?: string }
-    throw new Error(`codex review failed: ${error.stderr ?? error.message ?? 'unknown error'}`)
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const rawStderr = execa.stderr ?? ''
+    const summary = extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error'
+    const thrown = Object.assign(new Error(`codex: ${summary}`), {
+      exitCode: execa.exitCode,
+      timedOut: execa.timedOut,
+      stderr: rawStderr,
+    })
+    throw thrown
   } finally {
     try { rmSync(tmpFile, { force: true, recursive: true }) } catch { /* ignore */ }
   }

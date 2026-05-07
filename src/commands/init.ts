@@ -33,18 +33,27 @@ async function runChecks(): Promise<CheckResult[]> {
     results.push({ label: 'claude CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @anthropic-ai/claude-code' })
   }
 
-  // Check gh CLI
+  // Check gh CLI — authenticated if stored credentials OR GITHUB_TOKEN env var is set
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  let ghAuthed = false
   try {
     const version = execSync('gh --version 2>&1', { encoding: 'utf8' }).split('\n')[0]
-    const auth = execSync('gh auth status 2>&1', { encoding: 'utf8' })
-    results.push({ label: 'gh CLI', ok: auth.includes('Logged in'), detail: version })
+    // gh auth status exits non-zero when GITHUB_TOKEN env var is set — handle separately
+    let authOutput = ''
+    try { authOutput = execSync('gh auth status 2>&1', { encoding: 'utf8' }) } catch { /* GITHUB_TOKEN in use */ }
+    const keyringAuthed = authOutput.includes('Logged in')
+    ghAuthed = keyringAuthed || !!envToken
+    const detail = !!envToken && !keyringAuthed
+      ? `${version} — authenticated via GITHUB_TOKEN`
+      : version
+    results.push({ label: 'gh CLI', ok: ghAuthed, detail, fix: ghAuthed ? undefined : 'Run: gh auth login' })
   } catch {
-    results.push({ label: 'gh CLI', ok: false, detail: 'not found or not authed', fix: 'Install: brew install gh && gh auth login' })
+    results.push({ label: 'gh CLI', ok: false, detail: 'not found', fix: 'Install: brew install gh && gh auth login' })
   }
-
-  // Check GITHUB_TOKEN
-  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  results.push({ label: 'GITHUB_TOKEN', ok: !!token, detail: token ? 'set' : 'missing', fix: 'Set GITHUB_TOKEN in your shell profile' })
+  // Token is resolvable if env var is set OR if gh keyring has a token (getGithubToken() falls back to `gh auth token`)
+  const tokenResolvable = !!envToken || ghAuthed
+  const tokenDetail = envToken ? 'set via env' : ghAuthed ? 'via gh auth login' : 'missing'
+  results.push({ label: 'GITHUB_TOKEN', ok: tokenResolvable, detail: tokenDetail, fix: tokenResolvable ? undefined : 'Set GITHUB_TOKEN or run: gh auth login' })
 
   // Check WEBHOOK_SECRET — auto-generated if missing, so always ok
   const fromEnv = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET

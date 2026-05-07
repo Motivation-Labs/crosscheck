@@ -40,6 +40,11 @@ export async function runClaudeReview(
     customLine,
     'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
     'Be concise. Skip praise.',
+    'On the very last line of your response, write exactly one of:',
+    'VERDICT: APPROVE',
+    'VERDICT: NEEDS WORK',
+    'VERDICT: BLOCK',
+    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
   ].filter(Boolean).join('\n')
 
   const outputFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
@@ -65,8 +70,15 @@ export async function runClaudeReview(
     })
     return readFileSync(outputFile, 'utf8').trim()
   } catch (err: unknown) {
-    const error = err as { stdout?: string; stderr?: string; message?: string }
-    throw new Error(`claude review failed: ${error.stderr ?? error.message ?? 'unknown error'}`)
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const rawStderr = execa.stderr?.trim() ?? ''
+    const summary = (rawStderr.split('\n').filter(Boolean).at(-1)) ?? execa.message ?? 'unknown error'
+    const thrown = Object.assign(new Error(`claude: ${summary}`), {
+      exitCode: execa.exitCode,
+      timedOut: execa.timedOut,
+      stderr: rawStderr,
+    })
+    throw thrown
   }
 }
 

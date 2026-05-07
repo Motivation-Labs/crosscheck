@@ -42,11 +42,10 @@ budget:
   codex_monthly_usd: 20     # null = unlimited (use if on subscription)
   per_review_usd: 2.00      # hard stop per single review
 
-# ─── Repos ───────────────────────────────────────────────────────────────────
-# Omit entirely to auto-detect from `git remote` (useful in watch mode)
-repos:
-  - owner: codatta
-    name: my-repo
+# ── Orgs — covers all repos in each org with one webhook ─────────────────────
+orgs:
+  - motivation-labs
+  - codatta
 
 # ─── Routing (cross-vendor mode only) ────────────────────────────────────────
 # Which AI reviews PRs from which author patterns

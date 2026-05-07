@@ -52,7 +52,7 @@ export async function registerRepoWebhook(
   })
   if (!res.ok) {
     const err = await res.json() as { message?: string }
-    throw new Error(`Failed to register webhook: ${err.message ?? res.status}`)
+    throw new Error(`Failed to register repo webhook [${res.status}]: ${err.message ?? res.statusText}`)
   }
   const data = await res.json() as { id: number }
   return data.id
@@ -92,7 +92,7 @@ export async function registerOrgWebhook(
   })
   if (!res.ok) {
     const err = await res.json() as { message?: string }
-    throw new Error(`Failed to register org webhook: ${err.message ?? res.status}`)
+    throw new Error(`Failed to register org webhook [${res.status}]: ${err.message ?? res.statusText}`)
   }
   const data = await res.json() as { id: number }
   return data.id

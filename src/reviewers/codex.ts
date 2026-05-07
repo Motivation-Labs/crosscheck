@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig } from '../config/schema.js'
+import { readInstructions } from '../lib/instructions.js'
 
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
 function extractErrorSummary(stderr: string): string | undefined {
@@ -47,17 +48,9 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  const verdictNote = [
-    'On the very last line of your response, write exactly one of:',
-    'VERDICT: APPROVE',
-    'VERDICT: NEEDS WORK',
-    'VERDICT: BLOCK',
-    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
-  ].join('\n')
-  // Prevent codex from running build/compile tools that are not installed in the
-  // temporary clone (no node_modules, no global tsc/jest/etc).
-  const noBuildToolsNote = 'Do not run tsc, npm, yarn, pnpm, jest, pytest, or any build, compile, or test commands. Base your review solely on reading source files and the diff.'
-  const instructionsNote = [focusNote, customNote, noBuildToolsNote, verdictNote].filter(Boolean).join('\n\n')
+  // Adaptive instructions from ~/.crosscheck/instructions.md (managed by `crosscheck optimize`)
+  const adaptiveInstructions = readInstructions(repoDir)
+  const instructionsNote = [focusNote, customNote, adaptiveInstructions].filter(Boolean).join('\n\n')
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 

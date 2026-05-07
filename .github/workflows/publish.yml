@@ -45,6 +45,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # ── Notify — email approval request on version tag ──────────────────────────
+  notify:
+    name: Notify approval required
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send approval notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[crosscheck] ${{ github.ref_name }} is waiting for your approval"
+          to: yi@inductive.network
+          from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            crosscheck ${{ github.ref_name }} has been tagged and is waiting for production deployment approval.
+
+            Approve here:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Once approved, the workflow will publish @motivation-labs/crosscheck@${{ github.ref_name }} to npm and create a GitHub Release.
+
   # ── Production — publish @latest on version tag ──────────────────────────────
   production:
     name: Publish @latest

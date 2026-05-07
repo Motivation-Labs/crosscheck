@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
+import { readInstructions } from '../lib/instructions.js'
 
 const TIER_MODELS: Record<string, string> = {
   fast: 'claude-haiku-4-5-20251001',
@@ -33,18 +34,17 @@ export async function runClaudeReview(
     : ''
   const customLine = quality.custom_prompt ?? ''
 
+  // Adaptive instructions from ~/.crosscheck/instructions.md (managed by `crosscheck optimize`)
+  const adaptiveInstructions = readInstructions(repoDir)
+
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
     `The branch \`${baseBranch}\` is the base. Review only the changes introduced in this PR.`,
     focusLine,
     customLine,
+    adaptiveInstructions,
     'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
     'Be concise. Skip praise.',
-    'On the very last line of your response, write exactly one of:',
-    'VERDICT: APPROVE',
-    'VERDICT: NEEDS WORK',
-    'VERDICT: BLOCK',
-    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
   ].filter(Boolean).join('\n')
 
   const outputFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')

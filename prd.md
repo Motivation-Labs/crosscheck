@@ -15,12 +15,14 @@ Published as `@motivation-labs/crosscheck` on npm.
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
 - **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
 - **Org-level coverage** — one webhook covers all repos in an org
+- **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
 
 ## Non-Goals
 
 - Not a replacement for human code review
 - Not a merge gate — posts comments, does not block PRs
 - Not a hosted service — runs on your machine
+- Not a one-size-fits-all reviewer — instructions should adapt to your stack and team conventions
 
 ---
 
@@ -72,6 +74,94 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 ## Build Queue
 
 ### 🔜 Next Up
+
+- [ ] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
+  - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.
+  - **Acceptance Criteria:**
+    - `crosscheck diagnose` reads all log files in `~/.crosscheck/logs/`; accepts `--since YYYY-MM-DD` to limit range.
+    - Groups `error` entries by pattern: `command_not_found` (which command, which reviewer), `base_branch_missing` (which branch), `timeout`, `auth_failure`, `other`.
+    - Reports review outcome distribution: APPROVE / NEEDS WORK / BLOCK counts and percentages.
+    - Reports per-reviewer success rate (attempts vs successes).
+    - Reports repos and file types seen in reviewed PRs (for language detection in `optimize`).
+    - Produces a `suggestions[]` array: each suggestion has `type` (`add_constraint`, `investigate`, `config_change`), a human-readable `reason`, and an optional `instruction` string ready to paste.
+    - `--json` flag outputs the full structured report as JSON to stdout; default outputs a formatted terminal report.
+    - Exit 0 always (it is a reporting tool, not a gate).
+  - **Technical Notes:**
+    - New file: `src/commands/diagnose.ts`.
+    - Parser reads NDJSON line-by-line; tolerates malformed lines (skip + count).
+    - Language detection: scan `repo` field in log entries; for each unique repo, check if a `package.json` / `tsconfig.json` / `requirements.txt` / `Cargo.toml` / `go.mod` / `pom.xml` exists in the clone tmpDir path logged with the entry (or fall back to heuristics from the PR diff path names).
+    - Suggestion rules (seeded set — grows over time via AGENT.md improvements):
+      - `command_not_found: tsc|npx|jest|vitest` → suggest adding "Do not run tsc / npm / jest." to instructions
+      - `command_not_found: pytest|pip` → suggest Python constraint
+      - `command_not_found: cargo` → suggest Rust constraint
+      - `base_branch_missing` → flag as known infrastructure bug, link to fix
+      - `timeout` → suggest increasing `timeout_ms` in config or reducing quality tier
+    - Wire into `cli.ts` as `crosscheck diagnose [--json] [--since <date>]`.
+  - **Tests Required:** parse a fixture NDJSON file with known errors → correct pattern counts; `--json` output is valid JSON matching schema; `--since` filters correctly; tolerates empty log dir.
+
+- [ ] **`crosscheck optimize`** — run `diagnose` internally, select the best available local AI agent, feed the report into it using `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
+  - **User:** Anyone who wants crosscheck to adapt to their repos and fix recurring review failures without manual config editing.
+  - **Agent selection — how optimize picks which AI to use:**
+    The agent used to run `optimize` is chosen dynamically from the vendors already configured in `crosscheck.config.yml`, not hardcoded. This means optimize works regardless of whether the user has Claude, Codex, or both.
+
+    Selection logic (`selectOptimizeAgent(config, diagnoseReport)`):
+    1. Collect `enabled` vendors: those with `config.vendors[v].enabled === true`.
+    2. If only one vendor is enabled → use it.
+    3. If both are enabled → look at `diagnoseReport.reviewer_performance`: pick the vendor with the higher `successRate` (successes ÷ attempts) over the log period.
+    4. If rates are equal or there is no log data → prefer `claude` (handles the long-form AGENT.md harness with higher fidelity).
+    5. `--agent claude|codex` flag overrides all of the above.
+    6. If no vendor is enabled or the selected vendor's CLI is not installed → exit 1 with a clear message naming the missing CLI.
+
+    Examples:
+    - Config has only `codex: enabled: true` → uses codex, no claude needed.
+    - Config has both enabled; codex has 80% success rate vs claude's 50% → uses codex.
+    - Config has both enabled; no log data → uses claude.
+    - User passes `--agent codex` → uses codex regardless.
+
+  - **Acceptance Criteria:**
+    - `crosscheck optimize` (no flags) runs diagnose, selects the agent per the logic above, generates improved instructions, prints a unified diff of old vs new `instructions.md`, and exits without writing.
+    - `crosscheck optimize --apply` writes the improved `~/.crosscheck/instructions.md`.
+    - `crosscheck optimize --dry-run` is a synonym for the default no-flag behavior.
+    - `crosscheck optimize --agent <claude|codex>` forces a specific agent.
+    - Terminal output shows which agent was selected and why: `  agent  codex (success rate 80% > claude 50%)`.
+    - On first run (no existing `instructions.md`), the diff shows the full new file as additions.
+    - If `diagnose` finds no errors and no suggestions, optimize still runs and may refine wording; it never produces an empty instructions file (preserves at minimum the VERDICT format constraint).
+    - Respects a project-level `AGENT.md` override at `{cwd}/AGENT.md` or `{cwd}/.crosscheck/AGENT.md`; falls back to the bundled `AGENT.md`.
+  - **Technical Notes:**
+    - New file: `src/commands/optimize.ts`.
+    - `selectOptimizeAgent(config, report)` → `'claude' | 'codex'` — pure function, easy to test.
+    - Agent invocation:
+      - `claude`: `claude --print "<agentMd>\n\n<diagnoseJson>\n\nCurrent instructions.md:\n<current>"`
+      - `codex`: `codex review` cannot be reused here; instead run `codex --print` (or equivalent non-interactive mode) with the same prompt. If codex does not support `--print`, fall back to the next available agent and log a warning.
+    - AGENT.md lookup order: `{cwd}/AGENT.md` → `{cwd}/.crosscheck/AGENT.md` → `{packageRoot}/AGENT.md`.
+    - Diff: small inline unified-diff helper (no new dependency).
+    - Wire into `cli.ts` as `crosscheck optimize [--apply] [--dry-run] [--agent <claude|codex>] [--since <date>]`.
+  - **Tests Required:** `selectOptimizeAgent` with only codex enabled → returns `'codex'`; with both enabled and codex higher success rate → returns `'codex'`; with both enabled and no log data → returns `'claude'`; `--agent` flag overrides; diff rendering shows +/- lines; AGENT.md lookup respects override order.
+
+- [ ] **`AGENT.md` — bundled optimize harness** — ship a well-crafted `AGENT.md` at the repo root that guides claude during `optimize`. This file defines how to read diagnose output, detect languages, write good constraints, and stay within quality guardrails.
+  - **User:** crosscheck itself (read by `optimize`); power users who want to fork and customize the optimization logic.
+  - **Acceptance Criteria:**
+    - `AGENT.md` exists at the project root and is included in the npm package (`files` in `package.json`).
+    - Contains: purpose, input format spec, output format spec, language-detection mapping table, rules for good/bad instructions, VERDICT format preservation rule, reversibility rule (remove stale constraints), and worked examples.
+    - Produces instructions that pass `npm run typecheck` after being applied (i.e., no instructions that break the `.codex/instructions` format).
+    - Can be overridden by placing `AGENT.md` or `.crosscheck/AGENT.md` in the project root.
+  - **Technical Notes:**
+    - File is plain Markdown; no build step.
+    - `optimize.ts` reads it at runtime via `fs.readFileSync` resolved from `import.meta.url` (package root).
+    - Keep it under 400 lines — longer files reduce claude's instruction-following accuracy.
+
+- [ ] **Adaptive instructions file** — both `codex.ts` and `claude.ts` read `~/.crosscheck/instructions.md` and append its content to the review prompt / `.codex/instructions`. Seeded with safe defaults on first run. Replaces the hardcoded `noBuildToolsNote` in `codex.ts`.
+  - **User:** Anyone running `watch`/`serve` — they get out-of-box sane constraints and can improve them via `optimize`.
+  - **Acceptance Criteria:**
+    - `~/.crosscheck/instructions.md` is created on first review if it doesn't exist, seeded with the default no-build-tools constraint.
+    - Project-level `.crosscheck/instructions.md` overrides the user-level file if present.
+    - Both `codex.ts` and `claude.ts` append the instructions content; neither has hardcoded constraint strings.
+    - If the file is empty or missing, reviews still work (graceful degradation).
+    - `crosscheck status` shows the instructions file path and whether it exists.
+  - **Technical Notes:**
+    - New helper `src/lib/instructions.ts`: `readInstructions(repoDir?: string): string` — checks project-level then user-level; seeds default if neither exists; returns empty string on any read error.
+    - Default seed content: the current `noBuildToolsNote` plus a header comment explaining the file is managed by `crosscheck optimize` but can be edited manually.
+    - Remove `noBuildToolsNote` constant from `codex.ts`.
 
 - [ ] **Local debug log file** — persist structured runtime logs to `~/.crosscheck/logs/` for debugging. Enabled by default; configurable retention (default 7 days, max 30).
   - **User:** Anyone running `watch`/`serve` in production or debugging a failed review.

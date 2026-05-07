@@ -37,12 +37,14 @@ async function runChecks(): Promise<CheckResult[]> {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
   try {
     const version = execSync('gh --version 2>&1', { encoding: 'utf8' }).split('\n')[0]
-    const auth = execSync('gh auth status 2>&1', { encoding: 'utf8' })
-    const authed = auth.includes('Logged in') || !!token
-    const detail = !!token && !auth.includes('Logged in')
+    // gh auth status exits non-zero when GITHUB_TOKEN env var is set — handle separately
+    let authOutput = ''
+    try { authOutput = execSync('gh auth status 2>&1', { encoding: 'utf8' }) } catch { /* GITHUB_TOKEN in use */ }
+    const authed = authOutput.includes('Logged in') || !!token
+    const detail = !!token && !authOutput.includes('Logged in')
       ? `${version} — authenticated via GITHUB_TOKEN`
       : version
-    results.push({ label: 'gh CLI', ok: authed, detail, fix: authed ? undefined : 'Run: brew install gh && gh auth login' })
+    results.push({ label: 'gh CLI', ok: authed, detail, fix: authed ? undefined : 'Run: gh auth login' })
   } catch {
     results.push({ label: 'gh CLI', ok: false, detail: 'not found', fix: 'Install: brew install gh && gh auth login' })
   }

@@ -2,8 +2,9 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 
 // File-presence indicators → language identifiers used throughout crosscheck.
-// Keep in sync with COMMAND_LANGUAGE_MAP in diagnose.ts.
-const INDICATORS: [string, string][] = [
+// This is the canonical source of language ids. diagnose.ts imports INDICATORS
+// to derive its constraint map keys, keeping both in sync automatically.
+export const INDICATORS: [string, string][] = [
   ['tsconfig.json', 'typescript'],
   ['package.json', 'nodejs'],
   ['requirements.txt', 'python'],

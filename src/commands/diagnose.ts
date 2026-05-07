@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
+import { INDICATORS } from '../lib/languages.js'
 
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 
@@ -50,17 +51,19 @@ const COMMAND_LANGUAGE_MAP: Record<string, string[]> = {
   rspec: ['ruby'], bundle: ['ruby'],
 }
 
-// Language → constraint instruction
+// Language id → constraint instruction.
+// Keys must be a subset of the language ids produced by INDICATORS and COMMAND_LANGUAGE_MAP.
+// "jest" was a dead key — jest/vitest/mocha all map to "nodejs" in COMMAND_LANGUAGE_MAP.
 const LANGUAGE_CONSTRAINT_MAP: Record<string, string> = {
   typescript: 'Do not run tsc, ts-node, or tsx.',
-  nodejs: 'Do not run npm, npx, yarn, or pnpm.',
-  jest: 'Do not run jest, vitest, or mocha.',
+  nodejs: 'Do not run npm, npx, yarn, pnpm, jest, vitest, or mocha.',
   python: 'Do not run pytest, pip, or python scripts.',
   rust: 'Do not run cargo build or cargo test.',
   golang: 'Do not run go build or go test.',
   java: 'Do not run mvn or gradle.',
   ruby: 'Do not run bundle exec or rspec.',
 }
+
 
 interface LogEntry {
   ts: string
@@ -203,8 +206,10 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
       const msg = e.message ?? ''
       const { pattern, command, branch } = classifyError(msg)
 
-      const reviewerMatch = msg.match(/^(codex|claude):/i)
-      const reviewer = reviewerMatch ? reviewerMatch[1].toLowerCase() : undefined
+      // Derive reviewer from the active review_started entry for this repo+PR.
+      // The message itself never starts with "codex:" or "claude:" — that regex was dead.
+      const key = `${e.repo}#${e.pr}`
+      const reviewer = started.get(key)?.reviewer
 
       const mapKey = pattern === 'command_not_found' ? `cmd:${command}` : pattern
       if (errorPatterns.has(mapKey)) {
@@ -226,8 +231,9 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
 
   const totalReviews = started.size
   const successfulReviews = completed.size
-  // Any review_started without a review_complete is a failure
-  const failedReviews = totalReviews - successfulReviews
+  // Guard against negative count: review_complete can exceed review_started when
+  // --since truncates the log window and some review_started events fall outside it.
+  const failedReviews = Math.max(0, totalReviews - successfulReviews)
 
   const reviewer_performance: Record<string, ReviewerPerf> = {}
   for (const [name, stats] of reviewerStats.entries()) {

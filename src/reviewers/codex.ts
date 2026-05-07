@@ -54,7 +54,10 @@ export async function runCodexReview(
     'VERDICT: BLOCK',
     'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
   ].join('\n')
-  const instructionsNote = [focusNote, customNote, verdictNote].filter(Boolean).join('\n\n')
+  // Prevent codex from running build/compile tools that are not installed in the
+  // temporary clone (no node_modules, no global tsc/jest/etc).
+  const noBuildToolsNote = 'Do not run tsc, npm, yarn, pnpm, jest, pytest, or any build, compile, or test commands. Base your review solely on reading source files and the diff.'
+  const instructionsNote = [focusNote, customNote, noBuildToolsNote, verdictNote].filter(Boolean).join('\n\n')
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 
@@ -68,7 +71,11 @@ export async function runCodexReview(
       {
         cwd: repoDir,
         timeout: 120_000,
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
+          PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+        },
       },
     )
 

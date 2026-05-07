@@ -1,0 +1,13 @@
+{"ts":"2026-01-10T10:00:00Z","level":"info","event":"session_start","command":"watch"}
+{"ts":"2026-01-10T10:01:00Z","level":"info","event":"review_started","repo":"acme/api","pr":1,"reviewer":"codex","languages":["typescript","nodejs"]}
+{"ts":"2026-01-10T10:03:00Z","level":"error","event":"error","repo":"acme/api","pr":1,"message":"sh: tsc: command not found"}
+{"ts":"2026-01-10T10:05:00Z","level":"info","event":"review_started","repo":"acme/api","pr":2,"reviewer":"claude","languages":["typescript","nodejs"]}
+{"ts":"2026-01-10T10:07:00Z","level":"info","event":"review_complete","repo":"acme/api","pr":2,"reviewer":"claude","verdict":"APPROVE","duration_ms":120000}
+{"ts":"2026-01-10T10:08:00Z","level":"info","event":"comment_posted","repo":"acme/api","pr":2}
+{"ts":"2026-01-10T10:10:00Z","level":"info","event":"review_started","repo":"acme/api","pr":3,"reviewer":"codex","languages":["typescript"]}
+{"ts":"2026-01-10T10:12:00Z","level":"error","event":"error","repo":"acme/api","pr":3,"message":"sh: jest: command not found"}
+{"ts":"2026-01-10T10:15:00Z","level":"info","event":"review_started","repo":"acme/web","pr":4,"reviewer":"claude","languages":["nodejs"]}
+{"ts":"2026-01-10T10:17:00Z","level":"info","event":"review_complete","repo":"acme/web","pr":4,"reviewer":"claude","verdict":"NEEDS_WORK","duration_ms":90000}
+{"ts":"2026-01-10T10:18:00Z","level":"info","event":"review_started","repo":"acme/api","pr":5,"reviewer":"codex","languages":["typescript","nodejs"]}
+{"ts":"2026-01-10T10:20:00Z","level":"info","event":"review_complete","repo":"acme/api","pr":5,"reviewer":"codex","verdict":"BLOCK","duration_ms":85000}
+{"ts":"2026-01-10T10:21:00Z","level":"info","event":"session_end","command":"watch"}

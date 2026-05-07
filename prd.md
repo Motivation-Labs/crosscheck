@@ -75,7 +75,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ### 🔜 Next Up
 
-- [ ] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
+- [x] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
   - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.
   - **Acceptance Criteria:**
     - `crosscheck diagnose` reads all log files in `~/.crosscheck/logs/`; accepts `--since YYYY-MM-DD` to limit range.
@@ -99,7 +99,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Wire into `cli.ts` as `crosscheck diagnose [--json] [--since <date>]`.
   - **Tests Required:** parse a fixture NDJSON file with known errors → correct pattern counts; `--json` output is valid JSON matching schema; `--since` filters correctly; tolerates empty log dir.
 
-- [ ] **`crosscheck optimize`** — run `diagnose` internally, select the best available local AI agent, feed the report into it using `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
+- [x] **`crosscheck optimize`** — run `diagnose` internally, select the best available local AI agent, feed the report into it using `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
   - **User:** Anyone who wants crosscheck to adapt to their repos and fix recurring review failures without manual config editing.
   - **Agent selection — how optimize picks which AI to use:**
     The agent used to run `optimize` is chosen dynamically from the vendors already configured in `crosscheck.config.yml`, not hardcoded. This means optimize works regardless of whether the user has Claude, Codex, or both.
@@ -138,7 +138,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Wire into `cli.ts` as `crosscheck optimize [--apply] [--dry-run] [--agent <claude|codex>] [--since <date>]`.
   - **Tests Required:** `selectOptimizeAgent` with only codex enabled → returns `'codex'`; with both enabled and codex higher success rate → returns `'codex'`; with both enabled and no log data → returns `'claude'`; `--agent` flag overrides; diff rendering shows +/- lines; AGENT.md lookup respects override order.
 
-- [ ] **`AGENT.md` — bundled optimize harness** — ship a well-crafted `AGENT.md` at the repo root that guides claude during `optimize`. This file defines how to read diagnose output, detect languages, write good constraints, and stay within quality guardrails.
+- [x] **`AGENT.md` — bundled optimize harness** — ship a well-crafted `AGENT.md` at the repo root that guides claude during `optimize`. This file defines how to read diagnose output, detect languages, write good constraints, and stay within quality guardrails.
   - **User:** crosscheck itself (read by `optimize`); power users who want to fork and customize the optimization logic.
   - **Acceptance Criteria:**
     - `AGENT.md` exists at the project root and is included in the npm package (`files` in `package.json`).
@@ -150,7 +150,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - `optimize.ts` reads it at runtime via `fs.readFileSync` resolved from `import.meta.url` (package root).
     - Keep it under 400 lines — longer files reduce claude's instruction-following accuracy.
 
-- [ ] **Adaptive instructions file** — both `codex.ts` and `claude.ts` read `~/.crosscheck/instructions.md` and append its content to the review prompt / `.codex/instructions`. Seeded with safe defaults on first run. Replaces the hardcoded `noBuildToolsNote` in `codex.ts`.
+- [x] **Adaptive instructions file** — both `codex.ts` and `claude.ts` read `~/.crosscheck/instructions.md` and append its content to the review prompt / `.codex/instructions`. Seeded with safe defaults on first run. Replaces the hardcoded `noBuildToolsNote` in `codex.ts`.
   - **User:** Anyone running `watch`/`serve` — they get out-of-box sane constraints and can improve them via `optimize`.
   - **Acceptance Criteria:**
     - `~/.crosscheck/instructions.md` is created on first review if it doesn't exist, seeded with the default no-build-tools constraint.
@@ -163,7 +163,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Default seed content: the current `noBuildToolsNote` plus a header comment explaining the file is managed by `crosscheck optimize` but can be edited manually.
     - Remove `noBuildToolsNote` constant from `codex.ts`.
 
-- [ ] **Local debug log file** — persist structured runtime logs to `~/.crosscheck/logs/` for debugging. Enabled by default; configurable retention (default 7 days, max 30).
+- [x] **Local debug log file** — persist structured runtime logs to `~/.crosscheck/logs/` for debugging. Enabled by default; configurable retention (default 7 days, max 30).
   - **User:** Anyone running `watch`/`serve` in production or debugging a failed review.
   - **Acceptance Criteria:**
     - Logs written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` (one file per UTC day, NDJSON format — one JSON object per line).

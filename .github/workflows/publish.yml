@@ -1,25 +1,16 @@
 name: Publish
 
+# Handles only the @beta prerelease path (staging branch).
+# @latest releases are fully automated by release.yml on merges to main.
+
 on:
   push:
     branches: [staging]     # → @beta publish
-    tags: ['v*']            # → @latest publish
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Target environment'
-        required: true
-        default: staging
-        type: choice
-        options: [staging, production]
 
 jobs:
-  # ── Staging — publish @beta on every merge to staging ────────────────────────
   staging:
     name: Publish @beta
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/staging') ||
-      (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging')
     runs-on: ubuntu-latest
     environment: staging
 
@@ -44,63 +35,3 @@ jobs:
         run: npm publish --tag beta --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  # ── Notify — email approval request on version tag ──────────────────────────
-  notify:
-    name: Notify approval required
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Send approval notification
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "[crosscheck] ${{ github.ref_name }} is waiting for your approval"
-          to: ${{ secrets.MAIL_USERNAME }}
-          from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
-          body: |
-            crosscheck ${{ github.ref_name }} has been tagged and is waiting for production deployment approval.
-
-            Approve here:
-            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            Once approved, the workflow will publish @motivation-labs/crosscheck@${{ github.ref_name }} to npm and create a GitHub Release.
-
-  # ── Production — publish @latest on version tag ──────────────────────────────
-  production:
-    name: Publish @latest
-    if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')
-    runs-on: ubuntu-latest
-    environment: production        # requires manual approval in GitHub Settings
-    permissions:
-      contents: write              # required by softprops/action-gh-release to create releases
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-          cache: npm
-
-      - run: npm ci
-      - run: npm run build
-
-      - name: Publish to npm @latest
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: CHANGELOG.md
-          generate_release_notes: true

@@ -4,6 +4,7 @@ import { runInit } from './commands/init.js'
 import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
 import { runReview } from './commands/review.js'
+import { runStatus } from './commands/status.js'
 
 const program = new Command()
 
@@ -36,5 +37,11 @@ program
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
   .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
+
+program
+  .command('status')
+  .description('Show auth state, config summary, and CLI versions')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { config?: string }) => void runStatus(opts.config))
 
 program.parse()

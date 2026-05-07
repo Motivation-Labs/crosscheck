@@ -1,5 +1,6 @@
 import { execSync } from 'child_process'
 import chalk from 'chalk'
+import SmeeClient from 'smee-client'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
@@ -19,6 +20,49 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
   return null
 }
 
+async function createSmeeChannel(): Promise<string> {
+  const res = await fetch('https://smee.io/new', { method: 'HEAD', redirect: 'manual' })
+  const location = res.headers.get('location')
+  if (!location) throw new Error('Could not create smee.io channel')
+  return location
+}
+
+async function registerGithubWebhook(
+  owner: string,
+  repo: string,
+  webhookUrl: string,
+  secret: string,
+  token: string,
+): Promise<number> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: 'web',
+      active: true,
+      events: ['pull_request'],
+      config: { url: webhookUrl, content_type: 'json', secret },
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to register webhook: ${err.message ?? res.status}`)
+  }
+  const data = await res.json() as { id: number }
+  return data.id
+}
+
+async function deleteGithubWebhook(owner: string, repo: string, hookId: number, token: string) {
+  await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${hookId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+}
+
 export async function runWatch(configPath?: string) {
   const config = loadConfig(configPath)
   const token = getGithubToken()
@@ -26,11 +70,14 @@ export async function runWatch(configPath?: string) {
 
   const log = (msg: string) => console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
 
-  // Auto-detect repo from git remote
   const currentRepo = detectCurrentRepo()
-  if (currentRepo) {
-    log(`Detected repo: ${chalk.cyan(`${currentRepo.owner}/${currentRepo.repo}`)}`)
+  if (!currentRepo) {
+    console.error(chalk.red('Could not detect a GitHub repo from git remote. Run inside a git repo or set repos in config.'))
+    process.exit(1)
   }
+
+  // PR deduplication — skip if already reviewing this PR+SHA
+  const inFlight = new Set<string>()
 
   // Start local webhook server
   const server = createWebhookServer(
@@ -41,6 +88,13 @@ export async function runWatch(configPath?: string) {
       const owner = repo.owner.login
       const repoName = repo.name
       const prNumber = event.number
+      const key = `${owner}/${repoName}#${prNumber}@${pr.head.sha}`
+
+      if (inFlight.has(key)) {
+        log(chalk.dim(`PR #${prNumber} already in review — skipping duplicate event`))
+        return
+      }
+      inFlight.add(key)
 
       log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${pr.title}`)
       const origin = detectPROrigin(pr.body ?? '', config)
@@ -48,6 +102,7 @@ export async function runWatch(configPath?: string) {
 
       if (!reviewer) {
         log(chalk.dim(`  origin=${origin}, no reviewer — skipping`))
+        inFlight.delete(key)
         return
       }
 
@@ -69,30 +124,58 @@ export async function runWatch(configPath?: string) {
 
         const octokit = createGithubClient(token)
         await postReviewComment(octokit, owner, repoName, prNumber, reviewText, reviewer)
-        log(chalk.green(`  ✓ review posted`))
+        log(chalk.green(`  ✓ review posted to PR #${prNumber}`))
       } catch (err: unknown) {
         const error = err as { message?: string }
         log(chalk.red(`  ✗ ${error.message ?? 'unknown error'}`))
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
+        inFlight.delete(key)
       }
     },
     log,
   )
 
-  server.listen(config.server.port, () => {
-    console.log(chalk.bold('\ncrosscheck watch\n'))
-    console.log(`  mode      ${chalk.cyan(config.mode)}`)
-    console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
-    console.log(`  port      ${chalk.cyan(String(config.server.port))}\n`)
+  await new Promise<void>(resolve => server.listen(config.server.port, resolve))
 
-    console.log(chalk.dim('To receive GitHub webhooks locally, use smee.io:'))
-    console.log(chalk.dim(`  npx smee -u https://smee.io/<channel> -t http://localhost:${config.server.port}${config.server.webhook_path}\n`))
-    console.log(chalk.dim('Waiting for PR events...\n'))
-  })
+  // Create smee.io channel and start proxy
+  log('Creating smee.io tunnel...')
+  const smeeUrl = await createSmeeChannel()
+  const target = `http://localhost:${config.server.port}${config.server.webhook_path}`
 
-  process.on('SIGINT', () => {
-    console.log('\nStopping watch...')
+  const smee = new SmeeClient({ source: smeeUrl, target, logger: { info: () => {}, error: console.error } })
+  const smeeEvents = smee.start()
+
+  // Register webhook on GitHub
+  log(`Registering webhook on ${currentRepo.owner}/${currentRepo.repo}...`)
+  let hookId: number | null = null
+  try {
+    hookId = await registerGithubWebhook(currentRepo.owner, currentRepo.repo, smeeUrl, webhookSecret, token)
+    log(chalk.green(`Webhook registered (id ${hookId})`))
+  } catch (err: unknown) {
+    const error = err as { message?: string }
+    log(chalk.yellow(`Could not auto-register webhook: ${error.message ?? 'unknown'}`))
+    log(chalk.dim(`Register manually: ${smeeUrl} → ${target}`))
+  }
+
+  console.log(chalk.bold('\ncrosscheck watch\n'))
+  console.log(`  repo      ${chalk.cyan(`${currentRepo.owner}/${currentRepo.repo}`)}`)
+  console.log(`  mode      ${chalk.cyan(config.mode)}`)
+  console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  console.log(`  tunnel    ${chalk.cyan(smeeUrl)}`)
+  console.log()
+  console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop and clean up.\n'))
+
+  const cleanup = async () => {
+    console.log('\nCleaning up...')
+    smeeEvents.close()
+    if (hookId !== null) {
+      await deleteGithubWebhook(currentRepo.owner, currentRepo.repo, hookId, token)
+      console.log('  webhook deregistered')
+    }
     server.close(() => process.exit(0))
-  })
+  }
+
+  process.on('SIGINT', () => { void cleanup() })
+  process.on('SIGTERM', () => { void cleanup() })
 }

@@ -10,11 +10,21 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
 
+// Deduplication — keyed by owner/repo#pr@sha
+const inFlight = new Set<string>()
+
 async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, token: string, log: (msg: string) => void) {
   const { pull_request: pr, repository: repo } = event
   const owner = repo.owner.login
   const repoName = repo.name
   const prNumber = event.number
+  const key = `${owner}/${repoName}#${prNumber}@${pr.head.sha}`
+
+  if (inFlight.has(key)) {
+    log(`PR #${prNumber} already in review — skipping duplicate event`)
+    return
+  }
+  inFlight.add(key)
 
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 
@@ -23,6 +33,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
   if (!reviewer) {
     log(`  → origin=${origin}, no reviewer — skipping`)
+    inFlight.delete(key)
     return
   }
 
@@ -51,6 +62,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     log(`  ✗ review failed: ${error.message ?? 'unknown error'}`)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
+    inFlight.delete(key)
   }
 }
 

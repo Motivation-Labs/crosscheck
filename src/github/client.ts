@@ -29,6 +29,86 @@ export async function getPRDiff(
   return data as unknown as string
 }
 
+export async function registerRepoWebhook(
+  owner: string,
+  repo: string,
+  webhookUrl: string,
+  secret: string,
+  token: string,
+): Promise<number> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: 'web',
+      active: true,
+      events: ['pull_request'],
+      config: { url: webhookUrl, content_type: 'json', secret },
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to register webhook: ${err.message ?? res.status}`)
+  }
+  const data = await res.json() as { id: number }
+  return data.id
+}
+
+export async function deleteRepoWebhook(
+  owner: string,
+  repo: string,
+  hookId: number,
+  token: string,
+): Promise<void> {
+  await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${hookId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+}
+
+export async function registerOrgWebhook(
+  org: string,
+  webhookUrl: string,
+  secret: string,
+  token: string,
+): Promise<number> {
+  const res = await fetch(`https://api.github.com/orgs/${org}/hooks`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: 'web',
+      active: true,
+      events: ['pull_request'],
+      config: { url: webhookUrl, content_type: 'json', secret },
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to register org webhook: ${err.message ?? res.status}`)
+  }
+  const data = await res.json() as { id: number }
+  return data.id
+}
+
+export async function deleteOrgWebhook(
+  org: string,
+  hookId: number,
+  token: string,
+): Promise<void> {
+  await fetch(`https://api.github.com/orgs/${org}/hooks/${hookId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,

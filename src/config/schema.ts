@@ -46,6 +46,7 @@ export const ConfigSchema = z.object({
   }).default({}),
   quality: QualityConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
+  orgs: z.array(z.string()).default([]),
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),

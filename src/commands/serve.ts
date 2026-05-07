@@ -81,13 +81,22 @@ export function runServe(configPath?: string) {
   )
 
   server.listen(config.server.port, () => {
+    const webhookUrl = `http://${hostname()}:${config.server.port}${config.server.webhook_path}`
     console.log(chalk.bold('\ncrosscheck serving\n'))
+    console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
     console.log(`  mode      ${chalk.cyan(config.mode)}`)
     console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
     console.log(`  port      ${chalk.cyan(String(config.server.port))}`)
-    console.log(`  endpoint  ${chalk.cyan(`http://${hostname()}:${config.server.port}${config.server.webhook_path}`)}`)
+    console.log(`  endpoint  ${chalk.cyan(webhookUrl)}`)
     console.log()
-    console.log(chalk.dim('Register this URL as a GitHub webhook (content-type: application/json).'))
+    if (config.orgs.length > 0) {
+      console.log(chalk.dim('Register the endpoint above as a GitHub org webhook (content-type: application/json).'))
+      for (const org of config.orgs) {
+        console.log(chalk.dim(`  → https://github.com/organizations/${org}/settings/hooks`))
+      }
+    } else {
+      console.log(chalk.dim('Register this URL as a GitHub webhook (content-type: application/json).'))
+    }
     console.log(chalk.dim('Listening for pull_request events...\n'))
   })
 

@@ -6,6 +6,11 @@ You are improving crosscheck's AI code review instructions. crosscheck runs `cod
 report below and produce an improved `instructions.md` that increases review quality and
 reduces failures.
 
+> **Note:** `crosscheck optimize` selects which agent runs you based on your local config
+> and log history — whichever reviewer has the highest success rate, or `claude` if there
+> is no data. The instructions you produce are reviewer-agnostic: they are read by both
+> `claude` and `codex`, so write in plain language that both understand.
+
 ---
 
 ## Input you will receive

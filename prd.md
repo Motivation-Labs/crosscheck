@@ -99,25 +99,44 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Wire into `cli.ts` as `crosscheck diagnose [--json] [--since <date>]`.
   - **Tests Required:** parse a fixture NDJSON file with known errors → correct pattern counts; `--json` output is valid JSON matching schema; `--since` filters correctly; tolerates empty log dir.
 
-- [ ] **`crosscheck optimize`** — run `diagnose` internally, feed the report into `claude --print` using the bundled `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
+- [ ] **`crosscheck optimize`** — run `diagnose` internally, select the best available local AI agent, feed the report into it using `AGENT.md` as the harness, diff the result against `~/.crosscheck/instructions.md`, and apply on `--apply`. Dry-run by default.
   - **User:** Anyone who wants crosscheck to adapt to their repos and fix recurring review failures without manual config editing.
+  - **Agent selection — how optimize picks which AI to use:**
+    The agent used to run `optimize` is chosen dynamically from the vendors already configured in `crosscheck.config.yml`, not hardcoded. This means optimize works regardless of whether the user has Claude, Codex, or both.
+
+    Selection logic (`selectOptimizeAgent(config, diagnoseReport)`):
+    1. Collect `enabled` vendors: those with `config.vendors[v].enabled === true`.
+    2. If only one vendor is enabled → use it.
+    3. If both are enabled → look at `diagnoseReport.reviewer_performance`: pick the vendor with the higher `successRate` (successes ÷ attempts) over the log period.
+    4. If rates are equal or there is no log data → prefer `claude` (handles the long-form AGENT.md harness with higher fidelity).
+    5. `--agent claude|codex` flag overrides all of the above.
+    6. If no vendor is enabled or the selected vendor's CLI is not installed → exit 1 with a clear message naming the missing CLI.
+
+    Examples:
+    - Config has only `codex: enabled: true` → uses codex, no claude needed.
+    - Config has both enabled; codex has 80% success rate vs claude's 50% → uses codex.
+    - Config has both enabled; no log data → uses claude.
+    - User passes `--agent codex` → uses codex regardless.
+
   - **Acceptance Criteria:**
-    - `crosscheck optimize` (no flags) runs diagnose, generates improved instructions via claude, prints a unified diff of old vs new `instructions.md`, and exits without writing.
+    - `crosscheck optimize` (no flags) runs diagnose, selects the agent per the logic above, generates improved instructions, prints a unified diff of old vs new `instructions.md`, and exits without writing.
     - `crosscheck optimize --apply` writes the improved `~/.crosscheck/instructions.md`.
     - `crosscheck optimize --dry-run` is a synonym for the default no-flag behavior.
+    - `crosscheck optimize --agent <claude|codex>` forces a specific agent.
+    - Terminal output shows which agent was selected and why: `  agent  codex (success rate 80% > claude 50%)`.
     - On first run (no existing `instructions.md`), the diff shows the full new file as additions.
     - If `diagnose` finds no errors and no suggestions, optimize still runs and may refine wording; it never produces an empty instructions file (preserves at minimum the VERDICT format constraint).
-    - Prints what was changed: "+ added constraint for tsc", "~ refined focus instructions", etc.
     - Respects a project-level `AGENT.md` override at `{cwd}/AGENT.md` or `{cwd}/.crosscheck/AGENT.md`; falls back to the bundled `AGENT.md`.
-    - If `claude` CLI is not available, exits 1 with a clear error.
   - **Technical Notes:**
     - New file: `src/commands/optimize.ts`.
-    - Calls `runOptimize(diagnoseReport, currentInstructions, agentMdContent)` → returns new instructions string.
+    - `selectOptimizeAgent(config, report)` → `'claude' | 'codex'` — pure function, easy to test.
+    - Agent invocation:
+      - `claude`: `claude --print "<agentMd>\n\n<diagnoseJson>\n\nCurrent instructions.md:\n<current>"`
+      - `codex`: `codex review` cannot be reused here; instead run `codex --print` (or equivalent non-interactive mode) with the same prompt. If codex does not support `--print`, fall back to the next available agent and log a warning.
     - AGENT.md lookup order: `{cwd}/AGENT.md` → `{cwd}/.crosscheck/AGENT.md` → `{packageRoot}/AGENT.md`.
-    - Invokes claude as: `claude --print "<agentMd>\n\n<diagnoseJson>\n\nCurrent instructions.md:\n<current>"`.
-    - Diff: use Node's built-in or a small inline unified-diff helper (no new dependency).
-    - Wire into `cli.ts` as `crosscheck optimize [--apply] [--dry-run] [--since <date>]`.
-  - **Tests Required:** optimize with no existing instructions → produces non-empty output; diff rendering shows +/- lines correctly; AGENT.md lookup respects override order.
+    - Diff: small inline unified-diff helper (no new dependency).
+    - Wire into `cli.ts` as `crosscheck optimize [--apply] [--dry-run] [--agent <claude|codex>] [--since <date>]`.
+  - **Tests Required:** `selectOptimizeAgent` with only codex enabled → returns `'codex'`; with both enabled and codex higher success rate → returns `'codex'`; with both enabled and no log data → returns `'claude'`; `--agent` flag overrides; diff rendering shows +/- lines; AGENT.md lookup respects override order.
 
 - [ ] **`AGENT.md` — bundled optimize harness** — ship a well-crafted `AGENT.md` at the repo root that guides claude during `optimize`. This file defines how to read diagnose output, detect languages, write good constraints, and stay within quality guardrails.
   - **User:** crosscheck itself (read by `optimize`); power users who want to fork and customize the optimization logic.

@@ -144,17 +144,32 @@ export async function runWatch(configPath?: string) {
         execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
         execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Fetch the base branch after checking out the PR branch so we are never
+        // on the base branch during the fetch (git refuses to update a checked-out ref).
+        // Wrapped in try/catch: if the base was deleted or the fetch fails, we log
+        // a warning and let the reviewer fall back to whatever is locally available.
+        try {
+          execSync(`git fetch origin ${pr.base.ref}:${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+        } catch {
+          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
+        }
         spinner.succeed('cloned')
 
         fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
+        let elapsed = 0
+        const elapsedTimer = setInterval(() => { elapsed++; spinner.text = `${reviewer} reviewing... (${elapsed}s)` }, 1000)
         spinner.start(`${reviewer} reviewing...`)
         let rawReview: string
-        if (reviewer === 'codex') {
-          rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
-        } else {
-          rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
+        try {
+          if (reviewer === 'codex') {
+            rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
+          } else {
+            rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
+          }
+        } finally {
+          clearInterval(elapsedTimer)
         }
-        spinner.succeed('review complete')
+        spinner.succeed(`review complete (${elapsed}s)`)
 
         const { verdict, clean } = parseVerdict(rawReview)
         const commentBody = prependVerdictToComment(clean, verdict)

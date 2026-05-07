@@ -66,9 +66,10 @@ function classifyError(message: string): ErrorCategory {
 function extractErrorFields(err: unknown): Record<string, unknown> {
   if (err == null) return { message: String(err) }
 
-  const message = err instanceof Error ? err.message : String(err)
-  const stack = err instanceof Error ? err.stack : undefined
-  const category = classifyError(message)
+  const rawMessage = err instanceof Error ? err.message : String(err)
+  const message = rawMessage.length > 2000 ? rawMessage.slice(0, 2000) + ' …[truncated]' : rawMessage
+  const stack = err instanceof Error ? err.stack?.slice(0, 1000) : undefined
+  const category = classifyError(rawMessage)
 
   // Duck-type execa errors — they carry exitCode, timedOut, stderr, command
   const maybeExeca = err as Record<string, unknown>

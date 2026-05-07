@@ -84,10 +84,20 @@ function unifiedDiff(oldText: string, newText: string): string {
 }
 
 async function runWithClaude(prompt: string): Promise<string> {
-  const result = await execa('claude', ['--print', '--bare', prompt], {
-    timeout: 120_000,
-    env: { ...process.env },
-  })
+  let result
+  try {
+    result = await execa('claude', ['--print', '--bare'], {
+      input: prompt,
+      timeout: 120_000,
+      env: { ...process.env },
+    })
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not logged in|please run \/login|run \/login/i.test(msg)) {
+      throw new Error('claude is not logged in — run: claude /login')
+    }
+    throw err
+  }
   return (result.stdout ?? result.stderr ?? '').trim()
 }
 

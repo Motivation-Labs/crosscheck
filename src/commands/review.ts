@@ -10,6 +10,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
+import { detectLanguages } from '../lib/languages.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -77,7 +78,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     let reviewText: string
     const reviewStart = Date.now()
-    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
+    const languages = detectLanguages(tmpDir)
+    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer, languages })
     let elapsed = 0
     const reviewSpinner = ora(`Running ${reviewer} review...`).start()
     const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)

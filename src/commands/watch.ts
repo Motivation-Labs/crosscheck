@@ -18,6 +18,7 @@ import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.j
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
+import { detectLanguages } from '../lib/languages.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -155,7 +156,8 @@ export async function runWatch(configPath?: string) {
         }
         spinner.succeed('cloned')
 
-        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
+        const languages = detectLanguages(tmpDir)
+        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, languages })
         let elapsed = 0
         const elapsedTimer = setInterval(() => { elapsed++; spinner.text = `${reviewer} reviewing... (${elapsed}s)` }, 1000)
         spinner.start(`${reviewer} reviewing...`)

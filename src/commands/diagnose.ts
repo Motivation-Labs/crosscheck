@@ -84,7 +84,7 @@ function parseLogFile(path: string): LogEntry[] {
   return entries
 }
 
-function classifyError(message: string, reviewer?: string): { pattern: ErrorPattern; command?: string; branch?: string } {
+export function classifyError(message: string): { pattern: ErrorPattern; command?: string; branch?: string } {
   const cmdMatch = message.match(/(?:sh:|bash:|zsh:)?\s*([a-zA-Z0-9_-]+):\s*(?:command not found|not found)/i)
   if (cmdMatch) return { pattern: 'command_not_found', command: cmdMatch[1].toLowerCase() }
 
@@ -149,27 +149,27 @@ function buildSuggestions(errors: ErrorEntry[], languages: string[]): Suggestion
   return suggestions
 }
 
-function collectLogFiles(since?: string): string[] {
-  if (!existsSync(LOG_DIR)) return []
-  return readdirSync(LOG_DIR)
+function collectLogFiles(since?: string, logDir = LOG_DIR): string[] {
+  if (!existsSync(logDir)) return []
+  return readdirSync(logDir)
     .filter(f => f.endsWith('.ndjson'))
     .filter(f => !since || f.replace('.ndjson', '') >= since)
     .sort()
-    .map(f => join(LOG_DIR, f))
+    .map(f => join(logDir, f))
 }
 
-export function buildDiagnoseReport(since?: string): DiagnoseReport {
-  const files = collectLogFiles(since)
+export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseReport {
+  const files = collectLogFiles(since, logDir)
   const allEntries: LogEntry[] = files.flatMap(parseLogFile)
 
-  // Track review lifecycle: review_started → review_complete or error
+  // Track review lifecycle: review_started → review_complete
   const started = new Map<string, LogEntry>()     // key: `${repo}#${pr}`
   const completed = new Set<string>()
-  const failed = new Set<string>()
 
   const errorPatterns = new Map<string, ErrorEntry>()
   const verdicts = { APPROVE: 0, NEEDS_WORK: 0, BLOCK: 0 }
   const reposSeen = new Set<string>()
+  const languagesSeen = new Set<string>()   // from review_started log events
   const reviewerStats = new Map<string, { attempts: number; successes: number }>()
 
   for (const e of allEntries) {
@@ -181,13 +181,18 @@ export function buildDiagnoseReport(since?: string): DiagnoseReport {
       const r = e.reviewer ?? 'unknown'
       if (!reviewerStats.has(r)) reviewerStats.set(r, { attempts: 0, successes: 0 })
       reviewerStats.get(r)!.attempts++
+      // Collect languages detected at review time
+      if (Array.isArray(e['languages'])) {
+        for (const lang of e['languages'] as string[]) languagesSeen.add(lang)
+      }
     }
 
     if (e.event === 'review_complete') {
       const key = `${e.repo}#${e.pr}`
       completed.add(key)
       const r = e.reviewer ?? 'unknown'
-      reviewerStats.get(r)!.successes = (reviewerStats.get(r)?.successes ?? 0) + 1
+      const stats = reviewerStats.get(r)
+      if (stats) stats.successes++
       if (e.verdict) {
         const v = e.verdict as keyof typeof verdicts
         if (v in verdicts) verdicts[v]++
@@ -198,7 +203,6 @@ export function buildDiagnoseReport(since?: string): DiagnoseReport {
       const msg = e.message ?? ''
       const { pattern, command, branch } = classifyError(msg)
 
-      // Determine reviewer from message or surrounding context
       const reviewerMatch = msg.match(/^(codex|claude):/i)
       const reviewer = reviewerMatch ? reviewerMatch[1].toLowerCase() : undefined
 
@@ -208,23 +212,13 @@ export function buildDiagnoseReport(since?: string): DiagnoseReport {
       } else {
         errorPatterns.set(mapKey, { pattern, command, branch, count: 1, reviewer })
       }
-
-      // Mark the most recent started review as failed
-      for (const [key, startEntry] of started.entries()) {
-        if (!completed.has(key) && !failed.has(key)) {
-          failed.add(key)
-          const r = startEntry.reviewer ?? reviewer ?? 'unknown'
-          if (reviewerStats.has(r)) {
-            // Don't double-count: subtract the attempted that didn't complete
-          }
-          break
-        }
-      }
     }
   }
 
   const errors = [...errorPatterns.values()].sort((a, b) => b.count - a.count)
-  const languages = detectLanguagesFromCommands(errors)
+  // Merge: languages from log events + languages inferred from command errors
+  const languagesFromErrors = detectLanguagesFromCommands(errors)
+  const languages = [...new Set([...languagesSeen, ...languagesFromErrors])]
   const suggestions = buildSuggestions(errors, languages)
 
   const fromDate = files[0]?.split('/').at(-1)?.replace('.ndjson', '') ?? 'N/A'
@@ -232,7 +226,8 @@ export function buildDiagnoseReport(since?: string): DiagnoseReport {
 
   const totalReviews = started.size
   const successfulReviews = completed.size
-  const failedReviews = failed.size
+  // Any review_started without a review_complete is a failure
+  const failedReviews = totalReviews - successfulReviews
 
   const reviewer_performance: Record<string, ReviewerPerf> = {}
   for (const [name, stats] of reviewerStats.entries()) {
@@ -339,7 +334,7 @@ export async function runDiagnose(opts: { json?: boolean; since?: string }): Pro
     return
   }
 
-  const report = buildDiagnoseReport(opts.since)
+  const report = buildDiagnoseReport(opts.since, LOG_DIR)
 
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2))

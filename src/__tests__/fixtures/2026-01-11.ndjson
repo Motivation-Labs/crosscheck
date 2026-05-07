@@ -1,0 +1,7 @@
+{"ts":"2026-01-11T09:00:00Z","level":"info","event":"review_started","repo":"acme/api","pr":6,"reviewer":"codex","languages":["typescript","nodejs"]}
+{"ts":"2026-01-11T09:02:00Z","level":"error","event":"error","repo":"acme/api","pr":6,"message":"fatal: no such branch: 'staging'"}
+{"ts":"2026-01-11T09:05:00Z","level":"info","event":"review_started","repo":"acme/api","pr":7,"reviewer":"claude","languages":["typescript"]}
+{"ts":"2026-01-11T09:08:00Z","level":"info","event":"review_complete","repo":"acme/api","pr":7,"reviewer":"claude","verdict":"APPROVE","duration_ms":180000}
+{"ts":"2026-01-11T malformed line that should be skipped"}
+{"ts":"2026-01-11T09:15:00Z","level":"info","event":"review_started","repo":"acme/api","pr":8,"reviewer":"codex","languages":["typescript"]}
+{"ts":"2026-01-11T09:20:00Z","level":"error","event":"error","repo":"acme/api","pr":8,"message":"Request timed out after 120000ms"}

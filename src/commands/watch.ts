@@ -133,7 +133,23 @@ export async function runWatch(configPath?: string) {
     log,
   )
 
-  await new Promise<void>(resolve => server.listen(config.server.port, resolve))
+  await new Promise<void>((resolve, reject) => {
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(new Error(
+          `Port ${config.server.port} is already in use.\n` +
+          `  Another crosscheck instance may be running. Stop it first, or change the port in config:\n` +
+          `    server:\n      port: 7892`
+        ))
+      } else {
+        reject(err)
+      }
+    })
+    server.listen(config.server.port, resolve)
+  }).catch((err: Error) => {
+    console.error(chalk.red(`\n✗ ${err.message}`))
+    process.exit(1)
+  })
 
   // Open SSH tunnel via localhost.run
   log('Opening tunnel via localhost.run...')

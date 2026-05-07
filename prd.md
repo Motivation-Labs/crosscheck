@@ -78,8 +78,8 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
-- [ ] **Live review progress + verdict** — show structured progress during a review and post a clear verdict. See design below.
-- [ ] **Fortune cookie welcome message** — one-line witty quote on startup. See design below.
+- [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
+- [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
 
 ---
 

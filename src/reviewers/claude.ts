@@ -40,6 +40,11 @@ export async function runClaudeReview(
     customLine,
     'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
     'Be concise. Skip praise.',
+    'On the very last line of your response, write exactly one of:',
+    'VERDICT: APPROVE',
+    'VERDICT: NEEDS WORK',
+    'VERDICT: BLOCK',
+    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
   ].filter(Boolean).join('\n')
 
   const outputFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')

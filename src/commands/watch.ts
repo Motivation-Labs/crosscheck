@@ -1,6 +1,7 @@
 import { execSync, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
+import ora from 'ora'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
   createGithubClient,
@@ -14,6 +15,8 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
+import { randomFortune } from '../lib/fortune.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -93,7 +96,7 @@ export async function runWatch(configPath?: string) {
       }
       inFlight.add(key)
 
-      log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${pr.title}`)
+      log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
       const origin = detectPROrigin(pr.body ?? '', config)
       const reviewer = assignReviewer(origin, config)
 
@@ -106,25 +109,34 @@ export async function runWatch(configPath?: string) {
       log(`  origin=${chalk.yellow(origin)}  reviewer=${chalk.cyan(reviewer)}`)
 
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+      const spinner = ora({ indent: 2 })
       try {
-        log('  cloning...')
+        spinner.start('cloning...')
         execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe' })
         execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        spinner.succeed('cloned')
 
-        let reviewText: string
+        spinner.start(`${reviewer} reviewing...`)
+        let rawReview: string
         if (reviewer === 'codex') {
-          reviewText = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, log)
+          rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
         } else {
-          reviewText = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, log)
+          rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
         }
+        spinner.succeed('review complete')
 
+        const { verdict, clean } = parseVerdict(rawReview)
+        const commentBody = prependVerdictToComment(clean, verdict)
+
+        spinner.start('posting comment...')
         const octokit = createGithubClient(token)
-        await postReviewComment(octokit, owner, repoName, prNumber, reviewText, reviewer)
-        log(chalk.green(`  ✓ review posted → github.com/${owner}/${repoName}/pull/${prNumber}`))
+        await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
+        spinner.succeed(`posted → github.com/${owner}/${repoName}/pull/${prNumber}`)
+
+        log(formatVerdict(verdict))
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        log(chalk.red(`  ✗ ${msg}`))
+        spinner.fail(err instanceof Error ? err.message : String(err))
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
         inFlight.delete(key)
@@ -215,7 +227,8 @@ export async function runWatch(configPath?: string) {
   }
 
   // Summary banner
-  console.log(chalk.bold('\ncrosscheck watch\n'))
+  console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
+  console.log(chalk.bold('crosscheck watch\n'))
   if (config.orgs.length > 0) {
     console.log(`  orgs      ${chalk.cyan(config.orgs.join(', '))}`)
   } else {

@@ -10,12 +10,9 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 
 ---
 
-## Documentation
+**[→ Full documentation: get-started.md](./get-started.md)**
 
-- [Getting Started](./docs/getting-started.md) — prerequisites, install, first review, watch vs serve mode
-- [Configuration](./docs/configuration.md) — full YAML reference, quality tiers, routing, budget
-- [Commands](./docs/commands.md) — `init`, `review`, `watch`, `serve`, `status` with all flags and examples
-- [How It Works](./docs/how-it-works.md) — architecture, PR detection, reviewer assignment, security model
+Covers prerequisites, install, all commands and flags, full config reference, and how it works under the hood.
 
 ---
 

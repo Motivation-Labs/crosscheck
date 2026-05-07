@@ -11,7 +11,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
-import { initLogger, log as fileLog } from '../lib/logger.js'
+import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -72,7 +72,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
     log(`  ✗ review failed: ${message}`)
-    fileLog({ level: 'error', event: 'error', repo: `${owner}/${repoName}`, pr: prNumber, message, stack: err instanceof Error ? err.stack : undefined })
+    logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
     inFlight.delete(key)
@@ -82,10 +82,29 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 export function runServe(configPath?: string) {
   const config = loadConfig(configPath)
   initLogger(config.logs)
-  const token = getGithubToken()
-  const webhookSecret = getWebhookSecret()
+
+  process.on('uncaughtException', (err) => {
+    logUncaught('uncaughtException', err)
+    console.error(chalk.red(`\n✗ Uncaught exception: ${err.message}`))
+    process.exit(2)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logUncaught('unhandledRejection', reason)
+    console.error(chalk.red(`\n✗ Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`))
+    process.exit(2)
+  })
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err) {
+    logError({ command: 'serve', phase: 'auth' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
 
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
+  const webhookSecret = getWebhookSecret()
 
   const log = (msg: string) => {
     console.log(`[${new Date().toISOString()}] ${msg}`)
@@ -97,6 +116,7 @@ export function runServe(configPath?: string) {
     webhookSecret,
     (event) => { void handlePR(event, config, token, log) },
     log,
+    fileLog,
   )
 
   server.listen(config.server.port, () => {

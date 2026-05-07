@@ -9,8 +9,7 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
-import type { Config } from '../config/schema.js'
-import { initLogger, log as fileLog } from '../lib/logger.js'
+import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -22,7 +21,16 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const config = loadConfig(configPath)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
-  const token = getGithubToken()
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err) {
+    logError({ command: 'review', phase: 'auth' }, err)
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
   const octokit = createGithubClient(token)
 
   const parsed = parsePRUrl(prUrl)
@@ -96,8 +104,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    fileLog({ level: 'error', event: 'error', repo: `${owner}/${repo}`, pr: number, message, stack: err instanceof Error ? err.stack : undefined })
+    logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
     throw err
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })

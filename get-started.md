@@ -385,6 +385,101 @@ crosscheck status
 
 ---
 
+### `crosscheck diagnose`
+
+Reads `~/.crosscheck/logs/` and surfaces failure patterns, reviewer performance, and improvement suggestions.
+
+```bash
+crosscheck diagnose
+crosscheck diagnose --since 2026-05-01
+crosscheck diagnose --json
+```
+
+```
+crosscheck diagnose
+
+  Period   2026-05-07 → 2026-05-08  (1 log file)
+
+  Reviews
+    total       6
+    successful  3
+    failed      3  (50% failure rate)
+
+  Reviewer performance
+    codex    1/4 success  25%
+    claude   2/2 success  100%
+
+  Verdict distribution
+    APPROVE     2  (67%)
+    NEEDS WORK  1  (33%)
+    BLOCK       0  (0%)
+
+  Error patterns
+    ✗ command not found: tsc                    ×2  (codex)
+    ✗ base branch missing: staging              ×2
+
+  Languages detected
+    typescript, nodejs
+
+  Suggestions
+    → tsc: command not found ×2 (codex)
+      add to instructions.md: "Do not run tsc, ts-node, or tsx."
+    → base branch 'staging' not found ×2 — verify branch is fetched before review
+
+  Run `crosscheck optimize` to apply suggestions automatically.
+```
+
+| Flag | Description |
+|---|---|
+| `--json` | Output full report as JSON (for scripting or piping to `optimize`) |
+| `--since <YYYY-MM-DD>` | Limit analysis to logs from this date onward |
+
+---
+
+### `crosscheck optimize`
+
+Runs `diagnose` internally, selects the best available AI agent, and generates an improved `~/.crosscheck/instructions.md`. Dry-run by default — shows a diff without writing.
+
+```bash
+crosscheck optimize             # show diff only
+crosscheck optimize --apply     # apply the changes
+crosscheck optimize --agent codex --apply
+```
+
+```
+  Running diagnose...
+  agent    claude  (default — both enabled, no data)
+
+  diff  /Users/you/.crosscheck/instructions.md
+
+  +## Constraints
+  +
+  +- Do not run tsc, ts-node, or tsx.
+  +- Do not run npm, npx, yarn, or pnpm.
+  ...
+
+  Run with --apply to write changes to ~/.crosscheck/instructions.md
+```
+
+**Which agent does `optimize` use?**
+
+`optimize` picks the agent automatically based on your config and log history:
+
+1. If only one vendor is enabled → uses that one.
+2. If both are enabled → uses whichever has the higher success rate in recent logs.
+3. If rates are equal or no log data → defaults to `claude`.
+4. `--agent claude|codex` overrides all of the above.
+
+| Flag | Description |
+|---|---|
+| `--apply` | Write the improved instructions (default is dry-run) |
+| `--dry-run` | Show diff without writing (default behavior, explicit alias) |
+| `--agent <claude\|codex>` | Force a specific agent regardless of config or log data |
+| `--since <YYYY-MM-DD>` | Limit the diagnose window used as input |
+| `-c, --config <path>` | Config file path |
+
+---
+
 ## Configuration
 
 crosscheck looks for a config file in these locations (first found wins):
@@ -574,3 +669,56 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
 - **No credentials in clones** — `gh repo clone` uses the gh credential helper; no tokens written to disk
+
+---
+
+## FAQ
+
+### How does crosscheck improve over time?
+
+Every review — success or failure — is appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Running `crosscheck diagnose` reads those logs and surfaces patterns: which commands failed, which reviewer is struggling, which language-specific tools were missing. Running `crosscheck optimize` feeds that report into your best-performing AI agent (guided by the bundled `AGENT.md`) and generates an improved `~/.crosscheck/instructions.md`. Both reviewers (claude and codex) read `instructions.md` before every review, so the improvements take effect immediately on the next PR.
+
+### Which agent does `crosscheck optimize` use?
+
+It picks automatically:
+1. If only one vendor is enabled in your config → uses that one.
+2. Both enabled → whichever has the higher success rate in recent logs.
+3. Equal rates or no data → defaults to `claude`.
+4. You can always override: `crosscheck optimize --agent codex`.
+
+The agent used for `optimize` is independent of which agent reviews your PRs — `optimize` is about improving the instructions, not reviewing code.
+
+### What is `~/.crosscheck/instructions.md` and can I edit it?
+
+Yes — it is a plain Markdown file that both `codex` and `claude` read before every review. On first use, crosscheck seeds it with safe defaults (no build-tool constraints, a focused review prompt, and the VERDICT format). You can edit it manually at any time. `crosscheck optimize --apply` rewrites it, so keep a backup or use version control if you've made custom edits you want to preserve.
+
+To reset to defaults, delete the file:
+```bash
+rm ~/.crosscheck/instructions.md
+```
+The next review will re-seed it from the built-in defaults.
+
+### Can I have per-project instructions?
+
+Yes. Create `.crosscheck/instructions.md` in your repo root. crosscheck checks for a project-level file first and uses it instead of the user-level one. This lets you enforce project-specific constraints (e.g. "this is a Rust project — do not suggest TypeScript patterns") without affecting other repos.
+
+### What is `AGENT.md`?
+
+`AGENT.md` is the harness document that guides the AI during `crosscheck optimize`. It defines the input/output contract, language-detection rules, constraint-writing guidelines, and quality principles. It ships bundled with crosscheck so `optimize` works out of the box.
+
+You can override it by placing an `AGENT.md` at your project root or `.crosscheck/AGENT.md`. crosscheck checks for a local override first, then falls back to the bundled version. This lets teams customize the optimization logic for their specific stack or conventions.
+
+### Why did my review fail with "command not found"?
+
+The reviewer (codex or claude) tried to run a CLI tool (e.g. `tsc`, `pytest`) that isn't available in the temporary clone. The clone is a shallow `git` checkout with no `node_modules` or other installed dependencies. Run `crosscheck diagnose` to see which commands failed, then `crosscheck optimize --apply` to add the appropriate constraints to `instructions.md` so the reviewer stops trying.
+
+### Why did my review fail with "no such branch"?
+
+crosscheck fetches the PR base branch (e.g. `staging`) into the temp clone before running the reviewer. If that fetch fails (network issue, branch deleted, insufficient token scope), the reviewer cannot diff correctly. Check:
+- The base branch exists and is accessible with your token.
+- Your `GITHUB_TOKEN` has `repo` scope.
+- The branch name in the PR matches what's on the remote.
+
+### Does optimize run automatically?
+
+No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `instructions.md`.

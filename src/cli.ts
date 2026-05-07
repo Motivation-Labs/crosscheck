@@ -5,6 +5,8 @@ import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
 import { runReview } from './commands/review.js'
 import { runStatus } from './commands/status.js'
+import { runDiagnose } from './commands/diagnose.js'
+import { runOptimize } from './commands/optimize.js'
 
 const program = new Command()
 
@@ -43,5 +45,22 @@ program
   .description('Show auth state, config summary, and CLI versions')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runStatus(opts.config))
+
+program
+  .command('diagnose')
+  .description('Analyze review logs — surface failure patterns, error trends, and improvement suggestions')
+  .option('--json', 'output full report as JSON')
+  .option('--since <date>', 'only analyze logs from this date onward (YYYY-MM-DD)')
+  .action((opts: { json?: boolean; since?: string }) => void runDiagnose(opts))
+
+program
+  .command('optimize')
+  .description('Use AI to improve review instructions based on diagnose output')
+  .option('--apply', 'write the improved instructions to ~/.crosscheck/instructions.md')
+  .option('--dry-run', 'show diff without writing (default behavior)')
+  .option('--agent <vendor>', 'force a specific agent: claude | codex')
+  .option('--since <date>', 'limit the diagnose window (YYYY-MM-DD)')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { apply?: boolean; dryRun?: boolean; agent?: string; since?: string; config?: string }) => void runOptimize(opts))
 
 program.parse()

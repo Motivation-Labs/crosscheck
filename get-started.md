@@ -161,7 +161,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### Watch mode — for your development machine
 
-Starts a local server and uses `gh webhook forward` to receive events — no external tunnel service required. Supports org-level coverage (one forward covers all repos in the org) or per-repo. Runs while your terminal is open.
+Starts a local server and opens a tunnel via `localhost.run` (SSH, no install needed) so GitHub can reach your laptop. Registers webhooks automatically. Supports org-level coverage or per-repo. Runs while your terminal is open.
 
 ```bash
 # Monitor entire orgs (set in crosscheck.config.yml)
@@ -177,7 +177,7 @@ crosscheck watch
   orgs      motivation-labs, codatta
   mode      cross-vendor
   quality   balanced
-  port      7891
+  tunnel    https://abc123.lhr.life
 
 Waiting for PR events — Ctrl+C to stop and clean up.
 ```
@@ -319,7 +319,7 @@ cd /path/to/your/repo
 crosscheck watch
 ```
 
-Uses `gh webhook forward` under the hood — no external tunnel service required. Requires `GITHUB_TOKEN` with `write:org` scope for org-level coverage, or `repo` scope for repo-level.
+Uses `localhost.run` (SSH) to open a public tunnel — SSH is pre-installed on macOS/Linux, no extra install or account needed. Requires `GITHUB_TOKEN` with `write:org` scope for org-level coverage, or `repo` scope for repo-level.
 
 | Flag | Description |
 |---|---|
@@ -553,7 +553,7 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 | | `watch` | `serve` [BETA] |
 |---|---|---|
-| Tunnel | `gh webhook forward` (no external service) | None — direct port |
+| Tunnel | `localhost.run` via SSH (no install) | None — direct port |
 | Webhook | Auto-managed, cleaned up on exit | Manual, permanent |
 | Scope | Org-level or repo-level | Org-level or repo-level |
 | Machine | Developer laptop | mac-mini / server |

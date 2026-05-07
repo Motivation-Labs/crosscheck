@@ -9,6 +9,8 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
+import { randomFortune } from '../lib/fortune.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -47,16 +49,19 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
     log('  → running review...')
 
-    let reviewText: string
+    let rawReview: string
     if (reviewer === 'codex') {
-      reviewText = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, log)
+      rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, log)
     } else {
-      reviewText = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, log)
+      rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, log)
     }
 
+    const { verdict, clean } = parseVerdict(rawReview)
+    const commentBody = prependVerdictToComment(clean, verdict)
+
     const octokit = createGithubClient(token)
-    await postReviewComment(octokit, owner, repoName, prNumber, reviewText, reviewer)
-    log(`  ✓ review posted to PR #${prNumber}`)
+    await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
+    log(`  ✓ review posted to PR #${prNumber}  ${formatVerdict(verdict)}`)
   } catch (err: unknown) {
     const error = err as { message?: string }
     log(`  ✗ review failed: ${error.message ?? 'unknown error'}`)
@@ -82,7 +87,8 @@ export function runServe(configPath?: string) {
 
   server.listen(config.server.port, () => {
     const webhookUrl = `http://${hostname()}:${config.server.port}${config.server.webhook_path}`
-    console.log(chalk.bold('\ncrosscheck serving\n'))
+    console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
+    console.log(chalk.bold('crosscheck serving\n'))
     console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
     console.log(`  mode      ${chalk.cyan(config.mode)}`)
     console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)

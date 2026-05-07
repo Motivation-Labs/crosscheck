@@ -32,11 +32,16 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  const instructionsNote = [focusNote, customNote].filter(Boolean).join('')
-  if (instructionsNote) {
-    mkdirSync(`${repoDir}/.codex`, { recursive: true })
-    writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
-  }
+  const verdictNote = [
+    'On the very last line of your response, write exactly one of:',
+    'VERDICT: APPROVE',
+    'VERDICT: NEEDS WORK',
+    'VERDICT: BLOCK',
+    'Use APPROVE for no issues or trivial nits. Use NEEDS WORK for addressable issues that are not blocking. Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
+  ].join('\n')
+  const instructionsNote = [focusNote, customNote, verdictNote].filter(Boolean).join('\n\n')
+  mkdirSync(`${repoDir}/.codex`, { recursive: true })
+  writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 
   try {
     const modelArgs = model ? ['-c', `model="${model}"`] : []

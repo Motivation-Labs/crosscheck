@@ -44,8 +44,6 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     return
   }
 
-  inFlight.add(key)
-
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 
   const origin = detectPROrigin(pr.body ?? '', config)

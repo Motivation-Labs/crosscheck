@@ -8,8 +8,8 @@ export interface PREvent {
   pull_request: {
     title: string
     body: string
-    head: { ref: string; sha: string; repoFullName: string | null }
-    base: { ref: string; repoFullName: string }
+    head: { ref: string; sha: string; repo: { full_name: string } | null }
+    base: { ref: string; repo: { full_name: string } }
     html_url: string
     user: { login: string }
   }

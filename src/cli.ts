@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import { runInit } from './commands/init.js'
 import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
@@ -8,12 +11,15 @@ import { runStatus } from './commands/status.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
+
 const program = new Command()
 
 program
   .name('crosscheck')
   .description('Cross-vendor AI code review — Claude Code ↔ Codex')
-  .version('0.1.0')
+  .version(`❤️  ${version}`)
 
 program
   .command('init')

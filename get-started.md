@@ -145,7 +145,7 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 crosscheck init
 ```
 
-This scans your machine, reports the status of every dependency, and writes a starter `crosscheck.config.yml` to the current directory.
+This scans your machine, reports the status of every dependency, writes a starter `crosscheck.config.yml`, and auto-fills `routing.allowed_authors` with your GitHub login.
 
 ```
 crosscheck — environment check
@@ -155,7 +155,11 @@ crosscheck — environment check
   ✓ gh CLI               gh version 2.65.0
   ✓ GITHUB_TOKEN         set (gh auth login)
   ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
+
+  ✓ allowed_authors set to beingzy (github)
 ```
+
+`allowed_authors` is detected from `gh auth login` — crosscheck will only review PRs you open, which is the right default when you're the one running the AI agents. If you run `crosscheck watch` before running `init`, the same detection runs automatically on first launch.
 
 Fix any failures before continuing.
 
@@ -621,10 +625,10 @@ routing:
     - "Co-Authored-By: codex"
 
   # Restrict reviews to PRs opened by these GitHub logins.
-  # Recommended: set to the accounts your AI agents use.
+  # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.
   # Empty = no restriction (all matching PRs reviewed).
   allowed_authors:
-    - your-claude-bot-account
+    - your-github-login  # auto-detected from gh auth
     - your-codex-bot-account
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────

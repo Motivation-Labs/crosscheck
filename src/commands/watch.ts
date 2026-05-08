@@ -10,7 +10,7 @@ import {
   deleteRepoWebhook,
 } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from '../config/loader.js'
+import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath, detectGitHubLogin, patchAllowedAuthors } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
@@ -95,7 +95,7 @@ function openTunnel(localPort: number): Promise<{ url: string; proc: ChildProces
 }
 
 export async function runWatch(configPath?: string) {
-  const config = loadConfig(configPath)
+  let config = loadConfig(configPath)
   initLogger(config.logs)
 
   process.on('uncaughtException', (err) => {
@@ -302,10 +302,16 @@ export async function runWatch(configPath?: string) {
   const cfgPath = resolveConfigPath(configPath)
   console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
   if (config.routing.allowed_authors.length === 0) {
-    console.log()
-    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
-    console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
-    console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+    const cfgPath = resolveConfigPath(configPath)
+    const login = detectGitHubLogin()
+    if (login && cfgPath && patchAllowedAuthors(cfgPath, login)) {
+      config = loadConfig(configPath)
+      console.log(`  ${chalk.green('✓')} allowed_authors set to ${chalk.cyan(login)} ${chalk.dim(`(auto-detected — edit ${cfgPath} to change)`)}`)
+    } else {
+      console.log()
+      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
+    }
   }
   console.log()
 

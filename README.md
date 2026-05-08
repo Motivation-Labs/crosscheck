@@ -146,10 +146,10 @@ orgs:
   - your-org                      # covers every repo in the org
 
 # Only review PRs from these GitHub accounts
+# Auto-filled with your login by `crosscheck init` or first `crosscheck watch`
 routing:
   allowed_authors:
-    - your-claude-bot-account
-    - your-codex-bot-account
+    - your-github-login  # auto-detected from gh auth
 
 # Review depth
 quality:

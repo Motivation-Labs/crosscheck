@@ -4,7 +4,7 @@ import { join } from 'path'
 import chalk from 'chalk'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
-import { getWebhookSecret, getWebhookSecretPath } from '../config/loader.js'
+import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, loadConfig, resolveConfigPath } from '../config/loader.js'
 
 interface CheckResult {
   label: string
@@ -94,20 +94,6 @@ function printCheck({ label, ok, detail, fix }: CheckResult) {
   if (!ok && fix) console.log(`      ${chalk.dim('→')} ${chalk.yellow(fix)}`)
 }
 
-function detectGitHubLogin(): string | null {
-  const envs = [
-    { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },  // keyring first
-    process.env,                                                          // env token fallback
-  ]
-  for (const env of envs) {
-    try {
-      const login = execSync("gh api user --jq '.login' 2>/dev/null", { encoding: 'utf8', env }).trim()
-      if (login && !login.includes('\n')) return login
-    } catch { /* try next */ }
-  }
-  return null
-}
-
 export async function runInit(configPath?: string) {
   console.log(chalk.bold('\ncrosscheck — environment check\n'))
 
@@ -129,10 +115,9 @@ export async function runInit(configPath?: string) {
       let content = readFileSync(examplePath, 'utf8')
       const login = detectGitHubLogin()
       if (login) {
-        // Replace the commented-out allowed_authors placeholder with the detected login
         content = content.replace(
-          /  # allowed_authors:\n  #   - \S+[^\n]*\n  #   - \S+[^\n]*/,
-          `  allowed_authors:\n    - ${login}  # auto-detected from gh auth login`,
+          /  # allowed_authors:\n(  #[^\n]*\n)+/,
+          `  allowed_authors:\n    - ${login}  # auto-detected from gh auth\n`,
         )
       }
       writeFileSync(dest, content)
@@ -140,7 +125,18 @@ export async function runInit(configPath?: string) {
       console.log(chalk.dim(`Config written to ${dest} — ${hint}.\n`))
     }
   } else {
-    console.log(chalk.dim(`Config already exists at ${dest}\n`))
+    // Config exists — patch allowed_authors if it's still empty
+    const existing = loadConfig(resolveConfigPath(configPath) ?? dest)
+    if (existing.routing.allowed_authors.length === 0) {
+      const login = detectGitHubLogin()
+      if (login && patchAllowedAuthors(dest, login)) {
+        console.log(chalk.green(`  ✓ allowed_authors set to ${chalk.cyan(login)} in ${dest}\n`))
+      } else {
+        console.log(chalk.dim(`Config already exists at ${dest}\n`))
+      }
+    } else {
+      console.log(chalk.dim(`Config already exists at ${dest}\n`))
+    }
   }
 
   // Smee-client is optional but improves watch mode reliability.

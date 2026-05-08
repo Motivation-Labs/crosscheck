@@ -234,6 +234,58 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`.
   - **Tests Required:** sentinel present + version match + repo-local files exist → no files written; sentinel present + version match + repo-local files absent → creates missing repo-local files only (no webhook secret re-generated); sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present; second repo with same version → repo-local files created even though sentinel already exists.
 
+- [ ] **`crosscheck issue`** — scan recent logs for errors, draft a GitHub issue using the local AI agent, ask targeted multiple-choice follow-up questions, and submit to `motivation-labs/crosscheck` after user confirmation. Zero manual log-digging required.
+  - **User:** Anyone who hits a recurring or unexpected review failure and wants to report it without writing the issue from scratch or navigating log files manually.
+  - **Acceptance Criteria:**
+    - `crosscheck issue` reads `~/.crosscheck/logs/` for the most recent 3 days (default); `--since YYYY-MM-DD` overrides the window.
+    - Reuses the same error-grouping logic as `diagnose` (extracted into `src/lib/log-analysis.ts`). If no `error`-level entries are found, prints `No errors found in recent logs — nothing to report` and exits 0.
+    - If multiple error patterns are found, shows a numbered menu and prompts `Which issue do you want to report? [1–N]` before proceeding.
+    - Passes the selected log entries + current version, platform, and config summary (mode, enabled vendors — no repo names or secrets) to the local AI agent to draft an issue with: a concise **title**, **description** (what failed and likely cause), **steps to reproduce** (inferred from the log event sequence), **sanitized log excerpt**, and **environment block** (version, platform, reviewer, config mode).
+    - After generating the draft, asks exactly 3 targeted multiple-choice questions to improve the report:
+      1. `Can you reproduce this consistently?` → `[1] Every time  [2] Sometimes  [3] Happened once`
+      2. `Which command triggered this?` → `[1] watch  [2] serve  [3] review  [4] Unknown` (skip if unambiguous from logs)
+      3. `Is this blocking you from using crosscheck?` → `[1] Blocked  [2] Degraded  [3] Cosmetic` (sets label priority)
+      Answers are appended to the issue body under `## User Context`. No free-text input required.
+    - Shows the final draft in the terminal and prompts `Submit to motivation-labs/crosscheck? [y/N]`.
+    - `--yes` / `-y` skips the confirmation step and submits immediately after displaying the draft.
+    - `--dry-run` prints the draft and exits 0 without calling `gh`, regardless of `--yes`.
+    - Submission uses `gh issue create --repo motivation-labs/crosscheck`. Falls back to printing the exact `gh issue create` command the user can copy-run if `gh` is not authenticated or the call fails.
+    - Adds label `bug` always; adds label `priority:high` when impact answer is `Blocked`.
+    - On success, prints the issue URL.
+  - **Sanitization rules (non-negotiable — applied before passing log entries to AI and before posting):**
+    - Strip: `owner/repo` patterns, PR titles, file paths, GitHub usernames, branch names, any string matching a GitHub URL.
+    - Replace with: `[repo]`, `[pr-title]`, `[file-path]`, `[username]`.
+    - Webhook secrets and tokens are never present in log entries (enforced by `logger.ts`) — no special handling needed.
+  - **Technical Notes:**
+    - New file: `src/commands/issue.ts`.
+    - Extract error-grouping logic from `diagnose.ts` into `src/lib/log-analysis.ts`; both `diagnose.ts` and `issue.ts` import from it.
+    - Agent selection: same `selectOptimizeAgent(config, report)` from `optimize.ts`.
+    - Agent prompt structure:
+      ```
+      You are drafting a GitHub issue for the crosscheck project.
+
+      Error pattern: {pattern}
+      Frequency: {count} occurrences in the last {days} days
+
+      Sanitized log entries:
+      {entries}
+
+      Environment: crosscheck {version} · {platform} · reviewer: {reviewer} · mode: {mode}
+
+      User context:
+      - Reproducibility: {reproducibility}
+      - Trigger: {command}
+      - Impact: {impact}
+
+      Output exactly:
+      TITLE: <title>
+      ---
+      <markdown body>
+      ```
+    - Parse `TITLE:` line as issue title; everything after `---` as the body.
+    - Wire into `cli.ts` as `crosscheck issue [--since <date>] [--dry-run] [--yes]`.
+  - **Tests Required:** sanitizer removes repo names, PR titles, file paths, usernames; no errors found → exits 0 with message; multiple patterns → prompts menu; `--dry-run` prints draft and skips `gh`; `--yes` skips confirmation; draft parsing extracts title and body correctly; `gh` not authenticated → prints manual command; `priority:high` label added when impact is `Blocked`.
+
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
@@ -637,6 +689,94 @@ New users see the full capability surface immediately. The template is the docum
 **Open questions before implementation:**
 - Should `address` push commits directly to the PR branch (requires write access) or open a follow-up PR? Direct commits are simpler; follow-up PRs are safer for external contributors. Default to direct commits on branches the token owns; follow-up PR on forks.
 - Should `when` support `AND`/`OR` or keep it to single conditions? Start with single conditions — composable via multiple steps.
+
+---
+
+#### `crosscheck issue` — AI-drafted bug reports from logs
+
+**Problem:** when crosscheck fails silently or behaves unexpectedly, users have to manually dig through `~/.crosscheck/logs/`, identify the error, understand its context, write a coherent issue, and decide what details matter. That friction means failures go unreported.
+
+**Solution:** `crosscheck issue` does the digging automatically. It reads recent logs, surfaces the most relevant failure, drives a short multiple-choice interview to fill context gaps, and hands the whole package to the local AI agent to write a well-structured issue draft. The user just reads, answers three quick questions, and hits `y`.
+
+**Flow:**
+
+```
+$ crosscheck issue
+
+  scanning logs...
+  found 3 error patterns in the last 3 days:
+
+  [1] command_not_found: tsc  (4 occurrences)
+  [2] base_branch_missing      (1 occurrence)
+  [3] timeout                  (1 occurrence)
+
+  Which issue do you want to report? [1-3]: 1
+
+  drafting issue with claude...
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ TITLE: codex reviewer fails when repo has a tsc build step          │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ ## Description                                                      │
+  │ The codex reviewer exits with `command_not_found: tsc` on repos     │
+  │ that include a TypeScript build step...                             │
+  │                                                                     │
+  │ ## Steps to Reproduce                                               │
+  │ 1. Run `crosscheck watch` on a TypeScript repo                     │
+  │ 2. Open a PR — codex reviewer is triggered                         │
+  │ 3. Review fails with `Error: command not found: tsc`               │
+  │                                                                     │
+  │ ## Log Excerpt                                                      │
+  │ ```                                                                 │
+  │ {"ts":"...","event":"error","reviewer":"codex","error":             │
+  │  "command_not_found","command":"tsc","repo":"[repo]"}               │
+  │ ```                                                                 │
+  │                                                                     │
+  │ ## Environment                                                      │
+  │ - crosscheck: 0.2.1                                                 │
+  │ - platform: darwin                                                  │
+  │ - reviewer: codex                                                   │
+  │ - mode: cross-vendor                                                │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  Can you reproduce this consistently?
+  [1] Every time  [2] Sometimes  [3] Happened once
+  > 1
+
+  Which command triggered this?
+  [1] watch  [2] serve  [3] review  [4] Unknown
+  > 1
+
+  Is this blocking you from using crosscheck?
+  [1] Blocked  [2] Degraded  [3] Cosmetic
+  > 2
+
+  Submit to motivation-labs/crosscheck? [y/N]: y
+
+  ✓ issue created → https://github.com/motivation-labs/crosscheck/issues/47
+```
+
+**Agent selection:** same `selectOptimizeAgent` logic as `optimize` — picks the vendor with the higher success rate from recent logs; falls back to claude on a tie or no data.
+
+**Sanitization:** applied before sending log entries to the AI agent and before posting. Patterns stripped: `owner/repo` (→ `[repo]`), PR titles, file paths, GitHub usernames, branch names, GitHub URLs. Secrets never appear in logs (enforced at write time by `logger.ts`).
+
+**`--dry-run` use case:** teams who want to review the draft before reporting, or who want to template-match issues for a triage queue without posting immediately.
+
+**`--yes` use case:** automated pipelines (e.g., a cron that calls `crosscheck issue --yes` nightly and files anything new). Still shows the draft in stdout so CI logs are auditable.
+
+**Relationship to `diagnose`:**
+
+`diagnose` is a reporting tool — it reads logs and surfaces patterns for the operator. `issue` is an action tool — it takes the same patterns and turns them into a GitHub ticket. Both share the same error-grouping logic via `src/lib/log-analysis.ts`.
+
+**File layout additions:**
+
+```
+src/
+  commands/
+    issue.ts           ← crosscheck issue command
+  lib/
+    log-analysis.ts    ← shared error-grouping logic (extracted from diagnose.ts)
+```
 
 ---
 

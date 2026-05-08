@@ -11,6 +11,7 @@ import { runStatus } from './commands/status.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
+import { runIssue } from './commands/issue.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -78,5 +79,14 @@ program
   .option('--money', 'include a rough monetary estimate')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { json?: boolean; since?: string; money?: boolean; config?: string }) => void runImpact(opts))
+
+program
+  .command('issue')
+  .description('Detect errors in recent logs, draft a GitHub issue with AI, and submit after confirmation')
+  .option('--since <date>', 'only look at logs from this date onward (YYYY-MM-DD, default: 3 days ago)')
+  .option('--dry-run', 'print the draft without submitting')
+  .option('-y, --yes', 'skip interactive questions and confirmation')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string }) => void runIssue(opts))
 
 program.parse()

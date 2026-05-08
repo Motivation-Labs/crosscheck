@@ -135,9 +135,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         }
       }
 
-      const vendor = resolveReviewer(step.reviewer, origin, config)
+      // Derive vendor from autoFix.fixer, not from the workflow step's reviewer field
+      let vendor: 'claude' | 'codex' | null
+      if (autoFix.fixer === 'same-as-author') {
+        vendor = resolveReviewer('origin', origin, config)
+      } else if (autoFix.fixer === 'same-as-reviewer') {
+        vendor = resolveReviewer('auto', origin, config)
+      } else {
+        vendor = resolveReviewer(autoFix.fixer, origin, config)
+      }
+
       if (!vendor) {
-        log(chalk.dim(`  [${step.name}] origin vendor (${origin}) not available — skipping`))
+        log(chalk.dim(`  [${step.name}] fixer vendor not available — skipping`))
         results[step.name] = { skipped: true }
         continue
       }
@@ -186,17 +195,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         continue
       }
 
-      // Fork PRs: cannot push to contributor's fork
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) {
-        log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
-        results[step.name] = { skipped: true }
-        continue
-      }
-
       const deliveryMode = autoFix.delivery.mode
 
       if (deliveryMode === 'commit') {
+        // Fork PRs: cannot push to contributor's fork
+        if (isFork) {
+          log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
+          results[step.name] = { skipped: true }
+          continue
+        }
         execSync('git add -A', { cwd: tmpDir })
         execSync(
           `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
@@ -213,6 +221,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
+        // Fork PRs: cannot push to contributor's fork
+        if (isFork) {
+          log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
+          results[step.name] = { skipped: true }
+          continue
+        }
         // Create a fix branch and open a PR targeting the original branch
         const fixBranch = `fix/cr-${prNumber}-address-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
@@ -250,7 +264,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         results[step.name] = { applied_count: appliedCount }
 
       } else {
-        // comment: post the diff as a suggested-fix comment, no code push
+        // comment: post the diff as a suggested-fix comment, no code push needed (works for fork PRs too)
         let patch = ''
         try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
         if (patch) {

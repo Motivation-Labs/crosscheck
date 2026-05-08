@@ -75,7 +75,7 @@ export const PostReviewDeliverySchema = z.object({
 })
 
 export const PostReviewFixSchema = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   // on_issues → only run when the reviewer found actionable issues
   // always    → always run after every review
   // never     → disable (same as enabled: false)

@@ -10,8 +10,17 @@
 - [Step 3 — Choose a deployment mode](#step-3--choose-a-deployment-mode)
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
+  - [init](#crosscheck-init)
+  - [review](#crosscheck-review-pr-url)
+  - [watch](#crosscheck-watch)
+  - [serve](#crosscheck-serve-beta)
+  - [status](#crosscheck-status)
+  - [diagnose](#crosscheck-diagnose)
+  - [optimize](#crosscheck-optimize)
+  - [impact](#crosscheck-impact)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
+- [FAQ](#faq)
 
 ---
 
@@ -186,12 +195,16 @@ crosscheck watch
   orgs      motivation-labs, codatta
   mode      cross-vendor
   quality   balanced
-  tunnel    https://abc123.lhr.life
+  config    ./crosscheck.config.yml  ← edit to change above
 
-Waiting for PR events — Ctrl+C to stop and clean up.
+  ✓ tunnel ready: https://abc123.lhr.life
+  tunnel    https://abc123.lhr.life
+  ✓ webhook registered for motivation-labs
+
+Waiting for PR events — Ctrl+C to stop.
 ```
 
-When you press `Ctrl+C`, the `gh webhook forward` processes are killed and webhooks are cleaned up automatically.
+When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned up automatically.
 
 **Token scope for org webhooks:** `GITHUB_TOKEN` needs `write:org` scope for org-level coverage. For repo-level, `repo` scope is sufficient.
 
@@ -364,15 +377,23 @@ crosscheck status
   Auth
   ✓ codex                  authenticated
   ✓ claude                 2.1.x (Claude Code)
-  ✓ GITHUB_TOKEN           set
-  ✓ WEBHOOK_SECRET         set
+  ✓ GITHUB_TOKEN           via gh auth login
+  ✓ WEBHOOK_SECRET         auto-managed at ~/.crosscheck/webhook-secret
 
   Config
     mode                   cross-vendor
     quality tier           balanced
     codex auth             subscription
     claude model           sonnet
-    per-review budget      subscription (unlimited)
+    per-review budget      $2.00/review
+
+  Impact
+    summary                47 reviews · ~43h saved · 19 issues caught
+                           (run crosscheck impact for details)
+
+  Logs
+    path                   ~/.crosscheck/logs/
+    today                  2026-05-08.ndjson  (12 entries)
 
   CLIs
     codex                  codex-cli 0.128.0
@@ -480,6 +501,56 @@ crosscheck optimize --agent codex --apply
 
 ---
 
+### `crosscheck impact`
+
+Reports cumulative value from review history: time saved, issues caught, and code quality trends. Reads from `~/.crosscheck/logs/` — no network calls.
+
+```bash
+crosscheck impact
+crosscheck impact --money
+crosscheck impact --since 2026-01-01
+crosscheck impact --json
+```
+
+```
+crosscheck impact  (all time · 47 reviews)
+
+  Time saved
+  ──────────────────────────────────────────────
+  Reviews run              47
+  Avg AI review time       ~14 min
+  Assumed human time       60 min  ⓘ
+  Total time saved         ~43 h
+
+  Issues caught
+  ──────────────────────────────────────────────
+  APPROVE              28   (60%)
+  NEEDS WORK           14   (30%)  ← actionable feedback
+  BLOCK                 5   (11%)  ← potential bugs / breaking changes
+  Total issues caught  19
+
+  Code quality trend  (BLOCK rate, weekly)
+  ──────────────────────────────────────────────
+  May W1    ████████████████  22%
+  May W2    ████████████      17%
+  May W3    ████████          11%   ↓ improving
+
+  ⓘ assumes 60 min avg human review — set impact.assumed_human_review_minutes to adjust
+  Run crosscheck impact --money for a rough monetary estimate.
+```
+
+| Flag | Description |
+|---|---|
+| `--money` | Append a monetary estimate based on `impact.hourly_rate_usd` and `impact.defect_cost_usd` |
+| `--since <YYYY-MM-DD>` | Limit the analysis to logs from this date onward |
+| `--json` | Output the full report as JSON |
+| `-c, --config <path>` | Config file path |
+
+The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
+
+
+---
+
 ## Configuration
 
 crosscheck looks for a config file in these locations (first found wins):
@@ -544,6 +615,29 @@ routing:
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"
     - "Co-Authored-By: codex"
+
+  # Restrict reviews to PRs opened by these GitHub logins.
+  # Recommended: set to the accounts your AI agents use.
+  # Empty = no restriction (all matching PRs reviewed).
+  allowed_authors:
+    - your-claude-bot-account
+    - your-codex-bot-account
+
+# ── Tunnel (watch mode only) ──────────────────────────────────────────────────
+# localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.
+# smee — stable relay via smee.io; events queued while offline.
+#   Setup: npm install -g smee-client, visit https://smee.io/new
+tunnel:
+  backend: localhost.run
+  # backend: smee
+  # smee_channel: https://smee.io/your-channel-id
+
+# ── Impact reporting ──────────────────────────────────────────────────────────
+# Used by `crosscheck impact` to calculate estimated time and monetary value.
+impact:
+  assumed_human_review_minutes: 60   # baseline for time-saved calculation
+  hourly_rate_usd: 150               # for --money estimate
+  defect_cost_usd: 150               # per issue caught, for --money estimate
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
@@ -718,6 +812,25 @@ crosscheck fetches the PR base branch (e.g. `staging`) into the temp clone befor
 - The base branch exists and is accessible with your token.
 - Your `GITHUB_TOKEN` has `repo` scope.
 - The branch name in the PR matches what's on the remote.
+
+### How do I use smee.io instead of localhost.run?
+
+`localhost.run` (the default) drops events if your laptop is offline when GitHub fires the webhook. [smee.io](https://smee.io) queues events and replays them when your laptop reconnects — useful when the reviewer machine isn't always on.
+
+```bash
+npm install -g smee-client
+```
+
+Visit [smee.io/new](https://smee.io/new) and copy the channel URL. Then in `crosscheck.config.yml`:
+
+```yaml
+tunnel:
+  backend: smee
+  smee_channel: https://smee.io/your-channel-id
+```
+
+Register the smee channel URL as your GitHub webhook Payload URL once. crosscheck will forward events from the channel to the local server automatically. Unlike `localhost.run`, no re-registration is needed on restart.
+
 
 ### Does optimize run automatically?
 

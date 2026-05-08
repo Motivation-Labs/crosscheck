@@ -269,6 +269,22 @@ tunnel:
 
 ---
 
+## Documentation
+
+| | |
+|---|---|
+| **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all commands and flags, complete config reference, how it works, FAQ |
+| **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config file with every option |
+| **[AGENT.md](./AGENT.md)** | Harness document used by `crosscheck optimize` — how the AI improves reviewer instructions |
+
+---
+
+## Contributing
+
+Issues and PRs welcome at [github.com/Motivation-Labs/crosscheck](https://github.com/Motivation-Labs/crosscheck).
+
+---
+
 ## License
 
-[MIT](./LICENSE) — free to use, modify, and distribute.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 Motivation Labs LLC.

@@ -55,6 +55,27 @@ async function runChecks(): Promise<CheckResult[]> {
   const tokenDetail = envToken ? 'set via env' : ghAuthed ? 'via gh auth login' : 'missing'
   results.push({ label: 'GITHUB_TOKEN', ok: tokenResolvable, detail: tokenDetail, fix: tokenResolvable ? undefined : 'Set GITHUB_TOKEN or run: gh auth login' })
 
+  // Check admin:org_hook scope — needed for org-level webhook registration in watch/serve
+  if (ghAuthed) {
+    try {
+      const statusOutput = execSync('gh auth status 2>&1', {
+        encoding: 'utf8',
+        env: { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },
+      })
+      const scopeMatch = statusOutput.match(/Token scopes:\s*(.+)/)
+      if (scopeMatch) {
+        const scopes = scopeMatch[1]
+        const hasOrgHook = /admin:org_hook|'admin:org'|"admin:org"/.test(scopes)
+        results.push({
+          label: 'org webhook scope',
+          ok: hasOrgHook,
+          detail: hasOrgHook ? 'admin:org_hook present' : `not granted (scopes: ${scopes.trim()})`,
+          fix: hasOrgHook ? undefined : 'gh auth refresh -s admin:org_hook  (required for org-level webhooks)',
+        })
+      }
+    } catch { /* gh not available or scope line absent — skip silently */ }
+  }
+
   // Check WEBHOOK_SECRET — auto-generated if missing, so always ok
   const fromEnv = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
   const secretDetail = fromEnv

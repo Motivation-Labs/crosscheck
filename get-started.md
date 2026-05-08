@@ -24,6 +24,7 @@
   - [impact](#crosscheck-impact)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
+- [Post-review auto-fix](#post-review-auto-fix)
 - [FAQ](#faq)
 
 ---
@@ -653,6 +654,26 @@ impact:
   hourly_rate_usd: 150               # for --money estimate
   defect_cost_usd: 150               # per issue caught, for --money estimate
 
+# ── Post-review auto-fix ──────────────────────────────────────────────────────
+# Runs after each review. When issues are found, the authoring vendor opens a
+# fix PR targeting the original branch. You approve and merge it; the original
+# PR updates automatically.
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues        # on_issues | always | never
+    min_severity: warning     # error | warning | info — skip cosmetic findings
+    # same-as-author: the vendor that wrote the PR also applies the fix
+    # In cross-vendor mode: Claude-authored → Claude fixes; Codex-authored → Codex fixes
+    fixer: same-as-author     # same-as-author | same-as-reviewer | codex | claude
+    delivery:
+      mode: pull_request      # pull_request | commit | comment
+      # pull_request → fix PR targets original branch; human approves before merge
+      # commit       → fixes pushed directly onto the original PR branch
+      # comment      → suggested fixes posted as review comments only
+      pr_title: "fix: address CR issues in #{original_pr_title}"
+      label: cr-autofix       # GitHub label applied to the fix PR
+
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
   port: 7891
@@ -715,6 +736,17 @@ clone PR branch into temp directory
             ▼
     post comment to PR via GitHub API
     delete temp clone
+            │
+            ▼  post_review.auto_fix (if enabled and issues found)
+    authoring vendor reads review comment
+            │
+    ├─ claude --print ...  (Claude authored the PR)
+    │  or
+    └─ codex ...           (Codex authored the PR)
+            │
+            ▼
+    opens fix PR → fix/cr-<pr-number>-address-issues → original branch
+    (you review and merge the fix PR; original PR updates automatically)
 ```
 
 ### PR origin detection
@@ -777,6 +809,39 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
 - **No credentials in clones** — `gh repo clone` uses the gh credential helper; no tokens written to disk
+
+---
+
+## Post-review auto-fix
+
+When `post_review.auto_fix.enabled` is `true` (the default), crosscheck completes the full loop automatically after every review that finds issues:
+
+```
+agent opens PR #42  →  opposite vendor reviews  →  issues found?
+                                                         │ yes
+                                        authoring vendor generates fixes
+                                                         │
+                                    fix PR #43 opened → feat/my-feature
+                                                         │
+                                    you review and merge PR #43
+                                                         │
+                                    PR #42 updates → you merge to main
+```
+
+**Key design decisions:**
+
+| Setting | Default | Why |
+|---|---|---|
+| `fixer: same-as-author` | the vendor that wrote the PR also fixes it | The authoring agent knows its own code and style best |
+| `delivery: pull_request` | opens a new PR, doesn't push directly | You stay in the loop — no code lands without your approval |
+| `trigger: on_issues` | only fires when the reviewer found warnings or worse | Skips the fix step on clean PRs |
+| `min_severity: warning` | ignores info/cosmetic findings | Avoids noisy fix PRs for style-only comments |
+
+**Fix PR branch naming:** `fix/cr-<original-pr-number>-address-issues`
+
+**Original PR number:** never changes. The fix PR targets the original branch; once merged, its commits appear in the original PR automatically.
+
+**To disable:** set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`.
 
 ---
 
@@ -845,6 +910,16 @@ tunnel:
 
 Register the smee channel URL as your GitHub webhook Payload URL once. crosscheck will forward events from the channel to the local server automatically. Unlike `localhost.run`, no re-registration is needed on restart.
 
+
+### Can I disable the auto-fix step?
+
+Yes. Set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`. You can also raise `min_severity` to `error` to limit fixes to blocking issues only.
+
+To push fixes directly without a separate PR (skipping your review), switch to `delivery: commit`. To get suggested fixes as review comments without any code push, use `delivery: comment`.
+
+### Why does the fixer use the same vendor that wrote the PR?
+
+The authoring agent has the most context about its own code — the same style, constraints, and intent behind the original changes. Using `fixer: same-as-author` keeps the feedback loop tight: the agent writes the code, another agent reviews it, the original agent fixes it. You can override this to `same-as-reviewer`, `codex`, or `claude` if you prefer a different arrangement.
 
 ### Does optimize run automatically?
 

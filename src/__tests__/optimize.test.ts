@@ -19,6 +19,15 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     logs: { enabled: false, retention_days: 7 },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
+    post_review: {
+      auto_fix: {
+        enabled: false,
+        trigger: 'on_issues',
+        min_severity: 'warning',
+        fixer: 'same-as-author',
+        delivery: { mode: 'pull_request', pr_title: 'fix: address CR issues in #{original_pr_title}', label: 'cr-autofix' },
+      },
+    },
   }
 }
 

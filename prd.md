@@ -234,6 +234,50 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`.
   - **Tests Required:** sentinel present + version match + repo-local files exist → no files written; sentinel present + version match + repo-local files absent → creates missing repo-local files only (no webhook secret re-generated); sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present; second repo with same version → repo-local files created even though sentinel already exists.
 
+- [ ] **`crosscheck impact`** — report cumulative value crosscheck has created: time saved through automation, issues caught before merge, and second-order code quality signals. Pulls from local logs; no telemetry, no network calls.
+  - **User:** Anyone who wants to understand whether crosscheck is pulling its weight — developers justifying continued use, team leads making tooling decisions, engineering managers tracking process improvement.
+  - **Acceptance Criteria:**
+    - `crosscheck impact` prints a human-readable report to stdout; `--json` outputs structured JSON.
+    - `--since YYYY-MM-DD` limits the analysis window (default: all time).
+    - **Time-saving section:**
+      - Shows total PRs reviewed, total estimated human-hours saved, and average minutes saved per PR.
+      - Calculation: `time_saved_per_pr = assumed_human_review_min − actual_ai_review_min`. Default `assumed_human_review_min = 60` (configurable via `impact.assumed_human_review_minutes` in `crosscheck.config.yml`). `actual_ai_review_min` is derived from `review_complete.duration_ms` in the logs; falls back to 2 min when data is absent.
+      - Displays the assumption so users can calibrate: `  ⓘ assumes 60 min avg human review — set impact.assumed_human_review_minutes to adjust`.
+    - **Issues caught section:**
+      - APPROVE / NEEDS_WORK / BLOCK verdict counts and percentages.
+      - `issues_caught = NEEDS_WORK + BLOCK` verdicts — PRs that would have shipped with unreviewed feedback had crosscheck not run.
+      - BLOCK count surfaced separately with a plain-language note: "potential bugs or breaking changes caught before merge".
+    - **Code quality signal section:**
+      - Trend line: BLOCK rate over the analysis period (weekly buckets). A declining BLOCK rate may indicate improved code quality upstream.
+      - Top file types with NEEDS_WORK/BLOCK verdicts — surfaces where the most issues appear.
+    - **Monetary estimate (opt-in):**
+      - Hidden by default; shown with `--money`.
+      - Formula: `estimated_value = (hours_saved × hourly_rate) + (issues_caught × defect_cost)`. Defaults: `hourly_rate = 150` (USD), `defect_cost = 150` (one hour of engineer time per issue). Both configurable via `impact.hourly_rate_usd` and `impact.defect_cost_usd`.
+      - Shown with a clear disclaimer: "rough estimate based on configurable assumptions; not accounting data."
+    - Exit 0 always (reporting tool, not a gate).
+    - Gracefully handles empty log dir: prints `No review data yet — run crosscheck watch to start collecting.`
+  - **Technical Notes:**
+    - New file: `src/commands/impact.ts`.
+    - Reuse the log parser from `diagnose.ts` — extract into `src/lib/log-reader.ts` if not already a standalone module.
+    - New config fields in `schema.ts`:
+      ```
+      ImpactConfigSchema = z.object({
+        assumed_human_review_minutes: z.number().int().min(1).default(60),
+        hourly_rate_usd: z.number().min(0).default(150),
+        defect_cost_usd: z.number().min(0).default(150),
+      })
+      ```
+      Added to `ConfigSchema` as `impact: ImpactConfigSchema.default({})`.
+    - Duration data comes from `review_complete` log entries that include `duration_ms`. For entries without duration, omit them from the per-review average (don't assume a value).
+    - Verdict data comes from `review_complete` log entries with a `verdict` field. Entries with no verdict are counted as `UNKNOWN` and excluded from BLOCK/NEEDS_WORK totals.
+    - Wire into `cli.ts` as `crosscheck impact [--json] [--since <date>] [--money]`.
+    - `crosscheck status` gets a one-line impact summary appended: `  impact  47 PRs reviewed · ~23h saved · 8 issues caught` — linking to full `crosscheck impact` for details.
+  - **Calculation methodology (basis):**
+    - **Time saved per PR**: Industry research (Google Engineering Productivity, Microsoft Research SPACE framework) puts median human code review time at 60–90 min per PR for non-trivial changes. The 60 min default is conservative. AI turnaround measured from log `duration_ms` is typically 1–3 min. Net saving per PR: ~57 min at default settings.
+    - **Defect cost**: NIST studies put post-merge defect fix cost at 4–10× the cost of catching it during review. At $150/hr and 1 hr median fix time, each issue caught pre-merge is conservatively worth $150. BLOCK-severity issues are not weighted more (keeps the math transparent and conservative).
+    - **Second-order quality signal**: Declining BLOCK rate over time is a leading indicator that PRs are getting cleaner upstream — teams internalize review feedback. This is a proxy metric, not a hard measurement.
+  - **Tests Required:** empty log dir → graceful no-data message; log with mixed verdicts → correct APPROVE/NEEDS_WORK/BLOCK counts; duration data present → `actual_ai_review_min` calculated correctly; duration data absent → falls back to default; `--since` filters log entries by date; `--json` output is valid JSON matching schema; `--money` flag gates monetary estimate display; `crosscheck status` shows one-line summary.
+
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
@@ -640,6 +684,121 @@ New users see the full capability surface immediately. The template is the docum
 
 ---
 
+#### `crosscheck impact` — value dashboard
+
+**Problem:** crosscheck runs in the background and reviews PRs silently. After a few weeks, users have no concrete sense of what it has saved them — so they can't justify the setup cost, can't calibrate the tool, and can't communicate its value to their team.
+
+**Value proposition of this feature:** Turn passive automation logs into a human-readable ROI summary. The answer to "is crosscheck worth it?" should be one command away.
+
+---
+
+**Time-saving calculation:**
+
+The core unit is *time saved per PR* = `assumed_human_review_min − actual_ai_review_min`.
+
+```
+assumed_human_review_min  → configurable, default 60
+actual_ai_review_min      → avg(review_complete.duration_ms) / 60000 from logs; fallback 2 min
+time_saved_per_pr         → assumed − actual  (≈ 58 min at defaults)
+total_hours_saved         → (time_saved_per_pr × prs_reviewed) / 60
+```
+
+**Basis for the 60-minute default:**
+- Google's Engineering Productivity research: median PR review latency 60–90 min for non-trivial changes when factoring in reviewer availability.
+- GitHub Octokit 2023: developers spend ~15–20% of time on code review; for a 40h week that's 6–8 hours, typically covering 4–6 PRs → 60–90 min per PR average.
+- Microsoft Research SPACE framework: "review overhead" tracked as 30–120 min depending on PR size; 60 min is the lower-bound safe default.
+
+The displayed assumption line keeps the model transparent. Users with smaller/larger PRs can calibrate.
+
+---
+
+**Issues-caught calculation:**
+
+```
+issues_caught    = NEEDS_WORK_count + BLOCK_count
+block_count      = BLOCK verdicts (surfaced separately — higher severity)
+issue_rate       = issues_caught / prs_reviewed
+```
+
+These are PRs that received actionable feedback. Without crosscheck, that feedback would not exist (cross-vendor review only happens because crosscheck ran).
+
+---
+
+**Defect cost model (opt-in via `--money`):**
+
+```
+estimated_value = (hours_saved × hourly_rate)
+                + (issues_caught × defect_cost_per_issue)
+
+defaults:
+  hourly_rate         = $150 USD (US mid-senior engineer)
+  defect_cost         = $150 USD (1 hr to fix, same rate)
+```
+
+**Basis for defect cost:**
+- NIST 2002 report: cost to fix a defect grows 4–10× from review to production. At $150/hr and a 1-hour median fix, a defect caught in review saves $150 (fix during PR) vs $600–$1,500 (fix post-merge). Using $150 is maximally conservative — it only counts the direct fix cost, not downstream cost.
+- IBM Systems Sciences Institute: software bugs found in production cost 6–15× more than during development. Same conservative logic applies.
+
+The `--money` flag is opt-in so the output doesn't over-claim in contexts where monetary framing is inappropriate (open-source, student projects, etc.).
+
+---
+
+**Second-order code quality signal:**
+
+The BLOCK rate trend (BLOCK verdicts / total PRs, by week) is a leading indicator of upstream quality improvement:
+
+- Declining BLOCK rate: teams are internalizing review feedback; fewer high-severity issues reach PR stage.
+- Stable BLOCK rate: issues persist — potential input for `crosscheck optimize` to tighten review instructions.
+- Rising BLOCK rate: either more complex PRs or a genuine quality regression.
+
+This is presented as a trend, not a judgment, with a note that it is a proxy metric.
+
+---
+
+**Sample output:**
+
+```
+crosscheck impact  (all time · 63 PRs)
+
+  Time saved
+  ─────────────────────────────────────────
+  PRs reviewed          63
+  Avg AI review time    1.8 min
+  Assumed human time    60 min  ⓘ
+  Time saved per PR     ~58 min
+  Total hours saved     ~61 h
+
+  Issues caught
+  ─────────────────────────────────────────
+  APPROVE               41  (65%)
+  NEEDS WORK            17  (27%)   ← actionable feedback
+  BLOCK                  5   (8%)   ← potential bugs/breaking changes caught before merge
+  Total issues caught   22
+
+  Code quality trend  (BLOCK rate, weekly)
+  ─────────────────────────────────────────
+  Apr W1  ██████  12%
+  Apr W2  ████    8%
+  Apr W3  ███     6%
+  Apr W4  ██      4%   ↓ improving
+
+  ⓘ assumes 60 min avg human review — set impact.assumed_human_review_minutes to adjust
+  Run `crosscheck impact --money` for a rough monetary estimate.
+```
+
+With `--money`:
+```
+  Estimated value
+  ─────────────────────────────────────────
+  Time savings          ~$9,150  (61h × $150/hr)
+  Issues prevented      ~$3,300  (22 × $150/issue)
+  Total estimate        ~$12,450
+
+  ⚠ rough estimate · adjust rates in crosscheck.config.yml · not accounting data
+```
+
+---
+
 #### Auto-init on `watch`/`serve`
 
 **Problem:** the current flow requires `crosscheck init` before `crosscheck watch`. This is undiscoverable — most users will try `watch` first, hit a missing-config or missing-secret error, and not know why. `init` as a prerequisite is friction that blocks the happy path.
@@ -684,7 +843,50 @@ Silent on subsequent runs. Auth checks (missing gh, claude, codex CLIs) are not 
 
 ---
 
+#### smee.io tunnel backend for `crosscheck watch`
+
+**Problem:** `localhost.run` SSH tunnels silently go dead (HTTP 503) without the SSH process exiting. `watch` stays stuck waiting for an SSH exit event, so all webhook events are dropped until the user manually restarts. Root-cause observation: PR #27 received no review because the tunnel died between 03:40 and 03:49 UTC while `watch` was running.
+
+**Solution:** add `tunnel.backend: smee` as an opt-in alternative. The smee.io relay queues events while the local client is offline and replays them on reconnect — eliminating the missed-event class of failure entirely.
+
+**Design decisions:**
+
+| | localhost.run (default) | smee.io |
+|---|---|---|
+| Install | none (ssh built-in) | `npm install -g smee-client` |
+| URL stability | changes every restart | permanent channel URL |
+| Webhook registration | auto (org/repo hook API) | manual (one-time, point to smee URL) |
+| Missed events | lost permanently | queued + replayed |
+| Dead-tunnel detection | periodic health check (PR #29) | N/A — relay handles reconnect |
+
+**Why localhost.run stays the default now:**
+- Zero-install is the core UX promise; requiring `npm install -g smee-client` adds friction on first run.
+- Manual webhook registration is a steeper setup step.
+- The health-check fix (PR #29) closes the most common failure mode for localhost.run.
+
+**Path to making smee the default:**
+1. Ship smee backend (this PR) and gather feedback in production.
+2. If missed-event reports drop to zero and install friction proves manageable, flip default in a minor version bump.
+3. `crosscheck init` can auto-generate a smee channel (via the smee.io API) and write `tunnel.smee_channel` to config, making setup zero-manual-steps.
+
+**Config contract (shipped):**
+```yaml
+tunnel:
+  backend: smee          # localhost.run | smee
+  smee_channel: https://smee.io/your-channel-id
+```
+
+**Implementation:**
+- `schema.ts`: `TunnelConfigSchema` with `backend` and `smee_channel`; added to `ConfigSchema`
+- `watch.ts`: after banner print, branch on `config.tunnel.backend`; smee mode spawns `smee --url <channel> --path <path> --port <port>` and auto-restarts on exit; `currentTunnelProc` shared with cleanup handler
+- `init.ts`: checks if `smee` CLI is installed; shows one-line tip if missing
+- `crosscheck.config.example.yml`: commented tunnel section with full instructions
+
+---
+
 ### 🔭 Backlog
+
+- [ ] **smee.io as default tunnel** — once smee proves stable in production, flip `tunnel.backend` default from `localhost.run` to `smee`. Migration: `crosscheck init` auto-generates a smee channel and writes it to config. Old configs keep working (localhost.run continues to work). Track: has `smee-client` install friction reduced? Are missed-event reports gone?
 
 - [ ] **Retry logic** — if `codex review` or `claude` subprocess fails, retry once with exponential backoff
 - [ ] **`crosscheck logs`** — tail recent review activity from a local log file

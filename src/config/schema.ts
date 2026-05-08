@@ -47,6 +47,14 @@ export const LogsConfigSchema = z.object({
   retention_days: z.number().int().min(1).max(30).default(7),
 })
 
+export const TunnelConfigSchema = z.object({
+  // localhost.run: zero-config SSH tunnel, reconnects automatically, no install required.
+  // smee: webhook relay via smee.io — events queued while offline, stable channel URL.
+  //   Requires: npm install -g smee-client  and  tunnel.smee_channel set below.
+  backend: z.enum(['localhost.run', 'smee']).default('localhost.run'),
+  smee_channel: z.string().default(''),
+})
+
 export const ImpactConfigSchema = z.object({
   assumed_human_review_minutes: z.number().int().min(1).default(60),
   hourly_rate_usd: z.number().min(0).default(150),
@@ -65,6 +73,7 @@ export const ConfigSchema = z.object({
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),
+  tunnel: TunnelConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
 })
@@ -73,4 +82,5 @@ export type Config = z.infer<typeof ConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
+export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>

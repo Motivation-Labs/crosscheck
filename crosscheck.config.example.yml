@@ -75,6 +75,25 @@ routing:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"
 
+# ─── Tunnel (watch mode only) ────────────────────────────────────────────────
+# Controls how crosscheck watch receives GitHub webhook events on your laptop.
+#
+# localhost.run (default) — zero config, SSH tunnel, random URL each restart.
+#   No install required. URL changes on reconnect → webhook re-registered automatically.
+#   Limitation: events delivered while the tunnel is down are lost.
+#
+# smee — webhook relay via smee.io. Stable channel URL; events are queued and
+#   replayed even when your laptop is offline or watch is restarted.
+#   Setup:
+#     1. npm install -g smee-client
+#     2. Visit https://smee.io/new — copy the channel URL
+#     3. Point your GitHub org/repo webhook Payload URL to the channel URL
+#     4. Set tunnel.smee_channel below
+#
+# tunnel:
+#   backend: smee
+#   smee_channel: https://smee.io/your-channel-id
+
 # ─── Server (serve mode only) ────────────────────────────────────────────────
 server:
   port: 7891

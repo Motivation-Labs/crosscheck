@@ -142,9 +142,13 @@ export async function runInit(configPath?: string) {
   } else {
     console.log(chalk.dim(`Config already exists at ${dest}\n`))
   }
-  // smee-client is optional but improves watch mode reliability.
-  try { require('child_process').execSync('smee --version', { stdio: 'ignore' }) } catch {
-    console.log(chalk.dim('Tip: install smee-client for reliable webhook delivery:'))
+
+  // Smee-client is optional but improves watch mode reliability.
+  // Check if it's installed and show a one-line tip if not.
+  try {
+    execSync('smee --version', { stdio: 'ignore' })
+  } catch {
+    console.log(chalk.dim('Tip: install smee-client for reliable webhook delivery (events queued while offline):'))
     console.log(chalk.dim('  npm install -g smee-client'))
     console.log(chalk.dim('  Then set tunnel: backend: smee in your config.\n'))
   }

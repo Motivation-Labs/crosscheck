@@ -81,6 +81,28 @@ jobs:
           body: ${{ steps.semver.outputs.changelog }}
           generate_release_notes: true   # appends GitHub's auto-notes below the changelog
 
+      - name: Notify release published
+        if: steps.semver.outputs.new_tag != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[crosscheck] ${{ steps.semver.outputs.new_tag }} published to npm"
+          to: ${{ secrets.MAIL_USERNAME }}
+          from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            crosscheck ${{ steps.semver.outputs.new_tag }} has been published to npm as @latest.
+
+            Install: npm install -g @motivation-labs/crosscheck@${{ steps.semver.outputs.new_tag }}
+
+            GitHub Release: https://github.com/${{ github.repository }}/releases/tag/${{ steps.semver.outputs.new_tag }}
+
+            Changes:
+            ${{ steps.semver.outputs.changelog }}
+
       - name: No release needed
         if: steps.semver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."

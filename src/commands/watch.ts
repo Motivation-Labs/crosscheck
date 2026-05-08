@@ -324,13 +324,17 @@ export async function runWatch(configPath?: string) {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         const isCreds = /bad credentials|\[401\]/i.test(msg)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+        // GitHub returns 404 (not 403) when the token can see the org but lacks
+        // admin:org_hook scope — treat it the same as a scope failure.
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible|\[404\]/i.test(msg)
         log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
         if (isCreds) {
           log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
           log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
         } else if (isScope) {
           log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
+          log(chalk.dim(`    run: gh auth refresh -s admin:org_hook`))
+          log(chalk.dim(`    or create a PAT at github.com/settings/tokens with admin:org scope`))
         } else {
           log(chalk.dim(`    ${msg}`))
         }

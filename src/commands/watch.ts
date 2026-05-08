@@ -288,6 +288,12 @@ export async function runWatch(configPath?: string) {
   }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  if (config.routing.allowed_authors.length === 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+    console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
+    console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+  }
   console.log()
 
   // Tunnel reconnect loop — runs until SIGINT/SIGTERM

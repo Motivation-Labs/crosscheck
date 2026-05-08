@@ -29,12 +29,19 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   }
   inFlight.add(key)
 
+  const author = pr.user.login
+  const allowedAuthors = config.routing.allowed_authors
+  if (allowedAuthors.length > 0 && !allowedAuthors.includes(author)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+    return
+  }
+
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 
   const origin = detectPROrigin(pr.body ?? '', config)
   const reviewer = assignReviewer(origin, config)
 
-  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
 
   if (!reviewer) {
     log(`  → origin=${origin}, no reviewer — skipping`)
@@ -133,6 +140,12 @@ export function runServe(configPath?: string) {
     console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
     console.log(`  port      ${chalk.cyan(String(config.server.port))}`)
     console.log(`  endpoint  ${chalk.cyan(webhookUrl)}`)
+    if (config.routing.allowed_authors.length === 0) {
+      console.log()
+      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
+      console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+    }
     console.log()
     if (config.orgs.length > 0) {
       console.log(chalk.dim('Register the endpoint above as a GitHub org webhook (content-type: application/json).'))

@@ -47,6 +47,12 @@ export const LogsConfigSchema = z.object({
   retention_days: z.number().int().min(1).max(30).default(7),
 })
 
+export const ImpactConfigSchema = z.object({
+  assumed_human_review_minutes: z.number().int().min(1).default(60),
+  hourly_rate_usd: z.number().min(0).default(150),
+  defect_cost_usd: z.number().min(0).default(150),
+})
+
 export const ConfigSchema = z.object({
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
@@ -60,9 +66,11 @@ export const ConfigSchema = z.object({
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
+  impact: ImpactConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
+export type ImpactConfig = z.infer<typeof ImpactConfigSchema>

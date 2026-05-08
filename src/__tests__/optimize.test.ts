@@ -17,6 +17,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
       codex: { enabled: codexEnabled, auth: 'subscription', effort: 'medium' },
     },
     logs: { enabled: false, retention_days: 7 },
+    impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
   }
 }
 

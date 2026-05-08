@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
-import { sanitizeEntry, loadErrorEntriesForPattern, type RawLogEntry } from '../lib/log-analysis.js'
+import { sanitizeEntry, loadErrorEntriesForPattern, sanitizeDraftContent, type RawLogEntry } from '../lib/log-analysis.js'
 import { parseDraft, buildIssueContent } from '../commands/issue.js'
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), '..', 'fixtures')
@@ -63,10 +63,66 @@ describe('sanitizeEntry', () => {
     expect(out.pr).toBe(42)
   })
 
+  it('sanitizes stack trace with file paths', () => {
+    const entry: RawLogEntry = {
+      ts: '', level: 'error', event: 'error',
+      stack: 'Error: failed\n    at Object.<anonymous> (/Users/user/projects/app/src/index.ts:10:5)',
+    }
+    expect(sanitizeEntry(entry).stack).not.toContain('/Users/user/projects/app/src/index.ts')
+    expect(sanitizeEntry(entry).stack).toContain('[file-path]')
+  })
+
+  it('sanitizes stderr field with repo name', () => {
+    const entry: RawLogEntry = {
+      ts: '', level: 'error', event: 'error',
+      stderr: 'fatal: repository acme/backend not found',
+    }
+    expect(sanitizeEntry(entry).stderr).not.toContain('acme/backend')
+    expect(sanitizeEntry(entry).stderr).toContain('[repo]')
+  })
+
+  it('sanitizes command field with file path', () => {
+    const entry: RawLogEntry = {
+      ts: '', level: 'error', event: 'error',
+      command: 'codex review /tmp/crosscheck-abc123/acme-api/src/main.ts',
+    }
+    expect(sanitizeEntry(entry).command).not.toContain('/tmp/crosscheck-abc123/acme-api/src/main.ts')
+    expect(sanitizeEntry(entry).command).toContain('[file-path]')
+  })
+
   it('does not mutate the original entry', () => {
     const entry: RawLogEntry = { ts: '', level: 'error', event: 'error', repo: 'acme/api' }
     sanitizeEntry(entry)
     expect(entry.repo).toBe('acme/api')
+  })
+})
+
+// ──────────────────────────────────────────────────────
+// sanitizeDraftContent
+// ──────────────────────────────────────────────────────
+
+describe('sanitizeDraftContent', () => {
+  it('strips repo name from title', () => {
+    const { title } = sanitizeDraftContent('Bug in acme/api causes crash', '')
+    expect(title).not.toContain('acme/api')
+    expect(title).toContain('[repo]')
+  })
+
+  it('strips GitHub URL from body', () => {
+    const { body } = sanitizeDraftContent('', 'See https://github.com/acme/api/issues/12 for context.')
+    expect(body).not.toContain('github.com')
+    expect(body).toContain('[github-url]')
+  })
+
+  it('strips file path from body', () => {
+    const { body } = sanitizeDraftContent('', 'Error at /home/user/project/src/index.ts:42')
+    expect(body).toContain('[file-path]')
+  })
+
+  it('leaves clean content unchanged', () => {
+    const { title, body } = sanitizeDraftContent('codex reviewer exits with command not found', '## Description\nThe reviewer fails.')
+    expect(title).toBe('codex reviewer exits with command not found')
+    expect(body).toContain('## Description')
   })
 })
 

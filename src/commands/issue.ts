@@ -8,7 +8,7 @@ import { execa } from 'execa'
 import { loadConfig } from '../config/loader.js'
 import { buildDiagnoseReport } from './diagnose.js'
 import { selectOptimizeAgent } from './optimize.js'
-import { sanitizeEntry, loadErrorEntriesForPattern } from '../lib/log-analysis.js'
+import { sanitizeEntry, loadErrorEntriesForPattern, sanitizeDraftContent } from '../lib/log-analysis.js'
 import type { RawLogEntry } from '../lib/log-analysis.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -297,7 +297,10 @@ export async function runIssue(opts: {
   }
 
   // 7. Build final content and show draft
-  const { title, body } = buildIssueContent(draftParsed, answers)
+  // Sanitize AI output before use — the agent may echo back content it received,
+  // even if inputs were sanitized; this is the last gate before posting.
+  const cleanDraft = sanitizeDraftContent(draftParsed.title, draftParsed.body)
+  const { title, body } = buildIssueContent(cleanDraft, answers)
   printDraft(title, body)
 
   // 8. Submit

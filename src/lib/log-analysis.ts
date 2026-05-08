@@ -18,12 +18,19 @@ export interface RawLogEntry {
 
 export function sanitizeEntry(entry: RawLogEntry): RawLogEntry {
   const out: RawLogEntry = { ...entry }
+  // Sanitize repo field first (explicit replacement, not text pattern)
   if (out.repo) out.repo = '[repo]'
-  const textFields = ['message', 'branch', 'url', 'error'] as const
-  for (const f of textFields) {
-    if (typeof out[f] === 'string') out[f] = sanitizeText(out[f] as string)
+  // Sanitize every string-valued field — covers message, stack, stderr, command,
+  // branch, url, and any future fields added by logError
+  for (const key of Object.keys(out)) {
+    if (key === 'repo') continue
+    if (typeof out[key] === 'string') out[key] = sanitizeText(out[key] as string)
   }
   return out
+}
+
+export function sanitizeDraftContent(title: string, body: string): { title: string; body: string } {
+  return { title: sanitizeText(title), body: sanitizeText(body) }
 }
 
 function sanitizeText(s: string): string {

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="crosscheck" width="160" />
+</p>
+
 # crosscheck
 
 **A lightweight orchestration layer that makes your AI coding agents review each other's work — then fix it.**

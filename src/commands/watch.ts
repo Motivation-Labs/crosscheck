@@ -14,7 +14,7 @@ import {
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
+import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from '../config/loader.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -279,6 +279,8 @@ export async function runWatch(configPath?: string) {
   }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  const cfgPath = resolveConfigPath(configPath)
+  console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
   console.log()
 
   // Tunnel reconnect loop — runs until SIGINT/SIGTERM
@@ -332,17 +334,22 @@ export async function runWatch(configPath?: string) {
           || ('org' in scope && /\[404\]/i.test(msg))
         log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
         if (isCreds) {
-          log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
-          log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
+          log(chalk.dim(`    token invalid or expired`))
+          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh')}`)
+          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('(regenerate PAT)')}`)
         } else if (isScope) {
-          log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
-          log(chalk.dim(`    run: gh auth refresh -s admin:org_hook`))
-          log(chalk.dim(`    or create a PAT at github.com/settings/tokens with admin:org scope`))
+          log(chalk.dim(`    token missing admin:org_hook scope or org Owner role`))
+          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('new PAT → enable admin:org scope')}`)
+          log(`    ${chalk.dim('    or register the webhook manually:')}`)
+          log(`    ${chalk.dim('      Payload URL')}  ${chalk.cyan(webhookUrl)}`)
+          log(`    ${chalk.dim('      Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
+          log(`    ${chalk.dim('      Hooks page')}   ${chalk.cyan(`https://github.com/organizations/${label}/settings/hooks`)}`)
         } else {
           log(chalk.dim(`    ${msg}`))
+          log(`    ${chalk.dim('    Payload URL')}  ${chalk.cyan(webhookUrl)}`)
+          log(`    ${chalk.dim('    Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
         }
-        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
-        log(chalk.dim(`    https://github.com/organizations/${label}/settings/hooks`))
       }
     }
 

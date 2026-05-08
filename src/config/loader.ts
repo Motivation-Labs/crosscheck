@@ -17,8 +17,12 @@ function findConfigFile(): string | null {
   return candidates.find(existsSync) ?? null
 }
 
+export function resolveConfigPath(explicitPath?: string): string | null {
+  return explicitPath ?? findConfigFile()
+}
+
 export function loadConfig(explicitPath?: string): Config {
-  const configPath = explicitPath ?? findConfigFile()
+  const configPath = resolveConfigPath(explicitPath)
   if (!configPath) return ConfigSchema.parse({})
 
   const raw = yaml.load(readFileSync(configPath, 'utf8'))

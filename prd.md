@@ -222,7 +222,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
   - **User:** Anyone running crosscheck for the first time. The current expectation ("run init first") is undiscoverable — most users just try `crosscheck watch` and hit missing-config errors.
   - **Acceptance Criteria:**
     - On `crosscheck watch` / `crosscheck serve` startup, before opening the tunnel or binding the port, call `ensureInit(cwd)`.
-    - If `~/.crosscheck/.initialized` exists and contains the current crosscheck version, `ensureInit` returns immediately — single `existsSync`, no output, no further file checks.
+    - If `~/.crosscheck/.initialized` exists and contains the current crosscheck version, `ensureInit` skips global setup (webhook secret generation) but still runs cheap `existsSync` checks for the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`). If either is missing, it is created before returning. No subprocess spawns on the fast path.
     - If sentinel is absent or version differs, print `  ✦ first run — setting up crosscheck...`, run missing setup steps, write sentinel, then continue.
     - Auth checks (gh, claude, codex CLIs) remain in `crosscheck init` only — not run by `ensureInit` (they require subprocess spawns and would defeat the fast-path goal).
     - After auto-init completes, watch/serve continues normally without requiring a restart.
@@ -232,7 +232,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: sentinel check first; on miss, runs setup steps and writes `~/.crosscheck/.initialized`.
     - `init.ts` calls `ensureInit` with `{ force: true, verbose: true }` then prints status table.
     - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`.
-  - **Tests Required:** sentinel present + version match → immediate no-op, no files written; sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present.
+  - **Tests Required:** sentinel present + version match + repo-local files exist → no files written; sentinel present + version match + repo-local files absent → creates missing repo-local files only (no webhook secret re-generated); sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present; second repo with same version → repo-local files created even though sentinel already exists.
 
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
@@ -460,14 +460,15 @@ New users see the full capability surface immediately. The template is the docum
 
 **Detection — sentinel file, one check per startup:**
 
-After a successful init, `ensureInit` writes `~/.crosscheck/.initialized` containing the current crosscheck version (e.g., `0.2.0`). On every subsequent `watch`/`serve` start, only this file is checked. If it exists and the version matches, the check exits immediately — one `existsSync` call, no further work.
+After a successful init, `ensureInit` writes `~/.crosscheck/.initialized` containing the current crosscheck version (e.g., `0.2.0`). On every subsequent `watch`/`serve` start, the sentinel is checked first. If it exists and the version matches, the global setup step (webhook secret) is skipped. However, the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`) are always checked via cheap `existsSync` calls — if either is absent, it is created before proceeding. This means the cost is O(1) `existsSync` calls per startup after the first run, not a full re-init, but each repo gets its local files regardless of whether another repo was initialized first.
 
-The three setup conditions (webhook secret, config file, workflow.yml) are only evaluated when the sentinel is absent or the version has changed (which happens on upgrades that require re-init). This makes the cost a one-time expense per installation, not a per-startup tax.
+The subprocess-heavy checks (gh, claude, codex auth) are never run by `ensureInit` — they remain in `crosscheck init` only.
 
 ```
-First run:   check sentinel → absent → run 3 setup steps → write sentinel → continue
-Subsequent:  check sentinel → present + version matches → done (< 1ms)
-Upgrade:     check sentinel → version mismatch → re-run changed steps only → update sentinel
+First run:   check sentinel → absent → run all setup steps → write sentinel → continue
+Subsequent:  check sentinel → present + version matches → skip webhook secret → check repo-local files → create any missing → continue
+Upgrade:     check sentinel → version mismatch → re-run changed steps → update sentinel → continue
+New repo:    check sentinel → present + version matches → repo-local files absent → create them → continue
 ```
 
 `crosscheck init` always runs the full check and rewrites the sentinel regardless — explicit verification is its job. Already-present files are never overwritten by auto-init.
@@ -479,17 +480,16 @@ Upgrade:     check sentinel → version mismatch → re-run changed steps only �
   ✓ webhook secret generated → ~/.crosscheck/webhook-secret
   ✓ config written → crosscheck.config.yml
   ✓ workflow written → .crosscheck/workflow.yml
-  ⚠ codex CLI not found — install it or set mode: single in config
 
 crosscheck watch
   repos   acme/api
   ...
 ```
 
-Silent on subsequent runs. Auth warnings (missing CLIs) are non-blocking — the user may only have one reviewer.
+Silent on subsequent runs. Auth checks (missing gh, claude, codex CLIs) are not run here — run `crosscheck init` explicitly to see full auth status.
 
 **Implementation:**
-- New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: checks sentinel first; if present and version matches, returns immediately; otherwise runs missing setup steps and writes `~/.crosscheck/.initialized`. Returns `{ created: string[] }`.
+- New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: checks sentinel first; if present and version matches, skips the webhook-secret step but still runs `existsSync` on the two repo-local files and creates any that are missing; if sentinel is absent or version differs, runs all setup steps and writes `~/.crosscheck/.initialized`. Returns `{ created: string[] }`. Never spawns a subprocess.
 - Sentinel file: `~/.crosscheck/.initialized` — plain text, contains semver string (e.g., `0.2.0`). Version compared against `pkg.version` at runtime. On mismatch, only the steps that changed between versions are re-run.
 - `init.ts` refactored: extracts setup steps into `setup.ts`; becomes a thin wrapper that calls `ensureInit` with `{ force: true, verbose: true }` (bypasses sentinel) then prints the full status table.
 - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`. `--no-init` flag skips the call entirely for CI/provisioned environments where setup is pre-baked.

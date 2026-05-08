@@ -106,12 +106,33 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       results[step.name] = { verdict, commentBody, commentUrl }
 
     } else if (step.type === 'address') {
+      // Respect post_review.auto_fix config
+      const autoFix = config.post_review.auto_fix
+      if (!autoFix.enabled || autoFix.trigger === 'never') {
+        log(chalk.dim(`  [${step.name}] auto-fix disabled — skipping`))
+        results[step.name] = { skipped: true }
+        continue
+      }
+
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
       if (!reviewResult?.commentBody) {
         log(chalk.dim(`  [${step.name}] no review comment available — skipping`))
         results[step.name] = { skipped: true }
         continue
+      }
+
+      // min_severity gate: BLOCK=error, NEEDS_WORK=warning, APPROVE=info
+      if (autoFix.trigger === 'on_issues') {
+        const verdictRank: Record<string, number> = { BLOCK: 2, NEEDS_WORK: 1, APPROVE: 0 }
+        const severityRank: Record<string, number> = { error: 2, warning: 1, info: 0 }
+        const minRank = severityRank[autoFix.min_severity] ?? 1
+        const actualRank = verdictRank[reviewResult.verdict ?? ''] ?? 0
+        if (actualRank < minRank) {
+          log(chalk.dim(`  [${step.name}] verdict ${reviewResult.verdict} below min_severity ${autoFix.min_severity} — skipping`))
+          results[step.name] = { skipped: true }
+          continue
+        }
       }
 
       const vendor = resolveReviewer(step.reviewer, origin, config)
@@ -165,8 +186,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         continue
       }
 
-      // Fork PRs: origin in the clone is the base repo, not the fork.
-      // Pushing to origin:head.ref would create/update a branch in the base repo instead.
+      // Fork PRs: cannot push to contributor's fork
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) {
         log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
@@ -174,22 +194,74 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         continue
       }
 
-      // Commit and push back to the PR branch
-      execSync('git add -A', { cwd: tmpDir })
-      execSync(
-        `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
-        { cwd: tmpDir },
-      )
-      const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-      execSync(`git push origin HEAD:${pr.head.ref}`, {
-        cwd: tmpDir,
-        env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
-      })
-      ctx.crosscheckShas.add(newSha)
+      const deliveryMode = autoFix.delivery.mode
 
-      spinner.succeed(`addressed ${appliedCount} issue${appliedCount !== 1 ? 's' : ''} → pushed to ${pr.head.ref}`)
-      fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha })
-      results[step.name] = { applied_count: appliedCount }
+      if (deliveryMode === 'commit') {
+        execSync('git add -A', { cwd: tmpDir })
+        execSync(
+          `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
+          { cwd: tmpDir },
+        )
+        const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+        execSync(`git push origin HEAD:${pr.head.ref}`, {
+          cwd: tmpDir,
+          env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+        })
+        ctx.crosscheckShas.add(newSha)
+        spinner.succeed(`addressed ${appliedCount} issue${appliedCount !== 1 ? 's' : ''} → pushed to ${pr.head.ref}`)
+        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
+        results[step.name] = { applied_count: appliedCount }
+
+      } else if (deliveryMode === 'pull_request') {
+        // Create a fix branch and open a PR targeting the original branch
+        const fixBranch = `fix/cr-${prNumber}-address-issues`
+        execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
+        execSync('git add -A', { cwd: tmpDir })
+        execSync(
+          `git commit -m "[crosscheck] fix: address CR issues from review of PR #${prNumber} — by Claude Code"`,
+          { cwd: tmpDir },
+        )
+        const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+        execSync(`git push origin HEAD:${fixBranch}`, {
+          cwd: tmpDir,
+          env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+        })
+        ctx.crosscheckShas.add(newSha)
+
+        const octokit = createGithubClient(token)
+        const fixPrTitle = autoFix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
+        const { data: fixPr } = await octokit.rest.pulls.create({
+          owner,
+          repo: repoName,
+          head: fixBranch,
+          base: pr.head.ref,
+          title: fixPrTitle,
+          body: `Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+        })
+        if (autoFix.delivery.label) {
+          try {
+            await octokit.rest.issues.addLabels({
+              owner, repo: repoName, issue_number: fixPr.number, labels: [autoFix.delivery.label],
+            })
+          } catch { /* label may not exist in this repo — skip */ }
+        }
+        spinner.succeed(`fix PR #${fixPr.number} opened → ${fixPr.html_url}`)
+        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
+        results[step.name] = { applied_count: appliedCount }
+
+      } else {
+        // comment: post the diff as a suggested-fix comment, no code push
+        let patch = ''
+        try { patch = execSync('git diff', { cwd: tmpDir, encoding: 'utf8' }) } catch { /* ignore */ }
+        if (patch) {
+          const octokit = createGithubClient(token)
+          const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
+          await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+        }
+        spinner.succeed(`fix suggestions posted as review comment`)
+        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
+        results[step.name] = { applied_count: appliedCount }
+      }
     }
   }
 }

@@ -73,6 +73,20 @@ function printCheck({ label, ok, detail, fix }: CheckResult) {
   if (!ok && fix) console.log(`      ${chalk.dim('→')} ${chalk.yellow(fix)}`)
 }
 
+function detectGitHubLogin(): string | null {
+  const envs = [
+    { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },  // keyring first
+    process.env,                                                          // env token fallback
+  ]
+  for (const env of envs) {
+    try {
+      const login = execSync("gh api user --jq '.login' 2>/dev/null", { encoding: 'utf8', env }).trim()
+      if (login && !login.includes('\n')) return login
+    } catch { /* try next */ }
+  }
+  return null
+}
+
 export async function runInit(configPath?: string) {
   console.log(chalk.bold('\ncrosscheck — environment check\n'))
 
@@ -86,13 +100,23 @@ export async function runInit(configPath?: string) {
     console.log(chalk.green('\nAll checks passed.\n'))
   }
 
-  // Write example config if none exists
+  // Write config if none exists, pre-filling allowed_authors with the detected GitHub login
   const dest = configPath ?? join(process.cwd(), 'crosscheck.config.yml')
   if (!existsSync(dest)) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname
     if (existsSync(examplePath)) {
-      writeFileSync(dest, readFileSync(examplePath))
-      console.log(chalk.dim(`Config written to ${dest} — edit to customize.\n`))
+      let content = readFileSync(examplePath, 'utf8')
+      const login = detectGitHubLogin()
+      if (login) {
+        // Replace the commented-out allowed_authors placeholder with the detected login
+        content = content.replace(
+          /  # allowed_authors:\n  #   - \S+[^\n]*\n  #   - \S+[^\n]*/,
+          `  allowed_authors:\n    - ${login}  # auto-detected from gh auth login`,
+        )
+      }
+      writeFileSync(dest, content)
+      const hint = login ? `allowed_authors set to ${chalk.cyan(login)}` : 'edit to customize'
+      console.log(chalk.dim(`Config written to ${dest} — ${hint}.\n`))
     }
   } else {
     console.log(chalk.dim(`Config already exists at ${dest}\n`))

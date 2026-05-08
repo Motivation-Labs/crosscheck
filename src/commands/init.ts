@@ -115,7 +115,7 @@ export async function runInit(configPath?: string) {
         )
       }
       writeFileSync(dest, content)
-      const hint = login ? `allowed_authors set to ${chalk.cyan(login)}` : 'edit to customize'
+      const hint = login ? `allowed_authors set to ${chalk.cyan(login)} (github)` : 'edit to customize'
       console.log(chalk.dim(`Config written to ${dest} — ${hint}.\n`))
     }
   } else {

@@ -1,3 +1,7 @@
+<div align="right">
+  <h5><a href="./get-started.zh.md">🌏 &nbsp;中文</a></h5>
+</div>
+
 # crosscheck — Get Started
 
 ## Table of contents

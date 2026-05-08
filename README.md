@@ -1,3 +1,7 @@
+<div align="right">
+  <h5><a href="./README.zh.md">🌏 &nbsp;中文</a></h5>
+</div>
+
 <p align="center">
   <img src="./assets/logo.png" alt="crosscheck" width="160" />
 </p>

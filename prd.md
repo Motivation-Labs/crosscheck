@@ -196,6 +196,44 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 - [x] **Fix `watch` mode tunnel** — replaced `gh webhook forward` (not available in gh 2.65.0) with `localhost.run` SSH tunnel. SSH is pre-installed on macOS/Linux, no account needed. Tunnel URL shown in watch banner; webhooks auto-registered and deleted on exit.
 - [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
+- [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
+  - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
+  - **Acceptance Criteria:**
+    - `loadWorkflow(repoDir, configDir)` always returns a valid step list. When no `workflow.yml` is found, it returns the `DEFAULT_WORKFLOW` constant (single `review` step) — no separate fallback code path.
+    - `watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`; there is no conditional that bypasses the runner for the no-file case.
+    - `crosscheck init` generates a `.crosscheck/workflow.yml` template with the default step active and `address`/`recheck` steps present but commented out.
+    - Supported step types: `review` (run AI reviewer, post comment), `address` (read review comment, commit fixes to PR branch), `recheck` (re-review after fixes).
+    - `when` field: evaluated as a boolean expression; step skipped if false. Supported context: `verdict`, `<step-name>.applied_count`, `<step-name>.verdict`.
+    - Per-step `instructions` field appended to AI prompt for that step only, extending global `~/.crosscheck/instructions.md`.
+    - `max_rounds` on `address` steps (default 1); hard cap of 5 `[crosscheck]` commits per PR.
+    - All `address` commits prefixed `[crosscheck]` in the message.
+    - `crosscheck review <pr-url> --workflow` exercises the full workflow against a single PR for testing.
+    - No `address` step ever merges; `auto_merge` is always false.
+  - **Technical Notes:**
+    - `src/lib/workflow.ts`: `DEFAULT_WORKFLOW` constant; Zod-validated schema; `loadWorkflow(repoDir, configDir)` returns `DEFAULT_WORKFLOW` when no file found — never null.
+    - `src/lib/runner.ts`: `runWorkflow(steps, context)` — iterates steps, dispatches handlers.
+    - `address` handler: parse AI response as file-level patches → `git apply` → push `[crosscheck]` commit.
+    - `when` evaluation: minimal expression evaluator (equality + comparison, no scripting engine).
+    - `watch.ts`/`serve.ts`: unconditionally call `loadWorkflow` + `runWorkflow`; delete the direct reviewer call.
+    - `init.ts`: write `.crosscheck/workflow.yml` template during init (see Feature Design section).
+  - **Tests Required:** `loadWorkflow` returns `DEFAULT_WORKFLOW` on absent file; `loadWorkflow` parses a valid file correctly; `when: "verdict == 'APPROVE'"` skips `address` step; `max_rounds` cap respected; `address` commits prefixed `[crosscheck]`; runner with `DEFAULT_WORKFLOW` produces identical output to current direct-call behavior.
+
+- [ ] **Auto-init on `watch`/`serve`** — `crosscheck watch` and `crosscheck serve` detect whether first-time setup has been done and run init steps automatically before starting the monitor. `crosscheck init` becomes optional, not required.
+  - **User:** Anyone running crosscheck for the first time. The current expectation ("run init first") is undiscoverable — most users just try `crosscheck watch` and hit missing-config errors.
+  - **Acceptance Criteria:**
+    - On `crosscheck watch` / `crosscheck serve` startup, before opening the tunnel or binding the port, call `ensureInit(cwd)`.
+    - If `~/.crosscheck/.initialized` exists and contains the current crosscheck version, `ensureInit` skips global setup (webhook secret generation) but still runs cheap `existsSync` checks for the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`). If either is missing, it is created before returning. No subprocess spawns on the fast path.
+    - If sentinel is absent or version differs, print `  ✦ first run — setting up crosscheck...`, run missing setup steps, write sentinel, then continue.
+    - Auth checks (gh, claude, codex CLIs) remain in `crosscheck init` only — not run by `ensureInit` (they require subprocess spawns and would defeat the fast-path goal).
+    - After auto-init completes, watch/serve continues normally without requiring a restart.
+    - `crosscheck init` remains a standalone command; bypasses sentinel (`--force` internally) and always runs the full check + prints status table. Re-running does not overwrite existing files.
+    - `--no-init` flag on `watch`/`serve` skips the `ensureInit` call entirely for CI environments.
+  - **Technical Notes:**
+    - New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: sentinel check first; on miss, runs setup steps and writes `~/.crosscheck/.initialized`.
+    - `init.ts` calls `ensureInit` with `{ force: true, verbose: true }` then prints status table.
+    - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`.
+  - **Tests Required:** sentinel present + version match + repo-local files exist → no files written; sentinel present + version match + repo-local files absent → creates missing repo-local files only (no webhook secret re-generated); sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present; second repo with same version → repo-local files created even though sentinel already exists.
+
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
@@ -261,6 +299,200 @@ crosscheck watch
 Style: dim text, italic if the terminal supports it. One quote per startup, randomly selected. ~20 quotes in the initial set — mix of original lines about code review, AI, and shipping. No attribution needed (original quotes only, avoids copyright edge cases).
 
 **Implementation files:** `src/lib/fortune.ts` (quote array + `randomFortune()` helper), `src/commands/watch.ts`, `src/commands/serve.ts` (call `randomFortune()` before the banner).
+
+---
+
+#### Custom Workflow Engine (`workflow.yml`)
+
+**Problem:** crosscheck is a passive reviewer — it posts a comment and stops. The review → fix → re-review cycle is repetitive for formulaic issues (lint violations, missing tests, doc gaps). There is also no way to customize the pipeline shape per repo: some teams want review-only, others want auto-fix on NEEDS_WORK, others want a full review → address → recheck loop.
+
+**Value:**
+1. **Closes the feedback loop** — from "AI posts comment" to "AI posts comment + attempts fixes + re-reviews." The PR author gets a clean diff rather than a list of action items.
+2. **Pipeline composition without code changes** — teams define multi-step workflows in a checked-in YAML file. crosscheck executes the steps.
+3. **Behavior steering per step** — the `review` step and the `address` step need different instructions. A reviewer should be skeptical; an agent fixing its own comments should be conservative and scoped.
+4. **Progressive adoption** — users can start with the default `[review]` pipeline and add `address` when they're ready. No new concepts forced on existing users.
+
+**Design — `workflow.yml`:**
+
+Placed at `.crosscheck/workflow.yml` or `crosscheck.workflow.yml` in the repo. Falls back to a default single-step `review` pipeline if absent (fully backwards compatible).
+
+```yaml
+# .crosscheck/workflow.yml
+
+on:
+  - opened
+  - synchronize          # new commits pushed to an existing PR
+
+steps:
+  - name: review
+    type: review
+    reviewer: auto        # auto = cross-vendor logic from config.mode
+
+  - name: address
+    type: address
+    when: "verdict == 'NEEDS_WORK'"
+    reviewer: auto
+    max_rounds: 2
+    instructions: |
+      Only address comments that are explicitly called out in the review.
+      Do not refactor logic, rename identifiers, or add tests.
+      Do not touch files the review did not mention.
+      If a comment requires understanding of business logic, skip it and leave a note.
+
+  - name: recheck
+    type: review
+    when: "address.applied_count > 0"
+    reviewer: auto
+```
+
+**Step types:**
+
+| Type | What it does |
+|---|---|
+| `review` | Runs the AI reviewer, posts a comment with verdict |
+| `address` | Reads the review comment, opens a commit on the PR branch with fixes |
+| `recheck` | Re-runs review on the updated branch (same as `review` but semantically distinct) |
+| `notify` | Sends a notification — Slack, email (future) |
+
+**Step fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Identifier used in `when` conditions |
+| `type` | yes | `review`, `address`, `recheck`, `notify` |
+| `reviewer` | no | `auto`, `claude`, `codex` — overrides config for this step |
+| `when` | no | Boolean expression; step skipped if false. Context vars: `verdict`, `<step-name>.applied_count`, `<step-name>.verdict` |
+| `max_rounds` | no | Caps iterations for `address` steps (default 1) |
+| `instructions` | no | Prose appended to the AI prompt for this step only — overrides global `instructions.md` for this step |
+
+**Behavior steering — `instructions` block:**
+
+The per-step `instructions` field is the primary knob for steering AI behavior within the pipeline. It is appended to the prompt for that step only. Global `~/.crosscheck/instructions.md` still applies as a base layer; step-level `instructions` extend or override it.
+
+This lets teams express policies like:
+- "During `address`, never touch tests or migrations."
+- "During `recheck`, be stricter about security than the initial review."
+- "During `address`, prefer one-line fixes — no multi-function refactors."
+
+**Safeguards (non-negotiable defaults):**
+
+- `max_rounds: 1` default on all `address` steps — prevents loops
+- `auto_merge: false` always — address creates commits, never merges
+- `address` only touches files mentioned in the review comment it is addressing
+- Every `address` commit message begins `[crosscheck]` for traceability and easy revert
+- Hard limit: no `address` step runs if the PR already has > N `[crosscheck]` commits (configurable, default 5)
+
+**Relationship to existing config files:**
+
+| File | Owns |
+|---|---|
+| `crosscheck.config.yml` | Infrastructure: mode, repos, orgs, vendors, budget, server |
+| `.crosscheck/workflow.yml` | Pipeline shape: step order, types, conditions, max_rounds |
+| `~/.crosscheck/instructions.md` | Global prose behavior for all review steps |
+| Step-level `instructions:` | Per-step behavior overrides within `workflow.yml` |
+
+**Default workflow — constant, not a file:**
+
+```typescript
+// src/lib/workflow.ts
+export const DEFAULT_WORKFLOW: WorkflowStep[] = [
+  { name: 'review', type: 'review', reviewer: 'auto' }
+]
+
+export function loadWorkflow(repoDir: string, configDir: string): WorkflowStep[] {
+  const file = findWorkflowFile(repoDir, configDir)
+  if (!file) return DEFAULT_WORKFLOW
+  return parseWorkflowFile(file)  // Zod-validated, throws on schema error
+}
+```
+
+`watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`. No conditional for "no file". The constant *is* the backwards compatibility — existing installs without a `workflow.yml` get the default single-step behavior through the same code path as custom workflows.
+
+**`crosscheck init` generates a workflow template:**
+
+```yaml
+# .crosscheck/workflow.yml — generated by crosscheck init
+
+on:
+  - opened
+  - synchronize
+
+steps:
+  - name: review
+    type: review
+    reviewer: auto
+
+  # Uncomment to enable auto-fix after review:
+  # - name: address
+  #   type: address
+  #   when: "verdict == 'NEEDS_WORK'"
+  #   max_rounds: 2
+  #   instructions: |
+  #     Only fix what the review explicitly calls out.
+  #     Do not refactor logic or add tests.
+
+  # - name: recheck
+  #   type: review
+  #   when: "address.applied_count > 0"
+```
+
+New users see the full capability surface immediately. The template is the documentation.
+
+**Implementation notes:**
+- New file: `src/lib/workflow.ts` — `DEFAULT_WORKFLOW` constant; Zod schema; `loadWorkflow(repoDir, configDir)`.
+- New file: `src/lib/runner.ts` — `runWorkflow(steps, context)` — iterates steps, evaluates `when`, dispatches handlers.
+- `watch.ts` / `serve.ts`: replace direct reviewer call with `loadWorkflow(tmpDir, configDir)` + `runWorkflow(steps, context)` — unconditional, no legacy branch.
+- `address` handler: read the crosscheck review comment, pass it + diff + step `instructions` to AI, parse file patches from response, apply via `git apply`, push `[crosscheck] address: ...` commit.
+- `when` evaluation: flat context object, equality + numeric comparison operators only — no scripting engine.
+- `init.ts`: write `.crosscheck/workflow.yml` template; skip silently if file already exists.
+
+**Open questions before implementation:**
+- Should `address` push commits directly to the PR branch (requires write access) or open a follow-up PR? Direct commits are simpler; follow-up PRs are safer for external contributors. Default to direct commits on branches the token owns; follow-up PR on forks.
+- Should `when` support `AND`/`OR` or keep it to single conditions? Start with single conditions — composable via multiple steps.
+
+---
+
+#### Auto-init on `watch`/`serve`
+
+**Problem:** the current flow requires `crosscheck init` before `crosscheck watch`. This is undiscoverable — most users will try `watch` first, hit a missing-config or missing-secret error, and not know why. `init` as a prerequisite is friction that blocks the happy path.
+
+**Solution:** `watch` and `serve` call `ensureInit` at startup. If setup has already been done, it's a no-op. If not, it runs the missing steps inline and continues. `crosscheck init` stays as an explicit command for verification and re-runs, but it is no longer required.
+
+**Detection — sentinel file, one check per startup:**
+
+After a successful init, `ensureInit` writes `~/.crosscheck/.initialized` containing the current crosscheck version (e.g., `0.2.0`). On every subsequent `watch`/`serve` start, the sentinel is checked first. If it exists and the version matches, the global setup step (webhook secret) is skipped. However, the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`) are always checked via cheap `existsSync` calls — if either is absent, it is created before proceeding. This means the cost is O(1) `existsSync` calls per startup after the first run, not a full re-init, but each repo gets its local files regardless of whether another repo was initialized first.
+
+The subprocess-heavy checks (gh, claude, codex auth) are never run by `ensureInit` — they remain in `crosscheck init` only.
+
+```
+First run:   check sentinel → absent → run all setup steps → write sentinel → continue
+Subsequent:  check sentinel → present + version matches → skip webhook secret → check repo-local files → create any missing → continue
+Upgrade:     check sentinel → version mismatch → re-run changed steps → update sentinel → continue
+New repo:    check sentinel → present + version matches → repo-local files absent → create them → continue
+```
+
+`crosscheck init` always runs the full check and rewrites the sentinel regardless — explicit verification is its job. Already-present files are never overwritten by auto-init.
+
+**Terminal output on first run:**
+
+```
+  ✦ first run — setting up crosscheck...
+  ✓ webhook secret generated → ~/.crosscheck/webhook-secret
+  ✓ config written → crosscheck.config.yml
+  ✓ workflow written → .crosscheck/workflow.yml
+
+crosscheck watch
+  repos   acme/api
+  ...
+```
+
+Silent on subsequent runs. Auth checks (missing gh, claude, codex CLIs) are not run here — run `crosscheck init` explicitly to see full auth status.
+
+**Implementation:**
+- New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: checks sentinel first; if present and version matches, skips the webhook-secret step but still runs `existsSync` on the two repo-local files and creates any that are missing; if sentinel is absent or version differs, runs all setup steps and writes `~/.crosscheck/.initialized`. Returns `{ created: string[] }`. Never spawns a subprocess.
+- Sentinel file: `~/.crosscheck/.initialized` — plain text, contains semver string (e.g., `0.2.0`). Version compared against `pkg.version` at runtime. On mismatch, only the steps that changed between versions are re-run.
+- `init.ts` refactored: extracts setup steps into `setup.ts`; becomes a thin wrapper that calls `ensureInit` with `{ force: true, verbose: true }` (bypasses sentinel) then prints the full status table.
+- `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`. `--no-init` flag skips the call entirely for CI/provisioned environments where setup is pre-baked.
 
 ---
 

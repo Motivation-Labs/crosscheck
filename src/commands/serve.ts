@@ -12,6 +12,7 @@ import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.j
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
+import { isAuthorAllowed } from '../lib/filter.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -27,6 +28,14 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     log(`PR #${prNumber} already in review — skipping duplicate event`)
     return
   }
+
+  const author = pr.user.login
+
+  if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+    return
+  }
+
   inFlight.add(key)
 
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
@@ -34,7 +43,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const origin = detectPROrigin(pr.body ?? '', config)
   const reviewer = assignReviewer(origin, config)
 
-  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
 
   if (!reviewer) {
     log(`  → origin=${origin}, no reviewer — skipping`)
@@ -133,6 +142,12 @@ export function runServe(configPath?: string) {
     console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
     console.log(`  port      ${chalk.cyan(String(config.server.port))}`)
     console.log(`  endpoint  ${chalk.cyan(webhookUrl)}`)
+    if (config.routing.allowed_authors.length === 0) {
+      console.log()
+      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
+      console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+    }
     console.log()
     if (config.orgs.length > 0) {
       console.log(chalk.dim('Register the endpoint above as a GitHub org webhook (content-type: application/json).'))

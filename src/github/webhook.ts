@@ -11,6 +11,7 @@ export interface PREvent {
     head: { ref: string; sha: string }
     base: { ref: string }
     html_url: string
+    user: { login: string }
   }
   repository: {
     name: string

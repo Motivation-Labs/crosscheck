@@ -18,6 +18,7 @@ import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from 
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
+import { isAuthorAllowed } from '../lib/filter.js'
 import { detectLanguages } from '../lib/languages.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -121,13 +122,21 @@ export async function runWatch(configPath?: string) {
         log(chalk.dim(`PR #${prNumber} already in review — skipping duplicate`))
         return
       }
+
+      const author = pr.user.login
+
+      if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+        return
+      }
+
       inFlight.add(key)
 
       log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
       const origin = detectPROrigin(pr.body ?? '', config)
       const reviewer = assignReviewer(origin, config)
 
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
 
       if (!reviewer) {
         log(chalk.dim(`  origin=${origin} — skipping (no reviewer assigned)`))
@@ -281,6 +290,12 @@ export async function runWatch(configPath?: string) {
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
   const cfgPath = resolveConfigPath(configPath)
   console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
+  if (config.routing.allowed_authors.length === 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+    console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
+    console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+  }
   console.log()
 
   // Tunnel reconnect loop — runs until SIGINT/SIGTERM

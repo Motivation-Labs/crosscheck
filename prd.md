@@ -199,6 +199,89 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
+- [ ] **Tiered Feedback Loops — local usage analytics, instruction-effectiveness signals, and safe opt-in telemetry** — three-tier system that measures crosscheck's real-world impact, feeds those signals back into `optimize`, and—only with explicit consent—sends de-identified aggregate counts to inform future development. Privacy-first by design: sensitive data never leaves the machine; telemetry is opt-in (off by default).
+  - **User:** All crosscheck users benefit from better defaults driven by real usage. Contributors to the project benefit from aggregate signal. Power users benefit from local analytics surfaced in `diagnose`.
+  - **Acceptance Criteria:**
+
+    **Tier 1 — Local count statistics (always-on, local only):**
+    - After every review, append a metrics record to `~/.crosscheck/metrics/YYYY-MM.ndjson` containing: `{ ts, reviewer_pair, verdict, duration_ms, comments_count, pr_sha_prefix }`. `pr_sha_prefix` is the first 8 characters of the PR's head SHA — enough to detect follow-up commits later, not enough to identify the repo or author.
+    - `reviewer_pair` values: `claude_reviews_codex`, `codex_reviews_claude`, `claude_reviews_claude`, `codex_reviews_codex`.
+    - Follow-fix detection: when a new commit arrives on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two reviews by `pr_sha_prefix`. This tracks whether AI review comments actually get addressed.
+    - `crosscheck diagnose` incorporates Tier 1 data: adds a **Usage** section reporting reviewer-pair distribution, average comments per review, verdict distribution over the period, and follow-fix rate.
+    - Metrics files are subject to the same `logs.retention_days` setting as event logs. Stored in `~/.crosscheck/metrics/`, never in the project directory.
+    - No code content, no PR title, no repo name, no file names, no author identities stored.
+
+    **Tier 2 — Instruction effectiveness tracking (always-on, local only):**
+    - When `optimize` applies a new `instructions.md`, snapshot the current instruction fingerprint (SHA-256 of the file) and log it with a timestamp to `~/.crosscheck/metrics/optimize-history.ndjson`.
+    - In subsequent metric records, include the active `instruction_fingerprint` so outcomes (verdict distribution, follow-fix rate) can be correlated with the instruction version in effect at review time.
+    - `crosscheck diagnose --since <date>` can compare verdict distribution before and after each `optimize` run, surfacing the delta: "After optimize on 2025-05-01: APPROVE rate +12%, BLOCK rate −5%."
+    - `crosscheck optimize` reads these deltas when selecting which instruction changes to keep vs. revert. If a fingerprint correlates with worse outcomes, `optimize` flags it as a candidate for rollback.
+    - Instruction text is never stored — only the SHA-256 fingerprint. The actual text lives in `instructions.md` under the user's control.
+
+    **Tier 3 — Privacy & consent design (non-negotiable constraints):**
+    - Telemetry is **opt-in**. `telemetry.enabled` defaults to `false` in config. No data is transmitted unless the user explicitly enables it.
+    - On first `watch`/`serve` run after install, display a one-time consent prompt:
+      ```
+        crosscheck can send anonymous usage counts to Motivation Labs to improve future versions.
+        No code, no repo names, no PR content, no usernames — only aggregate numbers.
+        Enable? [y/N]:
+      ```
+      Default answer is N. Response is persisted to `~/.crosscheck/config.yml` as `telemetry.enabled`. The prompt is never shown again. Users can change the setting at any time via `crosscheck telemetry [enable|disable|status]`.
+    - `crosscheck init` output includes a **Telemetry** row: current state (enabled/disabled) and a link to the privacy doc.
+    - Data categories that may **never** be collected or transmitted: code diffs, PR titles, PR descriptions, commit messages, file paths, repo names, GitHub usernames or org names, IP addresses, machine hostnames.
+    - A `PRIVACY.md` at the repo root documents exactly which fields are in a telemetry payload. This document is referenced in the consent prompt and `get-started.md`.
+
+    **Tier 4 — Safe telemetry payload (only when `telemetry.enabled: true`):**
+    - `install_id`: a UUID generated once at first install and stored in `~/.crosscheck/config.yml`. Never linked to a GitHub identity, email, or hostname. Rotatable via `crosscheck telemetry reset-id`.
+    - Transmission: weekly batch, sent at the start of the first `watch`/`serve` session of each UTC week. HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). No per-event streaming.
+    - Payload schema (all fields are counts or enums — no free text, no identifiers):
+      ```json
+      {
+        "install_id": "<uuid>",
+        "version": "0.2.0",
+        "platform": "darwin | linux | win32",
+        "period": "2025-W20",
+        "sessions": 12,
+        "prs_reviewed": 47,
+        "comments_posted": 134,
+        "reviews_by_pair": {
+          "claude_reviews_codex": 23,
+          "codex_reviews_claude": 18,
+          "claude_reviews_claude": 4,
+          "codex_reviews_codex": 2
+        },
+        "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
+        "follow_fix_rate": 0.73,
+        "optimize_runs": 2
+      }
+      ```
+    - If the HTTP request fails (network error, server error), log locally and retry at the next weekly opportunity. Never block startup on telemetry.
+    - `crosscheck telemetry status` shows: enabled/disabled, install_id (first 8 chars), date of last transmission, and the full payload that would be sent.
+    - `crosscheck telemetry dry-run` prints the payload without sending it, regardless of `enabled` state. Useful for users who want to audit before enabling.
+
+  - **Technical Notes:**
+    - New file: `src/lib/metrics.ts` — `appendMetric(record)`, `readMetrics(since?)`, `computeSummary(records)`. Module-level singleton; respects `logs.enabled` (if logs are disabled, metrics are too). NDJSON append, same pattern as `logger.ts`.
+    - New file: `src/lib/telemetry.ts` — `maybeSendTelemetry(config)`: checks enabled + weekly cadence (`~/.crosscheck/.telemetry-last-sent`), aggregates `metrics/` files, POSTs payload, updates sentinel. All errors are caught and logged locally; never throws to caller.
+    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry [enable|disable|status|dry-run|reset-id]`.
+    - Schema additions: `telemetry: { enabled: boolean (default false), install_id: string (auto-generated) }`.
+    - `watch.ts`/`serve.ts`: call `maybeSendTelemetry(config)` early in startup (after consent check on first run).
+    - `review.ts`: call `appendMetric(...)` after each review completes (success or failure verdict).
+    - `optimize.ts`: call `appendMetric({ event: 'optimize_run', fingerprint_before, fingerprint_after })` after applying changes.
+    - `diagnose.ts`: extend output with Tier 1 usage summary section and Tier 2 instruction-effectiveness delta table.
+    - `init.ts`: add Telemetry row to status table.
+    - New file: `PRIVACY.md` at repo root, included in npm package. Documents full payload schema, data retention, opt-out instructions, and contact for data deletion requests.
+  - **Tests Required:**
+    - `appendMetric` with `logs.enabled: false` writes nothing.
+    - Metrics records contain no sensitive fields (schema-level check on allowed keys).
+    - `maybeSendTelemetry` with `enabled: false` makes no HTTP request.
+    - `maybeSendTelemetry` within the same UTC week as last send makes no HTTP request.
+    - `maybeSendTelemetry` in a new week POSTs the correct aggregated payload.
+    - Consent prompt on first run persists response; not shown again on second run.
+    - `telemetry dry-run` prints payload structure matching schema; makes no HTTP request.
+    - `diagnose` with Tier 1 data shows reviewer-pair distribution and follow-fix rate.
+    - `diagnose` with two instruction fingerprints shows before/after verdict delta.
+    - Follow-fix event emitted when new commit arrives on a PR with prior `NEEDS_WORK`/`BLOCK` verdict.
+
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
 
@@ -241,6 +324,111 @@ BLOCK      — security risk, data loss, broken API contract, or correctness bug
 Parse the last `VERDICT:` line from the review text before posting. Display in the terminal with color (green / yellow / red). Strip the `VERDICT:` line before posting to GitHub so the comment stays clean — or keep it as a bold header at the top of the comment for visibility.
 
 **Implementation files:** `src/reviewers/claude.ts`, `src/reviewers/codex.ts` (prompt addition), `src/commands/watch.ts` (progress spinner + verdict display), `src/commands/review.ts` (same for manual reviews).
+
+---
+
+#### Tiered Feedback Loops
+
+**Problem:** crosscheck runs locally and has no visibility into whether it's actually helping. Without usage signal, `optimize` can only react to failures — it can't learn that certain reviewer configurations produce better outcomes, or that specific instruction patterns reliably increase fix-follow rates. At the same time, collecting that signal must not compromise user privacy or trust.
+
+**Value:**
+1. **Self-improvement with evidence** — `optimize` gains a before/after comparison of instruction changes vs. verdict distribution, so it can recommend keeping or reverting changes based on real outcomes rather than heuristics.
+2. **Actionable `diagnose` output** — users learn which reviewer pair works best for their repos, what their follow-fix rate is, and whether recent `optimize` runs improved quality.
+3. **Product signal for future development** — with explicit consent, anonymous aggregate counts answer questions like "what fraction of installs use cross-vendor mode?" without revealing anything about individual users or repos.
+4. **Trust foundation** — a consent-first, audit-friendly design (dry-run, status, reset-id) makes telemetry a feature users can actually verify rather than a black box.
+
+**Tier summary:**
+
+| Tier | Data | Leaves machine? | Consent required? |
+|---|---|---|---|
+| 1 — Count statistics | Reviewer pair, verdict, duration, comment count, PR SHA prefix | Never | No |
+| 2 — Instruction effectiveness | Instruction fingerprint (SHA-256 only), verdict delta | Never | No |
+| 3 — Telemetry | Anonymous aggregate counts, install UUID, version, platform | Yes (if opted in) | Yes — opt-in |
+
+**Privacy constraints (non-negotiable):**
+
+These are design invariants, not config options:
+- No code content ever stored or transmitted.
+- No repo names, PR titles, file paths, GitHub usernames, org names, IP addresses, or hostnames.
+- Telemetry payload contains only counts, enums, rates, and a locally generated UUID.
+- The UUID is not derived from any user identity — it's a random v4 UUID generated at first install.
+- Metrics files stay in `~/.crosscheck/metrics/` — never in the project directory where they could be accidentally committed.
+
+**Consent flow (one-time, on first `watch`/`serve`):**
+
+```
+  crosscheck can send anonymous usage counts to Motivation Labs to improve
+  future versions. No code, no repo names, no PR content, no usernames —
+  only aggregate numbers. See PRIVACY.md for the exact payload.
+
+  Enable telemetry? [y/N]:
+```
+
+Default: N. Response written to `~/.crosscheck/config.yml` immediately. Prompt is never shown again. Changeable any time:
+
+```bash
+crosscheck telemetry enable
+crosscheck telemetry disable
+crosscheck telemetry status       # shows state, last send date, install_id prefix
+crosscheck telemetry dry-run      # prints payload without sending
+crosscheck telemetry reset-id     # generates a new UUID, breaking any linkage
+```
+
+**Follow-fix detection (Tier 1):**
+
+When a `synchronize` webhook fires on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two review records by `pr_sha_prefix`. This event fires regardless of whether the new commit actually addresses the review — it's a count of "new activity after a non-APPROVE verdict." The ratio `follow_fix_events / NEEDS_WORK_or_BLOCK_reviews` is the follow-fix rate surfaced in `diagnose`.
+
+**Instruction-effectiveness delta (`diagnose` output):**
+
+```
+Instruction history (last 30 days):
+  fingerprint a1b2c3d4  active 2025-04-01 → 2025-05-01  (30 reviews)
+    APPROVE 60%  NEEDS_WORK 33%  BLOCK 7%
+  fingerprint e5f6a7b8  active 2025-05-01 → now          (17 reviews)
+    APPROVE 76%  NEEDS_WORK 24%  BLOCK 0%   ↑ +16% APPROVE since last optimize
+```
+
+**Telemetry payload (full schema):**
+
+```json
+{
+  "install_id": "<uuid-v4>",
+  "version": "0.2.0",
+  "platform": "darwin | linux | win32",
+  "period": "2025-W20",
+  "sessions": 12,
+  "prs_reviewed": 47,
+  "comments_posted": 134,
+  "reviews_by_pair": {
+    "claude_reviews_codex": 23,
+    "codex_reviews_claude": 18,
+    "claude_reviews_claude": 4,
+    "codex_reviews_codex": 2
+  },
+  "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
+  "follow_fix_rate": 0.73,
+  "optimize_runs": 2
+}
+```
+
+No field may contain a string that could identify a user, repo, or machine. Any new telemetry field must be documented in `PRIVACY.md` before shipping.
+
+**File layout additions:**
+
+```
+~/.crosscheck/
+  metrics/
+    YYYY-MM.ndjson          ← Tier 1 review events
+    optimize-history.ndjson ← Tier 2 instruction fingerprints
+  .telemetry-last-sent      ← ISO date of last successful transmission
+src/
+  lib/
+    metrics.ts              ← appendMetric, readMetrics, computeSummary
+    telemetry.ts            ← maybeSendTelemetry, aggregatePayload
+  commands/
+    telemetry.ts            ← crosscheck telemetry subcommands
+PRIVACY.md                  ← exact payload schema, retention, opt-out, contact
+```
 
 ---
 

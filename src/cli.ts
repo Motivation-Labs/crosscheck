@@ -10,6 +10,7 @@ import { runReview } from './commands/review.js'
 import { runStatus } from './commands/status.js'
 import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
+import { runImpact } from './commands/impact.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -68,5 +69,14 @@ program
   .option('--since <date>', 'limit the diagnose window (YYYY-MM-DD)')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { apply?: boolean; dryRun?: boolean; agent?: string; since?: string; config?: string }) => void runOptimize(opts))
+
+program
+  .command('impact')
+  .description('Report time saved, issues caught, and code quality trend from review history')
+  .option('--json', 'output full report as JSON')
+  .option('--since <date>', 'only analyze logs from this date onward (YYYY-MM-DD)')
+  .option('--money', 'include a rough monetary estimate')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { json?: boolean; since?: string; money?: boolean; config?: string }) => void runImpact(opts))
 
 program.parse()

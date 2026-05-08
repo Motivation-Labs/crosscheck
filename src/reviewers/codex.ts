@@ -27,6 +27,12 @@ const TIER_MODELS_API: Record<string, string> = {
   thorough: 'o3',
 }
 
+const TIER_TIMEOUT_MS: Record<string, number> = {
+  fast: 120_000,
+  balanced: 600_000,
+  thorough: 1_200_000,
+}
+
 export async function runCodexReview(
   repoDir: string,
   baseBranch: string,
@@ -58,12 +64,13 @@ export async function runCodexReview(
     const modelArgs = model ? ['-c', `model="${model}"`] : []
     onLog?.(`  running: codex review --base ${baseBranch}${model ? ` -c model="${model}"` : ''}`)
 
+    const timeoutMs = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
     const result = await execa(
       'codex',
       ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
       {
         cwd: repoDir,
-        timeout: 120_000,
+        timeout: timeoutMs,
         env: {
           ...process.env,
           // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
@@ -76,7 +83,10 @@ export async function runCodexReview(
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''
-    const summary = extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error'
+    const timeoutSec = (TIER_TIMEOUT_MS[quality.tier] ?? 600_000) / 1000
+    const summary = execa.timedOut
+      ? `timed out after ${timeoutSec}s — PR diff may be too large (tier: ${quality.tier})`
+      : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
     const thrown = Object.assign(new Error(`codex: ${summary}`), {
       exitCode: execa.exitCode,
       timedOut: execa.timedOut,

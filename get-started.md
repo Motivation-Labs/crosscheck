@@ -629,6 +629,12 @@ routing:
   # Empty = no restriction (all matching PRs reviewed).
   allowed_authors:
     - your-github-login  # auto-detected from gh auth
+
+  # Author-based routing fallback — used when no body pattern matches.
+  # Maps GitHub login → vendor origin so crosscheck routes PRs even without
+  # the attribution footer (e.g. when creating PRs via gh CLI directly).
+  author_routes:
+    your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
     - your-codex-bot-account
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────

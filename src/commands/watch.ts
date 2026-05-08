@@ -165,7 +165,7 @@ export async function runWatch(configPath?: string) {
       }
 
       log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
-      const origin = detectPROrigin(pr.body ?? '', config)
+      const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
       const reviewer = assignReviewer(origin, config)
 
       fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })

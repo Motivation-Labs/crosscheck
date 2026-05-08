@@ -35,6 +35,10 @@ export const RoutingConfigSchema = z.object({
   // Empty list = no restriction (reviews all AI-authored PRs in cross-vendor mode,
   // or all PRs in single-vendor mode). Recommended: set to the logins of your AI agents.
   allowed_authors: z.array(z.string()).default([]),
+  // Fallback origin when no body pattern matches. Maps GitHub login → vendor origin.
+  // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
+  // and will be reviewed by Codex, even without the attribution footer in the PR body.
+  author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
 })
 
 export const ServerConfigSchema = z.object({

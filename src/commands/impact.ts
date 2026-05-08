@@ -28,6 +28,7 @@ export interface WeeklyBucket {
 export interface ImpactReport {
   period: { from: string; to: string; log_files: number }
   reviews_total: number
+  reviews_without_verdict: number
   issues_caught: number
   total_hours_saved: number
   total_duration_ms: number
@@ -92,6 +93,7 @@ export function buildImpactReport(config: ImpactConfig, sinceDate?: string): Imp
       log_files: files.length,
     },
     reviews_total: reviews.length,
+    reviews_without_verdict: 0,
     issues_caught: 0,
     total_hours_saved: 0,
     total_duration_ms: 0,
@@ -107,10 +109,16 @@ export function buildImpactReport(config: ImpactConfig, sinceDate?: string): Imp
     report.total_duration_ms += durationMs
 
     const v = normalizeVerdict(r.verdict)
-    if (v) verdicts[v]++
-    if (v === 'NEEDS_WORK' || v === 'BLOCK') report.issues_caught++
+    if (!v) {
+      report.reviews_without_verdict++
+    } else {
+      verdicts[v]++
+      if (v === 'NEEDS_WORK' || v === 'BLOCK') report.issues_caught++
+    }
 
-    if (r.ts) {
+    // Weekly BLOCK rate: denominator is verdict-bearing reviews only, so verdictless
+    // reviews (from `crosscheck review`) don't artificially depress the rate.
+    if (v && r.ts) {
       const week = getMondayDate(r.ts)
       const bucket = weeklyMap.get(week) ?? { reviews: 0, blocks: 0 }
       bucket.reviews++
@@ -143,15 +151,21 @@ function pct(n: number, total: number): string {
   return total === 0 ? '—' : `(${Math.round((n / total) * 100)}%)`
 }
 
-function formatReport(report: ImpactReport, config: ImpactConfig, showMoney: boolean): void {
+function formatReport(report: ImpactReport, config: ImpactConfig, showMoney: boolean, retentionDays: number): void {
   if (report.reviews_total === 0) {
     console.log(chalk.yellow('\nNo review data yet — run crosscheck watch to start collecting.\n'))
     return
   }
 
   const sep = chalk.dim('─'.repeat(50))
-  const periodLabel = report.period.from === 'N/A' ? 'all time' : `${report.period.from} → ${report.period.to}`
+  const periodLabel = report.period.from === 'N/A'
+    ? 'no data'
+    : `${report.period.from} → ${report.period.to}`
   console.log(chalk.bold(`\ncrosscheck impact`) + chalk.dim(`  (${periodLabel} · ${report.reviews_total} reviews)\n`))
+  if (report.reviews_without_verdict > 0) {
+    console.log(`  ${chalk.dim(`ⓘ ${report.reviews_without_verdict} review${report.reviews_without_verdict === 1 ? '' : 's'} have no verdict (run via \`crosscheck review\`) — excluded from BLOCK rate trend`)}`)
+    console.log()
+  }
 
   // Time saved
   console.log(chalk.dim('  Time saved'))
@@ -214,6 +228,11 @@ function formatReport(report: ImpactReport, config: ImpactConfig, showMoney: boo
     console.log(chalk.dim('  Run crosscheck impact --money for a rough monetary estimate.'))
     console.log()
   }
+
+  if (report.period.from !== 'N/A') {
+    console.log(`  ${chalk.dim(`ⓘ totals cover only the retained log window (${retentionDays}d) — set logs.retention_days in config to extend`)}`)
+    console.log()
+  }
 }
 
 export async function runImpact(opts: { json?: boolean; since?: string; money?: boolean; config?: string }): Promise<void> {
@@ -225,5 +244,5 @@ export async function runImpact(opts: { json?: boolean; since?: string; money?: 
     return
   }
 
-  formatReport(report, config.impact, opts.money ?? false)
+  formatReport(report, config.impact, opts.money ?? false, config.logs.retention_days)
 }

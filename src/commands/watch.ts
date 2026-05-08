@@ -4,22 +4,17 @@ import chalk from 'chalk'
 import ora from 'ora'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
-  createGithubClient,
-  postReviewComment,
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
 } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { runCodexReview } from '../reviewers/codex.js'
-import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from '../config/loader.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
-import { detectLanguages } from '../lib/languages.js'
+import { runWorkflow } from '../lib/runner.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -31,6 +26,34 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
     if (m) return { owner: m[1], repo: m[2] }
   } catch { /* ignore */ }
   return null
+}
+
+// lhr.life tunnels can go dead (503) without the SSH process exiting.
+// Polls every 60s and kills the proc after 2 consecutive failures (~2 min detection).
+function waitForTunnelEnd(tunnelProc: ChildProcess, tunnelUrl: string): Promise<void> {
+  return new Promise<void>(resolve => {
+    let failCount = 0
+
+    const check = setInterval(async () => {
+      let alive = false
+      try {
+        const res = await fetch(tunnelUrl, { signal: AbortSignal.timeout(8000) })
+        alive = res.status !== 503
+      } catch { /* network error = dead */ }
+
+      if (!alive) {
+        if (++failCount >= 2) {
+          clearInterval(check)
+          tunnelProc.kill()
+        }
+      } else {
+        failCount = 0
+      }
+    }, 60_000)
+
+    tunnelProc.on('exit', () => { clearInterval(check); resolve() })
+    tunnelProc.on('error', () => { clearInterval(check); resolve() })
+  })
 }
 
 // Opens a localhost.run SSH tunnel. Resolves with the public base URL once
@@ -106,6 +129,8 @@ export async function runWatch(configPath?: string) {
 
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
+  // SHAs pushed by the address step — skip synchronize events from our own commits
+  const crosscheckShas = new Set<string>()
 
   // Start local webhook server
   const server = createWebhookServer(
@@ -123,10 +148,19 @@ export async function runWatch(configPath?: string) {
         return
       }
 
+      // Skip synchronize events triggered by our own address commits
+      if (crosscheckShas.has(pr.head.sha)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
+        return
+      }
+
+      inFlight.add(key)
+
       const author = pr.user.login
 
       if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+        inFlight.delete(key)
         return
       }
 
@@ -156,8 +190,6 @@ export async function runWatch(configPath?: string) {
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         // Fetch the base branch after checking out the PR branch so we are never
         // on the base branch during the fetch (git refuses to update a checked-out ref).
-        // Wrapped in try/catch: if the base was deleted or the fetch fails, we log
-        // a warning and let the reviewer fall back to whatever is locally available.
         try {
           execSync(`git fetch origin ${pr.base.ref}:${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
         } catch {
@@ -165,38 +197,17 @@ export async function runWatch(configPath?: string) {
         }
         spinner.succeed('cloned')
 
-        const languages = detectLanguages(tmpDir)
-        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, languages })
-        let elapsed = 0
-        const elapsedTimer = setInterval(() => { elapsed++; spinner.text = `${reviewer} reviewing... (${elapsed}s)` }, 1000)
-        spinner.start(`${reviewer} reviewing...`)
-        let rawReview: string
-        try {
-          if (reviewer === 'codex') {
-            rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
-          } else {
-            rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
-          }
-        } finally {
-          clearInterval(elapsedTimer)
-        }
-        spinner.succeed(`review complete (${elapsed}s)`)
-
-        const { verdict, clean } = parseVerdict(rawReview)
-        const commentBody = prependVerdictToComment(clean, verdict)
-        fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - reviewStart })
-
-        spinner.start('posting comment...')
-        const octokit = createGithubClient(token)
-        await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
-        const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
-        spinner.succeed(`posted → ${commentUrl}`)
-        fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
-
-        log(formatVerdict(verdict))
+        await runWorkflow({
+          owner, repoName, prNumber, pr,
+          tmpDir, token, config, origin,
+          reviewStart,
+          log,
+          crosscheckShas,
+        })
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err)
-        spinner.fail(message)
+        if (spinner.isSpinning) spinner.fail(message)
+        else log(`  ✗ ${message}`)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
@@ -298,7 +309,8 @@ export async function runWatch(configPath?: string) {
   }
   console.log()
 
-  // Tunnel reconnect loop — runs until SIGINT/SIGTERM
+
+  // ── localhost.run mode ────────────────────────────────────────────────────
   let reconnectDelay = 5_000
   while (running) {
     log('Opening tunnel via localhost.run...')
@@ -365,14 +377,17 @@ export async function runWatch(configPath?: string) {
           log(`    ${chalk.dim('    Payload URL')}  ${chalk.cyan(webhookUrl)}`)
           log(`    ${chalk.dim('    Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
         }
+        const hooksUrl = 'org' in scope
+          ? `https://github.com/organizations/${scope.org}/settings/hooks`
+          : `https://github.com/${scope.owner}/${scope.repo}/settings/hooks`
+        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
+        log(chalk.dim(`    ${hooksUrl}`))
       }
     }
 
-    // Wait for this tunnel session to end
-    await new Promise<void>(resolve => {
-      tunnelProc.on('exit', resolve)
-      tunnelProc.on('error', resolve)
-    })
+    // Wait for this tunnel session to end.
+    // Health check kills the SSH proc if lhr.life goes dead without exiting.
+    await waitForTunnelEnd(tunnelProc, tunnelUrl)
 
     if (!running) break
 

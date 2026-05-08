@@ -4,18 +4,17 @@ import { join } from 'path'
 import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import { createGithubClient, postReviewComment } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { runCodexReview } from '../reviewers/codex.js'
-import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
+import { runWorkflow } from '../lib/runner.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
+// SHAs pushed by the address step — skip synchronize events from our own commits
+const crosscheckShas = new Set<string>()
 
 async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, token: string, log: (msg: string) => void) {
   const { pull_request: pr, repository: repo } = event
@@ -29,10 +28,19 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     return
   }
 
+  // Skip synchronize events triggered by our own address commits
+  if (crosscheckShas.has(pr.head.sha)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
+    return
+  }
+
+  inFlight.add(key)
+
   const author = pr.user.login
 
   if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+    inFlight.delete(key)
     return
   }
 
@@ -65,24 +73,14 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     } catch {
       fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
     }
-    log('  → running review...')
 
-    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
-    let rawReview: string
-    if (reviewer === 'codex') {
-      rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, log)
-    } else {
-      rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, log)
-    }
-
-    const { verdict, clean } = parseVerdict(rawReview)
-    const commentBody = prependVerdictToComment(clean, verdict)
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - reviewStart })
-
-    const octokit = createGithubClient(token)
-    await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
-    log(`  ✓ review posted to PR #${prNumber}  ${formatVerdict(verdict)}`)
-    fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://github.com/${owner}/${repoName}/pull/${prNumber}` })
+    await runWorkflow({
+      owner, repoName, prNumber, pr,
+      tmpDir, token, config, origin,
+      reviewStart,
+      log,
+      crosscheckShas,
+    })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
     log(`  ✗ review failed: ${message}`)

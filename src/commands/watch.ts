@@ -123,11 +123,20 @@ export async function runWatch(configPath?: string) {
       }
       inFlight.add(key)
 
+      const author = pr.user.login
+
+      // Author filter — skip if allowed_authors is set and this author is not in it
+      const allowedAuthors = config.routing.allowed_authors
+      if (allowedAuthors.length > 0 && !allowedAuthors.includes(author)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
+        return
+      }
+
       log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
       const origin = detectPROrigin(pr.body ?? '', config)
       const reviewer = assignReviewer(origin, config)
 
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin })
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
 
       if (!reviewer) {
         log(chalk.dim(`  origin=${origin} — skipping (no reviewer assigned)`))

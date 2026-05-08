@@ -31,6 +31,10 @@ export const RoutingConfigSchema = z.object({
     'Generated with \\[OpenAI Codex\\]',
     'Co-Authored-By: codex',
   ]),
+  // Only review PRs opened by these GitHub logins.
+  // Empty list = no restriction (reviews all AI-authored PRs in cross-vendor mode,
+  // or all PRs in single-vendor mode). Recommended: set to the logins of your AI agents.
+  allowed_authors: z.array(z.string()).default([]),
 })
 
 export const ServerConfigSchema = z.object({

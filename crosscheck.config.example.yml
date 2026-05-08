@@ -59,9 +59,16 @@ repos:
   - owner: codatta
     name: my-repo
 
-# ─── Routing (cross-vendor mode only) ────────────────────────────────────────
-# Which AI reviews PRs from which author patterns
+# ─── Routing ─────────────────────────────────────────────────────────────────
 routing:
+  # Restrict reviews to PRs opened by these GitHub logins.
+  # Recommended: set to the accounts your AI agents use.
+  # Empty list = no author restriction (applies body-pattern check only).
+  # allowed_authors:
+  #   - beingzy          # your personal account (Claude Code runs as you)
+  #   - my-org-bot       # a dedicated bot account
+
+  # Body-pattern matching — determines which reviewer is assigned
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
   claude_reviews_patterns:

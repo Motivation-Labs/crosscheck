@@ -28,7 +28,7 @@ const TIER_MODELS_API: Record<string, string> = {
 }
 
 const TIER_TIMEOUT_MS: Record<string, number> = {
-  fast: 120_000,
+  fast: 300_000,
   balanced: 600_000,
   thorough: 1_200_000,
 }

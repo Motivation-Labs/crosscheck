@@ -25,23 +25,30 @@ export function loadConfig(explicitPath?: string): Config {
   return ConfigSchema.parse(raw)
 }
 
-export function getGithubToken(): string {
+// Shared by getGithubToken() and status.ts so both resolve through identical logic.
+export function getGithubTokenSource(): { token: string; source: 'gh-keyring' | 'env' } | null {
   // Strip GITHUB_TOKEN / GH_TOKEN from the subprocess env before calling
-  // `gh auth token`. If those vars are present (even invalid/expired), gh
+  // `gh auth token`. When those vars are present (even invalid/expired), gh
   // treats them as the active credential and echoes them back — bypassing the
-  // keyring entirely and defeating the purpose of this call.
+  // keyring entirely.
   try {
-    const ghToken = execSync('gh auth token 2>/dev/null', {
+    const t = execSync('gh auth token 2>/dev/null', {
       encoding: 'utf8',
       env: { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },
     }).trim()
-    if (ghToken) return ghToken
+    if (t) return { token: t, source: 'gh-keyring' }
   } catch { /* gh not available or no keyring session */ }
 
   // Fall back to env var — useful in CI where gh is not set up
-  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-  if (envToken) return envToken
+  const env = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (env) return { token: env, source: 'env' }
 
+  return null
+}
+
+export function getGithubToken(): string {
+  const result = getGithubTokenSource()
+  if (result) return result.token
   throw new Error(
     'No GitHub token found.\n' +
     '  Option 1: run: gh auth login\n' +

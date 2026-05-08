@@ -5,6 +5,7 @@ import { loadConfig, getGithubTokenSource } from '../config/loader.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
+import { buildImpactReport } from './impact.js'
 
 function row(label: string, value: string, ok?: boolean) {
   const indicator = ok === undefined ? ' ' : ok ? chalk.green('✓') : chalk.red('✗')
@@ -63,6 +64,16 @@ export async function runStatus(configPath?: string) {
     row('today', `${kb} KB — ${todayLog}`)
   } else {
     row('today', 'no log yet today')
+  }
+
+  // Impact summary
+  console.log()
+  console.log(chalk.dim('  Impact'))
+  const impact = buildImpactReport(config.impact)
+  if (impact.reviews_total === 0) {
+    row('summary', 'no data yet — run crosscheck watch to start collecting')
+  } else {
+    row('summary', `${impact.reviews_total} reviews · ~${Math.round(impact.total_hours_saved)}h saved · ${impact.issues_caught} issues caught  ${chalk.dim('(run crosscheck impact for details)')}`)
   }
 
   // CLI versions

@@ -59,14 +59,40 @@ repos:
   - owner: codatta
     name: my-repo
 
-# ─── Routing (cross-vendor mode only) ────────────────────────────────────────
-# Which AI reviews PRs from which author patterns
+# ─── Routing ─────────────────────────────────────────────────────────────────
 routing:
+  # Restrict reviews to PRs opened by these GitHub logins.
+  # Recommended: set to the accounts your AI agents use.
+  # Empty list = no author restriction (applies body-pattern check only).
+  # allowed_authors:
+  #   - beingzy          # your personal account (Claude Code runs as you)
+  #   - my-org-bot       # a dedicated bot account
+
+  # Body-pattern matching — determines which reviewer is assigned
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"
+
+# ─── Tunnel (watch mode only) ────────────────────────────────────────────────
+# Controls how crosscheck watch receives GitHub webhook events on your laptop.
+#
+# localhost.run (default) — zero config, SSH tunnel, random URL each restart.
+#   No install required. URL changes on reconnect → webhook re-registered automatically.
+#   Limitation: events delivered while the tunnel is down are lost.
+#
+# smee — webhook relay via smee.io. Stable channel URL; events are queued and
+#   replayed even when your laptop is offline or watch is restarted.
+#   Setup:
+#     1. npm install -g smee-client
+#     2. Visit https://smee.io/new — copy the channel URL
+#     3. Point your GitHub org/repo webhook Payload URL to the channel URL
+#     4. Set tunnel.smee_channel below
+#
+# tunnel:
+#   backend: smee
+#   smee_channel: https://smee.io/your-channel-id
 
 # ─── Server (serve mode only) ────────────────────────────────────────────────
 server:

@@ -196,8 +196,224 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 - [x] **Fix `watch` mode tunnel** — replaced `gh webhook forward` (not available in gh 2.65.0) with `localhost.run` SSH tunnel. SSH is pre-installed on macOS/Linux, no account needed. Tunnel URL shown in watch banner; webhooks auto-registered and deleted on exit.
 - [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
+- [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
+  - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
+  - **Acceptance Criteria:**
+    - `loadWorkflow(repoDir, configDir)` always returns a valid step list. When no `workflow.yml` is found, it returns the `DEFAULT_WORKFLOW` constant (single `review` step) — no separate fallback code path.
+    - `watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`; there is no conditional that bypasses the runner for the no-file case.
+    - `crosscheck init` generates a `.crosscheck/workflow.yml` template with the default step active and `address`/`recheck` steps present but commented out.
+    - Supported step types: `review` (run AI reviewer, post comment), `address` (read review comment, commit fixes to PR branch), `recheck` (re-review after fixes).
+    - `when` field: evaluated as a boolean expression; step skipped if false. Supported context: `verdict`, `<step-name>.applied_count`, `<step-name>.verdict`.
+    - Per-step `instructions` field appended to AI prompt for that step only, extending global `~/.crosscheck/instructions.md`.
+    - `max_rounds` on `address` steps (default 1); hard cap of 5 `[crosscheck]` commits per PR.
+    - All `address` commits prefixed `[crosscheck]` in the message.
+    - `crosscheck review <pr-url> --workflow` exercises the full workflow against a single PR for testing.
+    - No `address` step ever merges; `auto_merge` is always false.
+  - **Technical Notes:**
+    - `src/lib/workflow.ts`: `DEFAULT_WORKFLOW` constant; Zod-validated schema; `loadWorkflow(repoDir, configDir)` returns `DEFAULT_WORKFLOW` when no file found — never null.
+    - `src/lib/runner.ts`: `runWorkflow(steps, context)` — iterates steps, dispatches handlers.
+    - `address` handler: parse AI response as file-level patches → `git apply` → push `[crosscheck]` commit.
+    - `when` evaluation: minimal expression evaluator (equality + comparison, no scripting engine).
+    - `watch.ts`/`serve.ts`: unconditionally call `loadWorkflow` + `runWorkflow`; delete the direct reviewer call.
+    - `init.ts`: write `.crosscheck/workflow.yml` template during init (see Feature Design section).
+  - **Tests Required:** `loadWorkflow` returns `DEFAULT_WORKFLOW` on absent file; `loadWorkflow` parses a valid file correctly; `when: "verdict == 'APPROVE'"` skips `address` step; `max_rounds` cap respected; `address` commits prefixed `[crosscheck]`; runner with `DEFAULT_WORKFLOW` produces identical output to current direct-call behavior.
+
+- [ ] **Auto-init on `watch`/`serve`** — `crosscheck watch` and `crosscheck serve` detect whether first-time setup has been done and run init steps automatically before starting the monitor. `crosscheck init` becomes optional, not required.
+  - **User:** Anyone running crosscheck for the first time. The current expectation ("run init first") is undiscoverable — most users just try `crosscheck watch` and hit missing-config errors.
+  - **Acceptance Criteria:**
+    - On `crosscheck watch` / `crosscheck serve` startup, before opening the tunnel or binding the port, call `ensureInit(cwd)`.
+    - If `~/.crosscheck/.initialized` exists and contains the current crosscheck version, `ensureInit` skips global setup (webhook secret generation) but still runs cheap `existsSync` checks for the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`). If either is missing, it is created before returning. No subprocess spawns on the fast path.
+    - If sentinel is absent or version differs, print `  ✦ first run — setting up crosscheck...`, run missing setup steps, write sentinel, then continue.
+    - Auth checks (gh, claude, codex CLIs) remain in `crosscheck init` only — not run by `ensureInit` (they require subprocess spawns and would defeat the fast-path goal).
+    - After auto-init completes, watch/serve continues normally without requiring a restart.
+    - `crosscheck init` remains a standalone command; bypasses sentinel (`--force` internally) and always runs the full check + prints status table. Re-running does not overwrite existing files.
+    - `--no-init` flag on `watch`/`serve` skips the `ensureInit` call entirely for CI environments.
+  - **Technical Notes:**
+    - New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: sentinel check first; on miss, runs setup steps and writes `~/.crosscheck/.initialized`.
+    - `init.ts` calls `ensureInit` with `{ force: true, verbose: true }` then prints status table.
+    - `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`.
+  - **Tests Required:** sentinel present + version match + repo-local files exist → no files written; sentinel present + version match + repo-local files absent → creates missing repo-local files only (no webhook secret re-generated); sentinel absent → runs all three setup steps; sentinel version mismatch → re-runs changed steps; `--no-init` bypasses call; `crosscheck init` overwrites sentinel even if present; second repo with same version → repo-local files created even though sentinel already exists.
+
+- [ ] **`crosscheck issue`** — scan recent logs for errors, draft a GitHub issue using the local AI agent, ask targeted multiple-choice follow-up questions, and submit to `motivation-labs/crosscheck` after user confirmation. Zero manual log-digging required.
+  - **User:** Anyone who hits a recurring or unexpected review failure and wants to report it without writing the issue from scratch or navigating log files manually.
+  - **Acceptance Criteria:**
+    - `crosscheck issue` reads `~/.crosscheck/logs/` for the most recent 3 days (default); `--since YYYY-MM-DD` overrides the window.
+    - Reuses the same error-grouping logic as `diagnose` (extracted into `src/lib/log-analysis.ts`). If no `error`-level entries are found, prints `No errors found in recent logs — nothing to report` and exits 0.
+    - If multiple error patterns are found, shows a numbered menu and prompts `Which issue do you want to report? [1–N]` before proceeding.
+    - Passes the selected log entries + current version, platform, and config summary (mode, enabled vendors — no repo names or secrets) to the local AI agent to draft an issue with: a concise **title**, **description** (what failed and likely cause), **steps to reproduce** (inferred from the log event sequence), **sanitized log excerpt**, and **environment block** (version, platform, reviewer, config mode).
+    - After generating the draft, asks exactly 3 targeted multiple-choice questions to improve the report:
+      1. `Can you reproduce this consistently?` → `[1] Every time  [2] Sometimes  [3] Happened once`
+      2. `Which command triggered this?` → `[1] watch  [2] serve  [3] review  [4] Unknown` (skip if unambiguous from logs)
+      3. `Is this blocking you from using crosscheck?` → `[1] Blocked  [2] Degraded  [3] Cosmetic` (sets label priority)
+      Answers are appended to the issue body under `## User Context`. No free-text input required.
+    - Shows the final draft in the terminal and prompts `Submit to motivation-labs/crosscheck? [y/N]`.
+    - `--yes` / `-y` skips the confirmation step and submits immediately after displaying the draft.
+    - `--dry-run` prints the draft and exits 0 without calling `gh`, regardless of `--yes`.
+    - Submission uses `gh issue create --repo motivation-labs/crosscheck`. Falls back to printing the exact `gh issue create` command the user can copy-run if `gh` is not authenticated or the call fails.
+    - Adds label `bug` always; adds label `priority:high` when impact answer is `Blocked`.
+    - On success, prints the issue URL.
+  - **Sanitization rules (non-negotiable — applied before passing log entries to AI and before posting):**
+    - Strip: `owner/repo` patterns, PR titles, file paths, GitHub usernames, branch names, any string matching a GitHub URL.
+    - Replace with: `[repo]`, `[pr-title]`, `[file-path]`, `[username]`.
+    - Webhook secrets and tokens are never present in log entries (enforced by `logger.ts`) — no special handling needed.
+  - **Technical Notes:**
+    - New file: `src/commands/issue.ts`.
+    - Extract error-grouping logic from `diagnose.ts` into `src/lib/log-analysis.ts`; both `diagnose.ts` and `issue.ts` import from it.
+    - Agent selection: same `selectOptimizeAgent(config, report)` from `optimize.ts`.
+    - Agent prompt structure:
+      ```
+      You are drafting a GitHub issue for the crosscheck project.
+
+      Error pattern: {pattern}
+      Frequency: {count} occurrences in the last {days} days
+
+      Sanitized log entries:
+      {entries}
+
+      Environment: crosscheck {version} · {platform} · reviewer: {reviewer} · mode: {mode}
+
+      User context:
+      - Reproducibility: {reproducibility}
+      - Trigger: {command}
+      - Impact: {impact}
+
+      Output exactly:
+      TITLE: <title>
+      ---
+      <markdown body>
+      ```
+    - Parse `TITLE:` line as issue title; everything after `---` as the body.
+    - Wire into `cli.ts` as `crosscheck issue [--since <date>] [--dry-run] [--yes]`.
+  - **Tests Required:** sanitizer removes repo names, PR titles, file paths, usernames; no errors found → exits 0 with message; multiple patterns → prompts menu; `--dry-run` prints draft and skips `gh`; `--yes` skips confirmation; draft parsing extracts title and body correctly; `gh` not authenticated → prints manual command; `priority:high` label added when impact is `Blocked`.
+- [ ] **`crosscheck impact`** — report cumulative value crosscheck has created: time saved through automation, issues caught before merge, and second-order code quality signals. Pulls from local logs; no telemetry, no network calls.
+  - **User:** Anyone who wants to understand whether crosscheck is pulling its weight — developers justifying continued use, team leads making tooling decisions, engineering managers tracking process improvement.
+  - **Acceptance Criteria:**
+    - `crosscheck impact` prints a human-readable report to stdout; `--json` outputs structured JSON.
+    - `--since YYYY-MM-DD` limits the analysis window (default: all time).
+    - **Time-saving section:**
+      - Shows total PRs reviewed, total estimated human-hours saved, and average minutes saved per PR.
+      - Calculation: `time_saved_per_pr = assumed_human_review_min − actual_ai_review_min`. Default `assumed_human_review_min = 60` (configurable via `impact.assumed_human_review_minutes` in `crosscheck.config.yml`). `actual_ai_review_min` is derived from `review_complete.duration_ms` in the logs; falls back to 2 min when data is absent.
+      - Displays the assumption so users can calibrate: `  ⓘ assumes 60 min avg human review — set impact.assumed_human_review_minutes to adjust`.
+    - **Issues caught section:**
+      - APPROVE / NEEDS_WORK / BLOCK verdict counts and percentages.
+      - `issues_caught = NEEDS_WORK + BLOCK` verdicts — PRs that would have shipped with unreviewed feedback had crosscheck not run.
+      - BLOCK count surfaced separately with a plain-language note: "potential bugs or breaking changes caught before merge".
+    - **Code quality signal section:**
+      - Trend line: BLOCK rate over the analysis period (weekly buckets). A declining BLOCK rate may indicate improved code quality upstream.
+      - Top file types with NEEDS_WORK/BLOCK verdicts — surfaces where the most issues appear.
+    - **Monetary estimate (opt-in):**
+      - Hidden by default; shown with `--money`.
+      - Formula: `estimated_value = (hours_saved × hourly_rate) + (issues_caught × defect_cost)`. Defaults: `hourly_rate = 150` (USD), `defect_cost = 150` (one hour of engineer time per issue). Both configurable via `impact.hourly_rate_usd` and `impact.defect_cost_usd`.
+      - Shown with a clear disclaimer: "rough estimate based on configurable assumptions; not accounting data."
+    - Exit 0 always (reporting tool, not a gate).
+    - Gracefully handles empty log dir: prints `No review data yet — run crosscheck watch to start collecting.`
+  - **Technical Notes:**
+    - New file: `src/commands/impact.ts`.
+    - Reuse the log parser from `diagnose.ts` — extract into `src/lib/log-reader.ts` if not already a standalone module.
+    - New config fields in `schema.ts`:
+      ```
+      ImpactConfigSchema = z.object({
+        assumed_human_review_minutes: z.number().int().min(1).default(60),
+        hourly_rate_usd: z.number().min(0).default(150),
+        defect_cost_usd: z.number().min(0).default(150),
+      })
+      ```
+      Added to `ConfigSchema` as `impact: ImpactConfigSchema.default({})`.
+    - Duration data comes from `review_complete` log entries that include `duration_ms`. For entries without duration, omit them from the per-review average (don't assume a value).
+    - Verdict data comes from `review_complete` log entries with a `verdict` field. Entries with no verdict are counted as `UNKNOWN` and excluded from BLOCK/NEEDS_WORK totals.
+    - Wire into `cli.ts` as `crosscheck impact [--json] [--since <date>] [--money]`.
+    - `crosscheck status` gets a one-line impact summary appended: `  impact  47 PRs reviewed · ~23h saved · 8 issues caught` — linking to full `crosscheck impact` for details.
+  - **Calculation methodology (basis):**
+    - **Time saved per PR**: Industry research (Google Engineering Productivity, Microsoft Research SPACE framework) puts median human code review time at 60–90 min per PR for non-trivial changes. The 60 min default is conservative. AI turnaround measured from log `duration_ms` is typically 1–3 min. Net saving per PR: ~57 min at default settings.
+    - **Defect cost**: NIST studies put post-merge defect fix cost at 4–10× the cost of catching it during review. At $150/hr and 1 hr median fix time, each issue caught pre-merge is conservatively worth $150. BLOCK-severity issues are not weighted more (keeps the math transparent and conservative).
+    - **Second-order quality signal**: Declining BLOCK rate over time is a leading indicator that PRs are getting cleaner upstream — teams internalize review feedback. This is a proxy metric, not a hard measurement.
+  - **Tests Required:** empty log dir → graceful no-data message; log with mixed verdicts → correct APPROVE/NEEDS_WORK/BLOCK counts; duration data present → `actual_ai_review_min` calculated correctly; duration data absent → falls back to default; `--since` filters log entries by date; `--json` output is valid JSON matching schema; `--money` flag gates monetary estimate display; `crosscheck status` shows one-line summary.
+
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
+
+- [ ] **Tiered Feedback Loops — local usage analytics, instruction-effectiveness signals, and safe opt-in telemetry** — three-tier system that measures crosscheck's real-world impact, feeds those signals back into `optimize`, and—only with explicit consent—sends de-identified aggregate counts to inform future development. Privacy-first by design: sensitive data never leaves the machine; telemetry is opt-in (off by default).
+  - **User:** All crosscheck users benefit from better defaults driven by real usage. Contributors to the project benefit from aggregate signal. Power users benefit from local analytics surfaced in `diagnose`.
+  - **Acceptance Criteria:**
+
+    **Tier 1 — Local count statistics (always-on, local only):**
+    - After every review, append a metrics record to `~/.crosscheck/metrics/YYYY-MM.ndjson` containing: `{ ts, reviewer_pair, verdict, duration_ms, comments_count, pr_sha_prefix }`. `pr_sha_prefix` is the first 8 characters of the PR's head SHA — enough to detect follow-up commits later, not enough to identify the repo or author.
+    - `reviewer_pair` values: `claude_reviews_codex`, `codex_reviews_claude`, `claude_reviews_claude`, `codex_reviews_codex`.
+    - Follow-fix detection: when a new commit arrives on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two reviews by `pr_sha_prefix`. This tracks whether AI review comments actually get addressed.
+    - `crosscheck diagnose` incorporates Tier 1 data: adds a **Usage** section reporting reviewer-pair distribution, average comments per review, verdict distribution over the period, and follow-fix rate.
+    - Metrics files are subject to the same `logs.retention_days` setting as event logs. Stored in `~/.crosscheck/metrics/`, never in the project directory.
+    - No code content, no PR title, no repo name, no file names, no author identities stored.
+
+    **Tier 2 — Instruction effectiveness tracking (always-on, local only):**
+    - When `optimize` applies a new `instructions.md`, snapshot the current instruction fingerprint (SHA-256 of the file) and log it with a timestamp to `~/.crosscheck/metrics/optimize-history.ndjson`.
+    - In subsequent metric records, include the active `instruction_fingerprint` so outcomes (verdict distribution, follow-fix rate) can be correlated with the instruction version in effect at review time.
+    - `crosscheck diagnose --since <date>` can compare verdict distribution before and after each `optimize` run, surfacing the delta: "After optimize on 2025-05-01: APPROVE rate +12%, BLOCK rate −5%."
+    - `crosscheck optimize` reads these deltas when selecting which instruction changes to keep vs. revert. If a fingerprint correlates with worse outcomes, `optimize` flags it as a candidate for rollback.
+    - Instruction text is never stored — only the SHA-256 fingerprint. The actual text lives in `instructions.md` under the user's control.
+
+    **Tier 3 — Privacy & consent design (non-negotiable constraints):**
+    - Telemetry is **opt-in**. `telemetry.enabled` defaults to `false` in config. No data is transmitted unless the user explicitly enables it.
+    - On first `watch`/`serve` run after install, display a one-time consent prompt:
+      ```
+        crosscheck can send anonymous usage counts to Motivation Labs to improve future versions.
+        No code, no repo names, no PR content, no usernames — only aggregate numbers.
+        Enable? [y/N]:
+      ```
+      Default answer is N. Response is persisted to `~/.crosscheck/config.yml` as `telemetry.enabled`. The prompt is never shown again. Users can change the setting at any time via `crosscheck telemetry [enable|disable|status]`.
+    - `crosscheck init` output includes a **Telemetry** row: current state (enabled/disabled) and a link to the privacy doc.
+    - Data categories that may **never** be collected or transmitted: code diffs, PR titles, PR descriptions, commit messages, file paths, repo names, GitHub usernames or org names, IP addresses, machine hostnames.
+    - A `PRIVACY.md` at the repo root documents exactly which fields are in a telemetry payload. This document is referenced in the consent prompt and `get-started.md`.
+
+    **Tier 4 — Safe telemetry payload (only when `telemetry.enabled: true`):**
+    - `install_id`: a UUID generated once at first install and stored in `~/.crosscheck/config.yml`. Never linked to a GitHub identity, email, or hostname. Rotatable via `crosscheck telemetry reset-id`.
+    - Transmission: weekly batch, sent at the start of the first `watch`/`serve` session of each UTC week. HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). No per-event streaming.
+    - Payload schema (all fields are counts or enums — no free text, no identifiers):
+      ```json
+      {
+        "install_id": "<uuid>",
+        "version": "0.2.0",
+        "platform": "darwin | linux | win32",
+        "period": "2025-W20",
+        "sessions": 12,
+        "prs_reviewed": 47,
+        "comments_posted": 134,
+        "reviews_by_pair": {
+          "claude_reviews_codex": 23,
+          "codex_reviews_claude": 18,
+          "claude_reviews_claude": 4,
+          "codex_reviews_codex": 2
+        },
+        "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
+        "follow_fix_rate": 0.73,
+        "optimize_runs": 2
+      }
+      ```
+    - If the HTTP request fails (network error, server error), log locally and retry at the next weekly opportunity. Never block startup on telemetry.
+    - `crosscheck telemetry status` shows: enabled/disabled, install_id (first 8 chars), date of last transmission, and the full payload that would be sent.
+    - `crosscheck telemetry dry-run` prints the payload without sending it, regardless of `enabled` state. Useful for users who want to audit before enabling.
+
+  - **Technical Notes:**
+    - New file: `src/lib/metrics.ts` — `appendMetric(record)`, `readMetrics(since?)`, `computeSummary(records)`. Module-level singleton; respects `logs.enabled` (if logs are disabled, metrics are too). NDJSON append, same pattern as `logger.ts`.
+    - New file: `src/lib/telemetry.ts` — `maybeSendTelemetry(config)`: checks enabled + weekly cadence (`~/.crosscheck/.telemetry-last-sent`), aggregates `metrics/` files, POSTs payload, updates sentinel. All errors are caught and logged locally; never throws to caller.
+    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry [enable|disable|status|dry-run|reset-id]`.
+    - Schema additions: `telemetry: { enabled: boolean (default false), install_id: string (auto-generated) }`.
+    - `watch.ts`/`serve.ts`: call `maybeSendTelemetry(config)` early in startup (after consent check on first run).
+    - `review.ts`: call `appendMetric(...)` after each review completes (success or failure verdict).
+    - `optimize.ts`: call `appendMetric({ event: 'optimize_run', fingerprint_before, fingerprint_after })` after applying changes.
+    - `diagnose.ts`: extend output with Tier 1 usage summary section and Tier 2 instruction-effectiveness delta table.
+    - `init.ts`: add Telemetry row to status table.
+    - New file: `PRIVACY.md` at repo root, included in npm package. Documents full payload schema, data retention, opt-out instructions, and contact for data deletion requests.
+  - **Tests Required:**
+    - `appendMetric` with `logs.enabled: false` writes nothing.
+    - Metrics records contain no sensitive fields (schema-level check on allowed keys).
+    - `maybeSendTelemetry` with `enabled: false` makes no HTTP request.
+    - `maybeSendTelemetry` within the same UTC week as last send makes no HTTP request.
+    - `maybeSendTelemetry` in a new week POSTs the correct aggregated payload.
+    - Consent prompt on first run persists response; not shown again on second run.
+    - `telemetry dry-run` prints payload structure matching schema; makes no HTTP request.
+    - `diagnose` with Tier 1 data shows reviewer-pair distribution and follow-fix rate.
+    - `diagnose` with two instruction fingerprints shows before/after verdict delta.
+    - Follow-fix event emitted when new commit arrives on a PR with prior `NEEDS_WORK`/`BLOCK` verdict.
 
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
@@ -244,6 +460,111 @@ Parse the last `VERDICT:` line from the review text before posting. Display in t
 
 ---
 
+#### Tiered Feedback Loops
+
+**Problem:** crosscheck runs locally and has no visibility into whether it's actually helping. Without usage signal, `optimize` can only react to failures — it can't learn that certain reviewer configurations produce better outcomes, or that specific instruction patterns reliably increase fix-follow rates. At the same time, collecting that signal must not compromise user privacy or trust.
+
+**Value:**
+1. **Self-improvement with evidence** — `optimize` gains a before/after comparison of instruction changes vs. verdict distribution, so it can recommend keeping or reverting changes based on real outcomes rather than heuristics.
+2. **Actionable `diagnose` output** — users learn which reviewer pair works best for their repos, what their follow-fix rate is, and whether recent `optimize` runs improved quality.
+3. **Product signal for future development** — with explicit consent, anonymous aggregate counts answer questions like "what fraction of installs use cross-vendor mode?" without revealing anything about individual users or repos.
+4. **Trust foundation** — a consent-first, audit-friendly design (dry-run, status, reset-id) makes telemetry a feature users can actually verify rather than a black box.
+
+**Tier summary:**
+
+| Tier | Data | Leaves machine? | Consent required? |
+|---|---|---|---|
+| 1 — Count statistics | Reviewer pair, verdict, duration, comment count, PR SHA prefix | Never | No |
+| 2 — Instruction effectiveness | Instruction fingerprint (SHA-256 only), verdict delta | Never | No |
+| 3 — Telemetry | Anonymous aggregate counts, install UUID, version, platform | Yes (if opted in) | Yes — opt-in |
+
+**Privacy constraints (non-negotiable):**
+
+These are design invariants, not config options:
+- No code content ever stored or transmitted.
+- No repo names, PR titles, file paths, GitHub usernames, org names, IP addresses, or hostnames.
+- Telemetry payload contains only counts, enums, rates, and a locally generated UUID.
+- The UUID is not derived from any user identity — it's a random v4 UUID generated at first install.
+- Metrics files stay in `~/.crosscheck/metrics/` — never in the project directory where they could be accidentally committed.
+
+**Consent flow (one-time, on first `watch`/`serve`):**
+
+```
+  crosscheck can send anonymous usage counts to Motivation Labs to improve
+  future versions. No code, no repo names, no PR content, no usernames —
+  only aggregate numbers. See PRIVACY.md for the exact payload.
+
+  Enable telemetry? [y/N]:
+```
+
+Default: N. Response written to `~/.crosscheck/config.yml` immediately. Prompt is never shown again. Changeable any time:
+
+```bash
+crosscheck telemetry enable
+crosscheck telemetry disable
+crosscheck telemetry status       # shows state, last send date, install_id prefix
+crosscheck telemetry dry-run      # prints payload without sending
+crosscheck telemetry reset-id     # generates a new UUID, breaking any linkage
+```
+
+**Follow-fix detection (Tier 1):**
+
+When a `synchronize` webhook fires on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two review records by `pr_sha_prefix`. This event fires regardless of whether the new commit actually addresses the review — it's a count of "new activity after a non-APPROVE verdict." The ratio `follow_fix_events / NEEDS_WORK_or_BLOCK_reviews` is the follow-fix rate surfaced in `diagnose`.
+
+**Instruction-effectiveness delta (`diagnose` output):**
+
+```
+Instruction history (last 30 days):
+  fingerprint a1b2c3d4  active 2025-04-01 → 2025-05-01  (30 reviews)
+    APPROVE 60%  NEEDS_WORK 33%  BLOCK 7%
+  fingerprint e5f6a7b8  active 2025-05-01 → now          (17 reviews)
+    APPROVE 76%  NEEDS_WORK 24%  BLOCK 0%   ↑ +16% APPROVE since last optimize
+```
+
+**Telemetry payload (full schema):**
+
+```json
+{
+  "install_id": "<uuid-v4>",
+  "version": "0.2.0",
+  "platform": "darwin | linux | win32",
+  "period": "2025-W20",
+  "sessions": 12,
+  "prs_reviewed": 47,
+  "comments_posted": 134,
+  "reviews_by_pair": {
+    "claude_reviews_codex": 23,
+    "codex_reviews_claude": 18,
+    "claude_reviews_claude": 4,
+    "codex_reviews_codex": 2
+  },
+  "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
+  "follow_fix_rate": 0.73,
+  "optimize_runs": 2
+}
+```
+
+No field may contain a string that could identify a user, repo, or machine. Any new telemetry field must be documented in `PRIVACY.md` before shipping.
+
+**File layout additions:**
+
+```
+~/.crosscheck/
+  metrics/
+    YYYY-MM.ndjson          ← Tier 1 review events
+    optimize-history.ndjson ← Tier 2 instruction fingerprints
+  .telemetry-last-sent      ← ISO date of last successful transmission
+src/
+  lib/
+    metrics.ts              ← appendMetric, readMetrics, computeSummary
+    telemetry.ts            ← maybeSendTelemetry, aggregatePayload
+  commands/
+    telemetry.ts            ← crosscheck telemetry subcommands
+PRIVACY.md                  ← exact payload schema, retention, opt-out, contact
+```
+
+---
+
 #### Fortune cookie welcome message
 
 **Problem:** startup feels cold and mechanical.
@@ -264,7 +585,443 @@ Style: dim text, italic if the terminal supports it. One quote per startup, rand
 
 ---
 
+#### Custom Workflow Engine (`workflow.yml`)
+
+**Problem:** crosscheck is a passive reviewer — it posts a comment and stops. The review → fix → re-review cycle is repetitive for formulaic issues (lint violations, missing tests, doc gaps). There is also no way to customize the pipeline shape per repo: some teams want review-only, others want auto-fix on NEEDS_WORK, others want a full review → address → recheck loop.
+
+**Value:**
+1. **Closes the feedback loop** — from "AI posts comment" to "AI posts comment + attempts fixes + re-reviews." The PR author gets a clean diff rather than a list of action items.
+2. **Pipeline composition without code changes** — teams define multi-step workflows in a checked-in YAML file. crosscheck executes the steps.
+3. **Behavior steering per step** — the `review` step and the `address` step need different instructions. A reviewer should be skeptical; an agent fixing its own comments should be conservative and scoped.
+4. **Progressive adoption** — users can start with the default `[review]` pipeline and add `address` when they're ready. No new concepts forced on existing users.
+
+**Design — `workflow.yml`:**
+
+Placed at `.crosscheck/workflow.yml` or `crosscheck.workflow.yml` in the repo. Falls back to a default single-step `review` pipeline if absent (fully backwards compatible).
+
+```yaml
+# .crosscheck/workflow.yml
+
+on:
+  - opened
+  - synchronize          # new commits pushed to an existing PR
+
+steps:
+  - name: review
+    type: review
+    reviewer: auto        # auto = cross-vendor logic from config.mode
+
+  - name: address
+    type: address
+    when: "verdict == 'NEEDS_WORK'"
+    reviewer: auto
+    max_rounds: 2
+    instructions: |
+      Only address comments that are explicitly called out in the review.
+      Do not refactor logic, rename identifiers, or add tests.
+      Do not touch files the review did not mention.
+      If a comment requires understanding of business logic, skip it and leave a note.
+
+  - name: recheck
+    type: review
+    when: "address.applied_count > 0"
+    reviewer: auto
+```
+
+**Step types:**
+
+| Type | What it does |
+|---|---|
+| `review` | Runs the AI reviewer, posts a comment with verdict |
+| `address` | Reads the review comment, opens a commit on the PR branch with fixes |
+| `recheck` | Re-runs review on the updated branch (same as `review` but semantically distinct) |
+| `notify` | Sends a notification — Slack, email (future) |
+
+**Step fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Identifier used in `when` conditions |
+| `type` | yes | `review`, `address`, `recheck`, `notify` |
+| `reviewer` | no | `auto`, `claude`, `codex` — overrides config for this step |
+| `when` | no | Boolean expression; step skipped if false. Context vars: `verdict`, `<step-name>.applied_count`, `<step-name>.verdict` |
+| `max_rounds` | no | Caps iterations for `address` steps (default 1) |
+| `instructions` | no | Prose appended to the AI prompt for this step only — overrides global `instructions.md` for this step |
+
+**Behavior steering — `instructions` block:**
+
+The per-step `instructions` field is the primary knob for steering AI behavior within the pipeline. It is appended to the prompt for that step only. Global `~/.crosscheck/instructions.md` still applies as a base layer; step-level `instructions` extend or override it.
+
+This lets teams express policies like:
+- "During `address`, never touch tests or migrations."
+- "During `recheck`, be stricter about security than the initial review."
+- "During `address`, prefer one-line fixes — no multi-function refactors."
+
+**Safeguards (non-negotiable defaults):**
+
+- `max_rounds: 1` default on all `address` steps — prevents loops
+- `auto_merge: false` always — address creates commits, never merges
+- `address` only touches files mentioned in the review comment it is addressing
+- Every `address` commit message begins `[crosscheck]` for traceability and easy revert
+- Hard limit: no `address` step runs if the PR already has > N `[crosscheck]` commits (configurable, default 5)
+
+**Relationship to existing config files:**
+
+| File | Owns |
+|---|---|
+| `crosscheck.config.yml` | Infrastructure: mode, repos, orgs, vendors, budget, server |
+| `.crosscheck/workflow.yml` | Pipeline shape: step order, types, conditions, max_rounds |
+| `~/.crosscheck/instructions.md` | Global prose behavior for all review steps |
+| Step-level `instructions:` | Per-step behavior overrides within `workflow.yml` |
+
+**Default workflow — constant, not a file:**
+
+```typescript
+// src/lib/workflow.ts
+export const DEFAULT_WORKFLOW: WorkflowStep[] = [
+  { name: 'review', type: 'review', reviewer: 'auto' }
+]
+
+export function loadWorkflow(repoDir: string, configDir: string): WorkflowStep[] {
+  const file = findWorkflowFile(repoDir, configDir)
+  if (!file) return DEFAULT_WORKFLOW
+  return parseWorkflowFile(file)  // Zod-validated, throws on schema error
+}
+```
+
+`watch.ts`/`serve.ts` always call `loadWorkflow` + `runWorkflow`. No conditional for "no file". The constant *is* the backwards compatibility — existing installs without a `workflow.yml` get the default single-step behavior through the same code path as custom workflows.
+
+**`crosscheck init` generates a workflow template:**
+
+```yaml
+# .crosscheck/workflow.yml — generated by crosscheck init
+
+on:
+  - opened
+  - synchronize
+
+steps:
+  - name: review
+    type: review
+    reviewer: auto
+
+  # Uncomment to enable auto-fix after review:
+  # - name: address
+  #   type: address
+  #   when: "verdict == 'NEEDS_WORK'"
+  #   max_rounds: 2
+  #   instructions: |
+  #     Only fix what the review explicitly calls out.
+  #     Do not refactor logic or add tests.
+
+  # - name: recheck
+  #   type: review
+  #   when: "address.applied_count > 0"
+```
+
+New users see the full capability surface immediately. The template is the documentation.
+
+**Implementation notes:**
+- New file: `src/lib/workflow.ts` — `DEFAULT_WORKFLOW` constant; Zod schema; `loadWorkflow(repoDir, configDir)`.
+- New file: `src/lib/runner.ts` — `runWorkflow(steps, context)` — iterates steps, evaluates `when`, dispatches handlers.
+- `watch.ts` / `serve.ts`: replace direct reviewer call with `loadWorkflow(tmpDir, configDir)` + `runWorkflow(steps, context)` — unconditional, no legacy branch.
+- `address` handler: read the crosscheck review comment, pass it + diff + step `instructions` to AI, parse file patches from response, apply via `git apply`, push `[crosscheck] address: ...` commit.
+- `when` evaluation: flat context object, equality + numeric comparison operators only — no scripting engine.
+- `init.ts`: write `.crosscheck/workflow.yml` template; skip silently if file already exists.
+
+**Open questions before implementation:**
+- Should `address` push commits directly to the PR branch (requires write access) or open a follow-up PR? Direct commits are simpler; follow-up PRs are safer for external contributors. Default to direct commits on branches the token owns; follow-up PR on forks.
+- Should `when` support `AND`/`OR` or keep it to single conditions? Start with single conditions — composable via multiple steps.
+
+---
+
+#### `crosscheck issue` — AI-drafted bug reports from logs
+
+**Problem:** when crosscheck fails silently or behaves unexpectedly, users have to manually dig through `~/.crosscheck/logs/`, identify the error, understand its context, write a coherent issue, and decide what details matter. That friction means failures go unreported.
+
+**Solution:** `crosscheck issue` does the digging automatically. It reads recent logs, surfaces the most relevant failure, drives a short multiple-choice interview to fill context gaps, and hands the whole package to the local AI agent to write a well-structured issue draft. The user just reads, answers three quick questions, and hits `y`.
+
+**Flow:**
+
+```
+$ crosscheck issue
+
+  scanning logs...
+  found 3 error patterns in the last 3 days:
+
+  [1] command_not_found: tsc  (4 occurrences)
+  [2] base_branch_missing      (1 occurrence)
+  [3] timeout                  (1 occurrence)
+
+  Which issue do you want to report? [1-3]: 1
+
+  drafting issue with claude...
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ TITLE: codex reviewer fails when repo has a tsc build step          │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ ## Description                                                      │
+  │ The codex reviewer exits with `command_not_found: tsc` on repos     │
+  │ that include a TypeScript build step...                             │
+  │                                                                     │
+  │ ## Steps to Reproduce                                               │
+  │ 1. Run `crosscheck watch` on a TypeScript repo                     │
+  │ 2. Open a PR — codex reviewer is triggered                         │
+  │ 3. Review fails with `Error: command not found: tsc`               │
+  │                                                                     │
+  │ ## Log Excerpt                                                      │
+  │ ```                                                                 │
+  │ {"ts":"...","event":"error","reviewer":"codex","error":             │
+  │  "command_not_found","command":"tsc","repo":"[repo]"}               │
+  │ ```                                                                 │
+  │                                                                     │
+  │ ## Environment                                                      │
+  │ - crosscheck: 0.2.1                                                 │
+  │ - platform: darwin                                                  │
+  │ - reviewer: codex                                                   │
+  │ - mode: cross-vendor                                                │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  Can you reproduce this consistently?
+  [1] Every time  [2] Sometimes  [3] Happened once
+  > 1
+
+  Which command triggered this?
+  [1] watch  [2] serve  [3] review  [4] Unknown
+  > 1
+
+  Is this blocking you from using crosscheck?
+  [1] Blocked  [2] Degraded  [3] Cosmetic
+  > 2
+
+  Submit to motivation-labs/crosscheck? [y/N]: y
+
+  ✓ issue created → https://github.com/motivation-labs/crosscheck/issues/47
+```
+
+**Agent selection:** same `selectOptimizeAgent` logic as `optimize` — picks the vendor with the higher success rate from recent logs; falls back to claude on a tie or no data.
+
+**Sanitization:** applied before sending log entries to the AI agent and before posting. Patterns stripped: `owner/repo` (→ `[repo]`), PR titles, file paths, GitHub usernames, branch names, GitHub URLs. Secrets never appear in logs (enforced at write time by `logger.ts`).
+
+**`--dry-run` use case:** teams who want to review the draft before reporting, or who want to template-match issues for a triage queue without posting immediately.
+
+**`--yes` use case:** automated pipelines (e.g., a cron that calls `crosscheck issue --yes` nightly and files anything new). Still shows the draft in stdout so CI logs are auditable.
+
+**Relationship to `diagnose`:**
+
+`diagnose` is a reporting tool — it reads logs and surfaces patterns for the operator. `issue` is an action tool — it takes the same patterns and turns them into a GitHub ticket. Both share the same error-grouping logic via `src/lib/log-analysis.ts`.
+
+**File layout additions:**
+
+```
+src/
+  commands/
+    issue.ts           ← crosscheck issue command
+  lib/
+    log-analysis.ts    ← shared error-grouping logic (extracted from diagnose.ts)
+#### `crosscheck impact` — value dashboard
+
+**Problem:** crosscheck runs in the background and reviews PRs silently. After a few weeks, users have no concrete sense of what it has saved them — so they can't justify the setup cost, can't calibrate the tool, and can't communicate its value to their team.
+
+**Value proposition of this feature:** Turn passive automation logs into a human-readable ROI summary. The answer to "is crosscheck worth it?" should be one command away.
+
+---
+
+**Time-saving calculation:**
+
+The core unit is *time saved per PR* = `assumed_human_review_min − actual_ai_review_min`.
+
+```
+assumed_human_review_min  → configurable, default 60
+actual_ai_review_min      → avg(review_complete.duration_ms) / 60000 from logs; fallback 2 min
+time_saved_per_pr         → assumed − actual  (≈ 58 min at defaults)
+total_hours_saved         → (time_saved_per_pr × prs_reviewed) / 60
+```
+
+**Basis for the 60-minute default:**
+- Google's Engineering Productivity research: median PR review latency 60–90 min for non-trivial changes when factoring in reviewer availability.
+- GitHub Octokit 2023: developers spend ~15–20% of time on code review; for a 40h week that's 6–8 hours, typically covering 4–6 PRs → 60–90 min per PR average.
+- Microsoft Research SPACE framework: "review overhead" tracked as 30–120 min depending on PR size; 60 min is the lower-bound safe default.
+
+The displayed assumption line keeps the model transparent. Users with smaller/larger PRs can calibrate.
+
+---
+
+**Issues-caught calculation:**
+
+```
+issues_caught    = NEEDS_WORK_count + BLOCK_count
+block_count      = BLOCK verdicts (surfaced separately — higher severity)
+issue_rate       = issues_caught / prs_reviewed
+```
+
+These are PRs that received actionable feedback. Without crosscheck, that feedback would not exist (cross-vendor review only happens because crosscheck ran).
+
+---
+
+**Defect cost model (opt-in via `--money`):**
+
+```
+estimated_value = (hours_saved × hourly_rate)
+                + (issues_caught × defect_cost_per_issue)
+
+defaults:
+  hourly_rate         = $150 USD (US mid-senior engineer)
+  defect_cost         = $150 USD (1 hr to fix, same rate)
+```
+
+**Basis for defect cost:**
+- NIST 2002 report: cost to fix a defect grows 4–10× from review to production. At $150/hr and a 1-hour median fix, a defect caught in review saves $150 (fix during PR) vs $600–$1,500 (fix post-merge). Using $150 is maximally conservative — it only counts the direct fix cost, not downstream cost.
+- IBM Systems Sciences Institute: software bugs found in production cost 6–15× more than during development. Same conservative logic applies.
+
+The `--money` flag is opt-in so the output doesn't over-claim in contexts where monetary framing is inappropriate (open-source, student projects, etc.).
+
+---
+
+**Second-order code quality signal:**
+
+The BLOCK rate trend (BLOCK verdicts / total PRs, by week) is a leading indicator of upstream quality improvement:
+
+- Declining BLOCK rate: teams are internalizing review feedback; fewer high-severity issues reach PR stage.
+- Stable BLOCK rate: issues persist — potential input for `crosscheck optimize` to tighten review instructions.
+- Rising BLOCK rate: either more complex PRs or a genuine quality regression.
+
+This is presented as a trend, not a judgment, with a note that it is a proxy metric.
+
+---
+
+**Sample output:**
+
+```
+crosscheck impact  (all time · 63 PRs)
+
+  Time saved
+  ─────────────────────────────────────────
+  PRs reviewed          63
+  Avg AI review time    1.8 min
+  Assumed human time    60 min  ⓘ
+  Time saved per PR     ~58 min
+  Total hours saved     ~61 h
+
+  Issues caught
+  ─────────────────────────────────────────
+  APPROVE               41  (65%)
+  NEEDS WORK            17  (27%)   ← actionable feedback
+  BLOCK                  5   (8%)   ← potential bugs/breaking changes caught before merge
+  Total issues caught   22
+
+  Code quality trend  (BLOCK rate, weekly)
+  ─────────────────────────────────────────
+  Apr W1  ██████  12%
+  Apr W2  ████    8%
+  Apr W3  ███     6%
+  Apr W4  ██      4%   ↓ improving
+
+  ⓘ assumes 60 min avg human review — set impact.assumed_human_review_minutes to adjust
+  Run `crosscheck impact --money` for a rough monetary estimate.
+```
+
+With `--money`:
+```
+  Estimated value
+  ─────────────────────────────────────────
+  Time savings          ~$9,150  (61h × $150/hr)
+  Issues prevented      ~$3,300  (22 × $150/issue)
+  Total estimate        ~$12,450
+
+  ⚠ rough estimate · adjust rates in crosscheck.config.yml · not accounting data
+```
+
+---
+
+#### Auto-init on `watch`/`serve`
+
+**Problem:** the current flow requires `crosscheck init` before `crosscheck watch`. This is undiscoverable — most users will try `watch` first, hit a missing-config or missing-secret error, and not know why. `init` as a prerequisite is friction that blocks the happy path.
+
+**Solution:** `watch` and `serve` call `ensureInit` at startup. If setup has already been done, it's a no-op. If not, it runs the missing steps inline and continues. `crosscheck init` stays as an explicit command for verification and re-runs, but it is no longer required.
+
+**Detection — sentinel file, one check per startup:**
+
+After a successful init, `ensureInit` writes `~/.crosscheck/.initialized` containing the current crosscheck version (e.g., `0.2.0`). On every subsequent `watch`/`serve` start, the sentinel is checked first. If it exists and the version matches, the global setup step (webhook secret) is skipped. However, the two repo-local files (`crosscheck.config.yml`, `.crosscheck/workflow.yml`) are always checked via cheap `existsSync` calls — if either is absent, it is created before proceeding. This means the cost is O(1) `existsSync` calls per startup after the first run, not a full re-init, but each repo gets its local files regardless of whether another repo was initialized first.
+
+The subprocess-heavy checks (gh, claude, codex auth) are never run by `ensureInit` — they remain in `crosscheck init` only.
+
+```
+First run:   check sentinel → absent → run all setup steps → write sentinel → continue
+Subsequent:  check sentinel → present + version matches → skip webhook secret → check repo-local files → create any missing → continue
+Upgrade:     check sentinel → version mismatch → re-run changed steps → update sentinel → continue
+New repo:    check sentinel → present + version matches → repo-local files absent → create them → continue
+```
+
+`crosscheck init` always runs the full check and rewrites the sentinel regardless — explicit verification is its job. Already-present files are never overwritten by auto-init.
+
+**Terminal output on first run:**
+
+```
+  ✦ first run — setting up crosscheck...
+  ✓ webhook secret generated → ~/.crosscheck/webhook-secret
+  ✓ config written → crosscheck.config.yml
+  ✓ workflow written → .crosscheck/workflow.yml
+
+crosscheck watch
+  repos   acme/api
+  ...
+```
+
+Silent on subsequent runs. Auth checks (missing gh, claude, codex CLIs) are not run here — run `crosscheck init` explicitly to see full auth status.
+
+**Implementation:**
+- New file: `src/lib/setup.ts` — `ensureInit(cwd, opts?)`: checks sentinel first; if present and version matches, skips the webhook-secret step but still runs `existsSync` on the two repo-local files and creates any that are missing; if sentinel is absent or version differs, runs all setup steps and writes `~/.crosscheck/.initialized`. Returns `{ created: string[] }`. Never spawns a subprocess.
+- Sentinel file: `~/.crosscheck/.initialized` — plain text, contains semver string (e.g., `0.2.0`). Version compared against `pkg.version` at runtime. On mismatch, only the steps that changed between versions are re-run.
+- `init.ts` refactored: extracts setup steps into `setup.ts`; becomes a thin wrapper that calls `ensureInit` with `{ force: true, verbose: true }` (bypasses sentinel) then prints the full status table.
+- `watch.ts` / `serve.ts`: `await ensureInit(process.cwd())` before `loadConfig`. `--no-init` flag skips the call entirely for CI/provisioned environments where setup is pre-baked.
+
+---
+
+#### smee.io tunnel backend for `crosscheck watch`
+
+**Problem:** `localhost.run` SSH tunnels silently go dead (HTTP 503) without the SSH process exiting. `watch` stays stuck waiting for an SSH exit event, so all webhook events are dropped until the user manually restarts. Root-cause observation: PR #27 received no review because the tunnel died between 03:40 and 03:49 UTC while `watch` was running.
+
+**Solution:** add `tunnel.backend: smee` as an opt-in alternative. The smee.io relay queues events while the local client is offline and replays them on reconnect — eliminating the missed-event class of failure entirely.
+
+**Design decisions:**
+
+| | localhost.run (default) | smee.io |
+|---|---|---|
+| Install | none (ssh built-in) | `npm install -g smee-client` |
+| URL stability | changes every restart | permanent channel URL |
+| Webhook registration | auto (org/repo hook API) | manual (one-time, point to smee URL) |
+| Missed events | lost permanently | queued + replayed |
+| Dead-tunnel detection | periodic health check (PR #29) | N/A — relay handles reconnect |
+
+**Why localhost.run stays the default now:**
+- Zero-install is the core UX promise; requiring `npm install -g smee-client` adds friction on first run.
+- Manual webhook registration is a steeper setup step.
+- The health-check fix (PR #29) closes the most common failure mode for localhost.run.
+
+**Path to making smee the default:**
+1. Ship smee backend (this PR) and gather feedback in production.
+2. If missed-event reports drop to zero and install friction proves manageable, flip default in a minor version bump.
+3. `crosscheck init` can auto-generate a smee channel (via the smee.io API) and write `tunnel.smee_channel` to config, making setup zero-manual-steps.
+
+**Config contract (shipped):**
+```yaml
+tunnel:
+  backend: smee          # localhost.run | smee
+  smee_channel: https://smee.io/your-channel-id
+```
+
+**Implementation:**
+- `schema.ts`: `TunnelConfigSchema` with `backend` and `smee_channel`; added to `ConfigSchema`
+- `watch.ts`: after banner print, branch on `config.tunnel.backend`; smee mode spawns `smee --url <channel> --path <path> --port <port>` and auto-restarts on exit; `currentTunnelProc` shared with cleanup handler
+- `init.ts`: checks if `smee` CLI is installed; shows one-line tip if missing
+- `crosscheck.config.example.yml`: commented tunnel section with full instructions
+
+---
+
 ### 🔭 Backlog
+
+- [ ] **smee.io as default tunnel** — once smee proves stable in production, flip `tunnel.backend` default from `localhost.run` to `smee`. Migration: `crosscheck init` auto-generates a smee channel and writes it to config. Old configs keep working (localhost.run continues to work). Track: has `smee-client` install friction reduced? Are missed-event reports gone?
 
 - [ ] **Retry logic** — if `codex review` or `claude` subprocess fails, retry once with exponential backoff
 - [ ] **`crosscheck logs`** — tail recent review activity from a local log file

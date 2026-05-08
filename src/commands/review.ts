@@ -10,7 +10,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { detectLanguages } from '../lib/languages.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -78,8 +78,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     let reviewText: string
     const reviewStart = Date.now()
-    const languages = detectLanguages(tmpDir)
-    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer, languages })
+    fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
     const reviewSpinner = ora(`Running ${reviewer} review...`).start()
     const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
@@ -111,8 +110,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, duration_ms: Date.now() - reviewStart })
-    await postReviewComment(octokit, owner, repo, number, reviewText, reviewer)
+    const { verdict, clean } = parseVerdict(reviewText)
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart })
+    console.log(`  ${formatVerdict(verdict)}`)
+    await postReviewComment(octokit, owner, repo, number, prependVerdictToComment(clean, verdict), reviewer)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

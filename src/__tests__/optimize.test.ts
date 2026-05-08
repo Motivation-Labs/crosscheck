@@ -8,7 +8,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     mode: 'cross-vendor',
     orgs: [],
     repos: [],
-    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [] },
+    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], allowed_authors: [] },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
@@ -17,6 +17,8 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
       codex: { enabled: codexEnabled, auth: 'subscription', effort: 'medium' },
     },
     logs: { enabled: false, retention_days: 7 },
+    tunnel: { backend: 'localhost.run', smee_channel: '' },
+    impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
   }
 }
 

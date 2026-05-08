@@ -55,6 +55,27 @@ async function runChecks(): Promise<CheckResult[]> {
   const tokenDetail = envToken ? 'set via env' : ghAuthed ? 'via gh auth login' : 'missing'
   results.push({ label: 'GITHUB_TOKEN', ok: tokenResolvable, detail: tokenDetail, fix: tokenResolvable ? undefined : 'Set GITHUB_TOKEN or run: gh auth login' })
 
+  // Check admin:org_hook scope — needed for org-level webhook registration in watch/serve
+  if (ghAuthed) {
+    try {
+      const statusOutput = execSync('gh auth status 2>&1', {
+        encoding: 'utf8',
+        env: { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },
+      })
+      const scopeMatch = statusOutput.match(/Token scopes:\s*(.+)/)
+      if (scopeMatch) {
+        const scopes = scopeMatch[1]
+        const hasOrgHook = /admin:org_hook|'admin:org'|"admin:org"/.test(scopes)
+        results.push({
+          label: 'org webhook scope',
+          ok: hasOrgHook,
+          detail: hasOrgHook ? 'admin:org_hook present' : `not granted (scopes: ${scopes.trim()})`,
+          fix: hasOrgHook ? undefined : 'gh auth refresh -s admin:org_hook  (required for org-level webhooks)',
+        })
+      }
+    } catch { /* gh not available or scope line absent — skip silently */ }
+  }
+
   // Check WEBHOOK_SECRET — auto-generated if missing, so always ok
   const fromEnv = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
   const secretDetail = fromEnv
@@ -73,6 +94,20 @@ function printCheck({ label, ok, detail, fix }: CheckResult) {
   if (!ok && fix) console.log(`      ${chalk.dim('→')} ${chalk.yellow(fix)}`)
 }
 
+function detectGitHubLogin(): string | null {
+  const envs = [
+    { ...process.env, GITHUB_TOKEN: undefined, GH_TOKEN: undefined },  // keyring first
+    process.env,                                                          // env token fallback
+  ]
+  for (const env of envs) {
+    try {
+      const login = execSync("gh api user --jq '.login' 2>/dev/null", { encoding: 'utf8', env }).trim()
+      if (login && !login.includes('\n')) return login
+    } catch { /* try next */ }
+  }
+  return null
+}
+
 export async function runInit(configPath?: string) {
   console.log(chalk.bold('\ncrosscheck — environment check\n'))
 
@@ -86,15 +121,35 @@ export async function runInit(configPath?: string) {
     console.log(chalk.green('\nAll checks passed.\n'))
   }
 
-  // Write example config if none exists
+  // Write config if none exists, pre-filling allowed_authors with the detected GitHub login
   const dest = configPath ?? join(process.cwd(), 'crosscheck.config.yml')
   if (!existsSync(dest)) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname
     if (existsSync(examplePath)) {
-      writeFileSync(dest, readFileSync(examplePath))
-      console.log(chalk.dim(`Config written to ${dest} — edit to customize.\n`))
+      let content = readFileSync(examplePath, 'utf8')
+      const login = detectGitHubLogin()
+      if (login) {
+        // Replace the commented-out allowed_authors placeholder with the detected login
+        content = content.replace(
+          /  # allowed_authors:\n  #   - \S+[^\n]*\n  #   - \S+[^\n]*/,
+          `  allowed_authors:\n    - ${login}  # auto-detected from gh auth login`,
+        )
+      }
+      writeFileSync(dest, content)
+      const hint = login ? `allowed_authors set to ${chalk.cyan(login)} (github)` : 'edit to customize'
+      console.log(chalk.dim(`Config written to ${dest} — ${hint}.\n`))
     }
   } else {
     console.log(chalk.dim(`Config already exists at ${dest}\n`))
+  }
+
+  // Smee-client is optional but improves watch mode reliability.
+  // Check if it's installed and show a one-line tip if not.
+  try {
+    execSync('smee --version', { stdio: 'ignore' })
+  } catch {
+    console.log(chalk.dim('Tip: install smee-client for reliable webhook delivery (events queued while offline):'))
+    console.log(chalk.dim('  npm install -g smee-client'))
+    console.log(chalk.dim('  Then set tunnel: backend: smee in your config.\n'))
   }
 }

@@ -38,12 +38,10 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
   },
 ]
 
-export function loadWorkflow(repoDir: string, cwd?: string): WorkflowStep[] {
-  const candidates = [
-    join(repoDir, '.crosscheck', 'workflow.yml'),
-    join(repoDir, 'crosscheck.workflow.yml'),
-    ...(cwd ? [join(cwd, '.crosscheck', 'workflow.yml')] : []),
-  ]
+export function loadWorkflow(operatorDir?: string): WorkflowStep[] {
+  // Only look in the operator's own directory — never inside the PR checkout.
+  // Loading workflow config from untrusted PR code would let a PR hijack the runner.
+  const candidates = operatorDir ? [join(operatorDir, '.crosscheck', 'workflow.yml')] : []
   for (const path of candidates) {
     if (!existsSync(path)) continue
     try {

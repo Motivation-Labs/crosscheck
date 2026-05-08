@@ -8,8 +8,8 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
-import { runWorkflow } from '../lib/runner.js'
 import { isAuthorAllowed } from '../lib/filter.js'
+import { runWorkflow } from '../lib/runner.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()

@@ -13,8 +13,8 @@ import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
-import { runWorkflow } from '../lib/runner.js'
 import { isAuthorAllowed } from '../lib/filter.js'
+import { runWorkflow } from '../lib/runner.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -26,6 +26,34 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
     if (m) return { owner: m[1], repo: m[2] }
   } catch { /* ignore */ }
   return null
+}
+
+// lhr.life tunnels can go dead (503) without the SSH process exiting.
+// Polls every 60s and kills the proc after 2 consecutive failures (~2 min detection).
+function waitForTunnelEnd(tunnelProc: ChildProcess, tunnelUrl: string): Promise<void> {
+  return new Promise<void>(resolve => {
+    let failCount = 0
+
+    const check = setInterval(async () => {
+      let alive = false
+      try {
+        const res = await fetch(tunnelUrl, { signal: AbortSignal.timeout(8000) })
+        alive = res.status !== 503
+      } catch { /* network error = dead */ }
+
+      if (!alive) {
+        if (++failCount >= 2) {
+          clearInterval(check)
+          tunnelProc.kill()
+        }
+      } else {
+        failCount = 0
+      }
+    }, 60_000)
+
+    tunnelProc.on('exit', () => { clearInterval(check); resolve() })
+    tunnelProc.on('error', () => { clearInterval(check); resolve() })
+  })
 }
 
 // Opens a localhost.run SSH tunnel. Resolves with the public base URL once
@@ -176,8 +204,9 @@ export async function runWatch(configPath?: string) {
         })
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err)
+        if (spinner.isSpinning) spinner.fail(message)
+        else log(`  ✗ ${message}`)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
-        log(`  ✗ ${message}`)
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
         inFlight.delete(key)
@@ -278,7 +307,8 @@ export async function runWatch(configPath?: string) {
   }
   console.log()
 
-  // Tunnel reconnect loop — runs until SIGINT/SIGTERM
+
+  // ── localhost.run mode ────────────────────────────────────────────────────
   let reconnectDelay = 5_000
   while (running) {
     log('Opening tunnel via localhost.run...')
@@ -345,14 +375,17 @@ export async function runWatch(configPath?: string) {
           log(`    ${chalk.dim('    Payload URL')}  ${chalk.cyan(webhookUrl)}`)
           log(`    ${chalk.dim('    Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
         }
+        const hooksUrl = 'org' in scope
+          ? `https://github.com/organizations/${scope.org}/settings/hooks`
+          : `https://github.com/${scope.owner}/${scope.repo}/settings/hooks`
+        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
+        log(chalk.dim(`    ${hooksUrl}`))
       }
     }
 
-    // Wait for this tunnel session to end
-    await new Promise<void>(resolve => {
-      tunnelProc.on('exit', resolve)
-      tunnelProc.on('error', resolve)
-    })
+    // Wait for this tunnel session to end.
+    // Health check kills the SSH proc if lhr.life goes dead without exiting.
+    await waitForTunnelEnd(tunnelProc, tunnelUrl)
 
     if (!running) break
 

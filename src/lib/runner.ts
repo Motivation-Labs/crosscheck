@@ -53,7 +53,7 @@ function resolveReviewer(
 
 export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log } = ctx
-  const steps = loadWorkflow(tmpDir)
+  const steps = loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
   const spinner = ora({ indent: 2 })
 
@@ -162,6 +162,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       if (appliedCount === 0) {
         spinner.succeed('nothing to address')
         results[step.name] = { applied_count: 0 }
+        continue
+      }
+
+      // Fork PRs: origin in the clone is the base repo, not the fork.
+      // Pushing to origin:head.ref would create/update a branch in the base repo instead.
+      const isFork = pr.head.repoFullName !== null && pr.head.repoFullName !== pr.base.repoFullName
+      if (isFork) {
+        log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
+        results[step.name] = { skipped: true }
         continue
       }
 

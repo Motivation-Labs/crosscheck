@@ -18,6 +18,7 @@ import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from 
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
+import { isAuthorAllowed } from '../lib/filter.js'
 import { detectLanguages } from '../lib/languages.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -124,9 +125,7 @@ export async function runWatch(configPath?: string) {
 
       const author = pr.user.login
 
-      // Author filter — skip if allowed_authors is set and this author is not in it
-      const allowedAuthors = config.routing.allowed_authors
-      if (allowedAuthors.length > 0 && !allowedAuthors.includes(author)) {
+      if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
         return
       }

@@ -117,11 +117,15 @@ export async function postReviewComment(
   body: string,
   reviewer: string,
 ): Promise<void> {
-  const header = `### Code Review by ${reviewer === 'claude' ? '🤖 Claude Code' : '⚡ Codex'}\n\n`
+  const isClaude = reviewer === 'claude'
+  const header = `### Code Review by ${isClaude ? '🤖 Claude Code' : '⚡ Codex'}\n\n`
+  const footer = isClaude
+    ? '\n\n---\n_Reviewed with [Claude Code](https://claude.ai/code)_'
+    : '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
   await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: header + body,
+    body: header + body + footer,
   })
 }

@@ -2,7 +2,7 @@ import type { Config } from '../config/schema.js'
 
 export type PROrigin = 'claude' | 'codex' | 'human'
 
-export function detectPROrigin(prBody: string, config: Config): PROrigin {
+export function detectPROrigin(prBody: string, config: Config, author?: string): PROrigin {
   const body = prBody ?? ''
 
   for (const pattern of config.routing.codex_reviews_patterns) {
@@ -11,6 +11,11 @@ export function detectPROrigin(prBody: string, config: Config): PROrigin {
 
   for (const pattern of config.routing.claude_reviews_patterns) {
     if (new RegExp(pattern, 'i').test(body)) return 'codex'
+  }
+
+  // Author-based fallback: use explicit route when body patterns don't match
+  if (author && config.routing.author_routes[author]) {
+    return config.routing.author_routes[author]
   }
 
   return 'human'

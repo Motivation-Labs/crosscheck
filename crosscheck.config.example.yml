@@ -62,11 +62,18 @@ repos:
 # ─── Routing ─────────────────────────────────────────────────────────────────
 routing:
   # Restrict reviews to PRs opened by these GitHub logins.
-  # Recommended: set to the accounts your AI agents use.
+  # Auto-filled with your login by `crosscheck init` or first `crosscheck watch`.
   # Empty list = no author restriction (applies body-pattern check only).
   # allowed_authors:
   #   - beingzy          # your personal account (Claude Code runs as you)
   #   - my-org-bot       # a dedicated bot account
+
+  # Author-based routing fallback — maps GitHub login → vendor origin.
+  # Used when no body pattern matches. Lets you skip the attribution footer requirement.
+  #   beingzy: claude    → PRs from beingzy treated as Claude-authored → Codex reviews them
+  #   my-bot: codex      → PRs from my-bot treated as Codex-authored → Claude reviews them
+  # author_routes:
+  #   beingzy: claude
 
   # Body-pattern matching — determines which reviewer is assigned
   codex_reviews_patterns:

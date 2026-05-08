@@ -620,11 +620,10 @@ routing:
     - "Co-Authored-By: codex"
 
   # 将审查限制为这些 GitHub 账号提交的 PR。
-  # 推荐：设置为你的 AI Agent 使用的账号。
+  # 由 `crosscheck init` 或首次运行 `crosscheck watch` 时自动从 gh auth 检测并填入。
   # 为空 = 不限制（所有匹配的 PR 都会被审查）。
   allowed_authors:
-    - your-claude-bot-account
-    - your-codex-bot-account
+    - your-github-login  # 从 gh auth 自动检测
 
 # ── 隧道（仅 watch 模式）──────────────────────────────────────────────────
 # localhost.run（默认）—— SSH 隧道，零安装，URL 重连后会变化。

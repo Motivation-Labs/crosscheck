@@ -177,7 +177,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       // Commit and push back to the PR branch
       execSync('git add -A', { cwd: tmpDir })
       execSync(
-        `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review"`,
+        `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
         { cwd: tmpDir },
       )
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()

@@ -27,7 +27,6 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     log(`PR #${prNumber} already in review — skipping duplicate event`)
     return
   }
-  inFlight.add(key)
 
   const author = pr.user.login
   const allowedAuthors = config.routing.allowed_authors
@@ -35,6 +34,8 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
     return
   }
+
+  inFlight.add(key)
 
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 

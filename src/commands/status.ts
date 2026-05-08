@@ -1,7 +1,7 @@
 import { execSync } from 'child_process'
 import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
-import { loadConfig } from '../config/loader.js'
+import { loadConfig, getGithubTokenSource } from '../config/loader.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
@@ -22,18 +22,11 @@ export async function runStatus(configPath?: string) {
   row('codex', codexAuth.detail || 'authenticated', codexAuth.ok)
   row('claude', claudeAuth.detail || 'authenticated', claudeAuth.ok)
 
-  // Mirror getGithubToken() priority: gh CLI keyring first, env var as fallback
-  let ghTokenDetail = 'missing'
-  let ghTokenOk = false
-  try {
-    const ghCliOut = execSync('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim()
-    if (ghCliOut) { ghTokenDetail = 'set (gh auth login)'; ghTokenOk = true }
-  } catch { /* gh unavailable */ }
-  if (!ghTokenOk) {
-    const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-    if (envToken) { ghTokenDetail = 'set (env)'; ghTokenOk = true }
-  }
-  row('GITHUB_TOKEN', ghTokenDetail, ghTokenOk)
+  const tokenResult = getGithubTokenSource()
+  const ghTokenDetail = tokenResult
+    ? `set (${tokenResult.source === 'gh-keyring' ? 'gh auth login' : 'env'})`
+    : 'missing'
+  row('GITHUB_TOKEN', ghTokenDetail, tokenResult !== null)
 
   const webhookSecret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
   row('WEBHOOK_SECRET', webhookSecret ? 'set' : 'missing (needed for serve/watch)', !!webhookSecret)

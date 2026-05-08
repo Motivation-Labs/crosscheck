@@ -19,6 +19,7 @@
     "build": "tsc && chmod +x dist/cli.js",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "lint": "eslint src --ext .ts",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
@@ -35,7 +36,8 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "tsx": "^4.16.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^3.2.4"
   },
   "keywords": [
     "code-review",

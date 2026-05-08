@@ -18,6 +18,7 @@ import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.j
 import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
+import { detectLanguages } from '../lib/languages.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -155,7 +156,8 @@ export async function runWatch(configPath?: string) {
         }
         spinner.succeed('cloned')
 
-        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
+        const languages = detectLanguages(tmpDir)
+        fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, languages })
         let elapsed = 0
         const elapsedTimer = setInterval(() => { elapsed++; spinner.text = `${reviewer} reviewing... (${elapsed}s)` }, 1000)
         spinner.start(`${reviewer} reviewing...`)
@@ -322,13 +324,20 @@ export async function runWatch(configPath?: string) {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         const isCreds = /bad credentials|\[401\]/i.test(msg)
+        // 403 always means insufficient scope.
+        // 404 on an org webhook means the token lacks admin:org_hook scope (GitHub
+        // hides the endpoint rather than returning 403). For repo webhooks, 404
+        // means the repo itself is not found — show the raw error instead.
         const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+          || ('org' in scope && /\[404\]/i.test(msg))
         log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
         if (isCreds) {
           log(chalk.dim(`    token invalid or expired — run: gh auth refresh`))
           log(chalk.dim(`    or regenerate a PAT at github.com/settings/tokens`))
         } else if (isScope) {
           log(chalk.dim(`    token needs admin:org_hook scope and org Owner role`))
+          log(chalk.dim(`    run: gh auth refresh -s admin:org_hook`))
+          log(chalk.dim(`    or create a PAT at github.com/settings/tokens with admin:org scope`))
         } else {
           log(chalk.dim(`    ${msg}`))
         }

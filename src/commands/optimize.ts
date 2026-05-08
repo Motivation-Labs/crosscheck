@@ -1,6 +1,7 @@
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
+import { tmpdir } from 'os'
 import chalk from 'chalk'
 import { execa } from 'execa'
 import { loadConfig } from '../config/loader.js'
@@ -102,15 +103,23 @@ async function runWithClaude(prompt: string): Promise<string> {
 }
 
 async function runWithCodex(prompt: string): Promise<string> {
-  // codex supports non-interactive mode via -q (quiet) flag
+  // codex is an agent runner — write the prompt as a file so it can read it,
+  // avoiding shell argument length limits on large prompts.
+  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-optimize-'))
   try {
-    const result = await execa('codex', ['-q', prompt], {
-      timeout: 120_000,
+    writeFileSync(join(tmpDir, 'OPTIMIZE_PROMPT.md'), prompt)
+    const result = await execa('codex', [
+      '-q',
+      'Read OPTIMIZE_PROMPT.md carefully and produce the new instructions.md content. ' +
+      'Output only the file content — no explanation, no markdown fences.',
+    ], {
+      cwd: tmpDir,
+      timeout: 180_000,
       env: { ...process.env },
     })
     return (result.stdout ?? '').trim()
-  } catch {
-    throw new Error('codex does not support non-interactive mode for optimize — use --agent claude or enable claude in config')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 

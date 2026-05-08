@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Force a specific version bump (overrides conventional-commit detection)'
+        required: false
+        default: ''
+        type: choice
+        options: ['', patch, minor, major]
+
+# Skip the release cycle when the push is itself the version-bump commit.
+# That commit is authored by github-actions[bot] and starts with "chore: release".
+jobs:
+  release:
+    name: Version, publish, and release
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore: release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push version-bump commit + tag
+      id-token: write   # npm provenance (optional but good practice)
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # full history so tag-action can read all commits
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # Determine the next semantic version from conventional commits since the
+      # last tag. dry_run=true means it computes the result without creating the
+      # tag — we do that ourselves after bumping package.json.
+      - name: Compute next version
+        id: semver
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dry_run: true
+          default_bump: ${{ inputs.bump || 'patch' }}
+          # Map conventional commit prefixes to bump types
+          major_string_token: 'BREAKING CHANGE'
+          minor_string_token: 'feat'
+          patch_string_token: 'fix,perf,refactor'
+
+      - name: Bump package.json and push tag
+        if: steps.semver.outputs.new_tag != ''
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          npm version "${{ steps.semver.outputs.new_version }}" --no-git-tag-version
+          git add package.json package-lock.json
+          git commit -m "chore: release ${{ steps.semver.outputs.new_tag }}"
+          git tag "${{ steps.semver.outputs.new_tag }}"
+          git push origin main --follow-tags
+
+      - name: Publish to npm @latest
+        if: steps.semver.outputs.new_tag != ''
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.semver.outputs.new_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.semver.outputs.new_tag }}
+          name: ${{ steps.semver.outputs.new_tag }}
+          body: ${{ steps.semver.outputs.changelog }}
+          generate_release_notes: true   # appends GitHub's auto-notes below the changelog
+
+      - name: Notify release published
+        if: steps.semver.outputs.new_tag != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[crosscheck] ${{ steps.semver.outputs.new_tag }} published to npm"
+          to: ${{ secrets.MAIL_USERNAME }}
+          from: crosscheck-ci <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            crosscheck ${{ steps.semver.outputs.new_tag }} has been published to npm as @latest.
+
+            Install: npm install -g @motivation-labs/crosscheck@${{ steps.semver.outputs.new_tag }}
+
+            GitHub Release: https://github.com/${{ github.repository }}/releases/tag/${{ steps.semver.outputs.new_tag }}
+
+            Changes:
+            ${{ steps.semver.outputs.changelog }}
+
+      - name: No release needed
+        if: steps.semver.outputs.new_tag == ''
+        run: echo "No version-worthy commits since last tag — skipping publish."

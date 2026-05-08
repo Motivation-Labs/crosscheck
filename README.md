@@ -10,7 +10,7 @@
 
 **A lightweight orchestration layer that makes your AI coding agents review each other's work — then fix it.**
 
-When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. If issues are found, the author agent commits fixes and pushes them back. All of this runs on your laptop, against your existing subscriptions, with a single command.
+When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. If issues are found on a Claude-authored PR, Claude commits fixes and pushes them back. All of this runs on your laptop, against your existing subscriptions, with a single command.
 
 ```
 GitHub PR  →  crosscheck watch  →  AI review posted  →  fixes committed

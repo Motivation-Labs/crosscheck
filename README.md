@@ -6,7 +6,7 @@
   <img src="./assets/logo.png" alt="crosscheck" width="160" />
 </p>
 
-<p align="center"><em>I am building crosscheck with crosscheck.</em></p>
+<p align="center"><em>Building crosscheck with crosscheck.</em></p>
 
 # crosscheck
 

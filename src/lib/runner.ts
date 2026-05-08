@@ -167,7 +167,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
 
       // Fork PRs: origin in the clone is the base repo, not the fork.
       // Pushing to origin:head.ref would create/update a branch in the base repo instead.
-      const isFork = pr.head.repoFullName !== null && pr.head.repoFullName !== pr.base.repoFullName
+      const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) {
         log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
         results[step.name] = { skipped: true }

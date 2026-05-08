@@ -10,7 +10,7 @@ import {
   deleteRepoWebhook,
 } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
+import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
@@ -25,6 +25,34 @@ function detectCurrentRepo(): { owner: string; repo: string } | null {
     if (m) return { owner: m[1], repo: m[2] }
   } catch { /* ignore */ }
   return null
+}
+
+// lhr.life tunnels can go dead (503) without the SSH process exiting.
+// Polls every 60s and kills the proc after 2 consecutive failures (~2 min detection).
+function waitForTunnelEnd(tunnelProc: ChildProcess, tunnelUrl: string): Promise<void> {
+  return new Promise<void>(resolve => {
+    let failCount = 0
+
+    const check = setInterval(async () => {
+      let alive = false
+      try {
+        const res = await fetch(tunnelUrl, { signal: AbortSignal.timeout(8000) })
+        alive = res.status !== 503
+      } catch { /* network error = dead */ }
+
+      if (!alive) {
+        if (++failCount >= 2) {
+          clearInterval(check)
+          tunnelProc.kill()
+        }
+      } else {
+        failCount = 0
+      }
+    }, 60_000)
+
+    tunnelProc.on('exit', () => { clearInterval(check); resolve() })
+    tunnelProc.on('error', () => { clearInterval(check); resolve() })
+  })
 }
 
 // Opens a localhost.run SSH tunnel. Resolves with the public base URL once
@@ -269,6 +297,8 @@ export async function runWatch(configPath?: string) {
   }
   console.log(`  mode      ${chalk.cyan(config.mode)}`)
   console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  const cfgPath = resolveConfigPath(configPath)
+  console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
   if (config.routing.allowed_authors.length === 0) {
     console.log()
     console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
@@ -342,11 +372,9 @@ export async function runWatch(configPath?: string) {
       }
     }
 
-    // Wait for this tunnel session to end
-    await new Promise<void>(resolve => {
-      tunnelProc.on('exit', resolve)
-      tunnelProc.on('error', resolve)
-    })
+    // Wait for this tunnel session to end.
+    // Health check kills the SSH proc if lhr.life goes dead without exiting.
+    await waitForTunnelEnd(tunnelProc, tunnelUrl)
 
     if (!running) break
 

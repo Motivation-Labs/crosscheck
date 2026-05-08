@@ -9,6 +9,7 @@ import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.j
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
+import { isAuthorAllowed } from '../lib/filter.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -36,8 +37,8 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   inFlight.add(key)
 
   const author = pr.user.login
-  const allowedAuthors = config.routing.allowed_authors
-  if (allowedAuthors.length > 0 && !allowedAuthors.includes(author)) {
+
+  if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
     inFlight.delete(key)
     return

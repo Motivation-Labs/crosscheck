@@ -65,6 +65,34 @@ export const ImpactConfigSchema = z.object({
   defect_cost_usd: z.number().min(0).default(150),
 })
 
+export const PostReviewDeliverySchema = z.object({
+  // pull_request → opens a fix PR targeting the original branch (human approves before merge)
+  // commit       → pushes fixes directly onto the original PR branch
+  // comment      → posts suggested changes as review comments only (no code push)
+  mode: z.enum(['pull_request', 'commit', 'comment']).default('pull_request'),
+  pr_title: z.string().default('fix: address CR issues in #{original_pr_title}'),
+  label: z.string().default('cr-autofix'),
+})
+
+export const PostReviewFixSchema = z.object({
+  enabled: z.boolean().default(false),
+  // on_issues → only run when the reviewer found actionable issues
+  // always    → always run after every review
+  // never     → disable (same as enabled: false)
+  trigger: z.enum(['on_issues', 'always', 'never']).default('on_issues'),
+  // minimum severity level that qualifies as "actionable"
+  min_severity: z.enum(['error', 'warning', 'info']).default('warning'),
+  // same-as-author → the vendor that wrote the PR also fixes it (recommended)
+  // same-as-reviewer → the reviewing vendor also proposes fixes
+  // codex / claude  → always use a specific vendor
+  fixer: z.enum(['same-as-author', 'same-as-reviewer', 'codex', 'claude']).default('same-as-author'),
+  delivery: PostReviewDeliverySchema.default({}),
+})
+
+export const PostReviewConfigSchema = z.object({
+  auto_fix: PostReviewFixSchema.default({}),
+})
+
 export const ConfigSchema = z.object({
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
@@ -80,6 +108,7 @@ export const ConfigSchema = z.object({
   tunnel: TunnelConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
+  post_review: PostReviewConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -88,3 +117,5 @@ export type QualityConfig = z.infer<typeof QualityConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
 export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>
+export type PostReviewConfig = z.infer<typeof PostReviewConfigSchema>
+export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>

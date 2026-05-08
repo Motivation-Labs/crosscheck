@@ -74,13 +74,15 @@ crosscheck watch
 │         ├── clone PR branch                                     │
 │         ├── run reviewer    (cross-vendor assignment)           │
 │         ├── post review comment                                 │
-│         └── address step    (fix issues, push [crosscheck] commit) │
+│         └── post-review auto-fix                               │
+│              ├── authoring vendor reads review comment          │
+│              └── opens fix PR targeting original branch         │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 **Routing** reads PR body patterns. `Generated with [Claude Code]` → Codex reviews. `Generated with [OpenAI Codex]` → Claude reviews. `allowed_authors` restricts reviews to your agent accounts.
 
-**The address step** (optional, enabled via workflow config) runs after the review. The author agent reads its own review comment and commits fixes back to the PR branch. Commits are prefixed `[crosscheck]`. Hard cap: 5 address commits per PR.
+**Post-review auto-fix** runs after the review when issues are found. The vendor that authored the PR (`fixer: same-as-author`) reads its own review comment and opens a new fix PR targeting the original branch. You review and merge the fix PR — the original PR then updates automatically. Controlled by `post_review.auto_fix` in your config.
 
 **The feedback loop** closes via `crosscheck diagnose` → `crosscheck optimize`. Failure patterns and quality signals from `~/.crosscheck/logs/` feed back into improved reviewer instructions — no manual config editing required.
 
@@ -98,6 +100,7 @@ crosscheck watch
   repos     your-org/your-repo
   mode      cross-vendor
   quality   balanced
+  auto-fix  on_issues · same-as-author · pull_request
   config    ./crosscheck.config.yml  ← edit to change above
 
   ✓ tunnel ready: https://abc123.lhr.life
@@ -110,12 +113,14 @@ PR #47 opened: add retry logic for flaky network calls
   review complete (12s)
   posted → github.com/your-org/your-repo/pull/47
   NEEDS WORK
+  auto-fix  claude addressing issues...
+  fix PR #48 opened → github.com/your-org/your-repo/pull/48
 
-PR #48 opened: implement caching layer
+PR #49 opened: implement caching layer
   origin=codex  reviewer=claude
   claude reviewing... (18s)
   review complete (18s)
-  posted → github.com/your-org/your-repo/pull/48
+  posted → github.com/your-org/your-repo/pull/49
   APPROVE
 ```
 
@@ -165,6 +170,16 @@ budget:
 # smee         — stable channel URL, queues events while offline
 tunnel:
   backend: localhost.run
+
+# Post-review auto-fix — opens a fix PR when issues are found
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues            # on_issues | always | never
+    min_severity: warning         # error | warning | info
+    fixer: same-as-author         # the vendor that wrote the PR also fixes it
+    delivery:
+      mode: pull_request          # pull_request | commit | comment
 ```
 
 Full configuration reference: [get-started.md](./get-started.md)

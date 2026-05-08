@@ -107,6 +107,34 @@ server:
   webhook_path: /webhook
   # pid_file: ~/.crosscheck/crosscheck.pid  # for daemon management
 
+# ─── Post-Review Auto-Fix ────────────────────────────────────────────────────
+# After a CR completes, optionally dispatch the authoring agent to fix the issues.
+#
+# Complete loop:
+#   agent opens PR  →  opposite vendor reviews  →  authoring vendor fixes
+#                                                          ↓
+#                              fix PR opened targeting original branch
+#                                                          ↓
+#                              human reviews fix PR → merges → original PR updated
+#
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues          # on_issues | always | never
+    min_severity: warning       # error | warning | info — skip cosmetic findings
+
+    # same-as-author: the vendor that wrote the PR also applies the fix (recommended)
+    # In cross-vendor mode: Claude wrote it → Claude fixes it, Codex wrote it → Codex fixes it
+    fixer: same-as-author       # same-as-author | same-as-reviewer | codex | claude
+
+    delivery:
+      mode: pull_request        # pull_request | commit | comment
+      # pull_request → fix PR targets the original branch; human approves before merge
+      # commit       → fixes pushed directly onto the original PR branch
+      # comment      → suggested fixes posted as review comments only
+      pr_title: "fix: address CR issues in #{original_pr_title}"
+      label: cr-autofix         # GitHub label applied to the fix PR
+
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson
 # Each line is a JSON object: { ts, level, event, ...context }

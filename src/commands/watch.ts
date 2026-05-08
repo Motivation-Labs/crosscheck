@@ -164,8 +164,6 @@ export async function runWatch(configPath?: string) {
         return
       }
 
-      inFlight.add(key)
-
       log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
       const origin = detectPROrigin(pr.body ?? '', config)
       const reviewer = assignReviewer(origin, config)

@@ -205,8 +205,9 @@ export async function runWatch(configPath?: string) {
         })
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err)
+        if (spinner.isSpinning) spinner.fail(message)
+        else log(`  ✗ ${message}`)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
-        log(`  ✗ ${message}`)
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
         inFlight.delete(key)
@@ -242,7 +243,9 @@ export async function runWatch(configPath?: string) {
     for (const org of config.orgs) scopes.push({ org })
   } else if (config.repos.length > 0) {
     for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
-  } else {
+  } else if (config.tunnel.backend !== 'smee') {
+    // localhost.run needs a target repo to auto-register webhooks.
+    // smee users register the webhook manually — no target required here.
     const detected = detectCurrentRepo()
     if (!detected) {
       console.error(chalk.red('No repos or orgs configured. Run inside a git repo or set repos/orgs in config.'))
@@ -307,7 +310,60 @@ export async function runWatch(configPath?: string) {
   }
   console.log()
 
-  // Tunnel reconnect loop — runs until SIGINT/SIGTERM
+  // ── Smee mode ─────────────────────────────────────────────────────────────
+  // No tunnel management or webhook auto-registration needed.
+  // The user points their GitHub webhook to the smee channel URL once.
+  if (config.tunnel.backend === 'smee') {
+    const channelUrl = config.tunnel.smee_channel
+    if (!channelUrl) {
+      console.error(chalk.red('✗ tunnel.smee_channel is required when tunnel.backend: smee'))
+      console.error(chalk.dim('  Visit https://smee.io/new to get a free channel URL.'))
+      server.close(() => process.exit(1))
+      return
+    }
+    console.log(`  tunnel    ${chalk.cyan(channelUrl)}  ${chalk.dim('(smee.io — events queued while offline)')}`)
+    console.log(chalk.dim(`  Register this as GitHub webhook Payload URL, then:`))
+    console.log(chalk.dim(`    webhook secret: cat ~/.crosscheck/webhook-secret`))
+    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    fileLog({ level: 'info', event: 'tunnel_opened', url: channelUrl, backend: 'smee' })
+
+    let smeeRetryDelay = 5_000
+    while (running) {
+      const smeeProc = spawn('smee', [
+        '--url', channelUrl,
+        '--path', config.server.webhook_path,
+        '--port', String(config.server.port),
+      ], { stdio: 'inherit' })
+      currentTunnelProc = smeeProc
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          smeeProc.on('error', (err: NodeJS.ErrnoException) => {
+            if (err.code === 'ENOENT') {
+              reject(new Error('smee-client not installed — run: npm install -g smee-client'))
+            } else {
+              reject(err)
+            }
+          })
+          smeeProc.on('exit', () => resolve())
+        })
+      } catch (err) {
+        console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+        server.close(() => process.exit(1))
+        return
+      }
+
+      if (!running) break
+      currentTunnelProc = null
+      log(chalk.yellow(`  smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
+      fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true, backend: 'smee' })
+      await new Promise(r => setTimeout(r, smeeRetryDelay))
+      smeeRetryDelay = Math.min(smeeRetryDelay * 2, 60_000)
+    }
+    return
+  }
+
+  // ── localhost.run mode ────────────────────────────────────────────────────
   let reconnectDelay = 5_000
   while (running) {
     log('Opening tunnel via localhost.run...')
@@ -367,8 +423,11 @@ export async function runWatch(configPath?: string) {
         } else {
           log(chalk.dim(`    ${msg}`))
         }
+        const hooksUrl = 'org' in scope
+          ? `https://github.com/organizations/${scope.org}/settings/hooks`
+          : `https://github.com/${scope.owner}/${scope.repo}/settings/hooks`
         log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
-        log(chalk.dim(`    https://github.com/organizations/${label}/settings/hooks`))
+        log(chalk.dim(`    ${hooksUrl}`))
       }
     }
 

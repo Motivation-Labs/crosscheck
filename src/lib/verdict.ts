@@ -2,8 +2,9 @@ import chalk from 'chalk'
 
 export type Verdict = 'APPROVE' | 'NEEDS WORK' | 'BLOCK'
 
-// Primary: strict line match; handles NEEDS_WORK spelling and markdown bold wrappers
-const PRIMARY_RE = /^(?:\*{1,2})?VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)(?:\*{1,2})?\s*$/im
+// Primary: strict line match; handles NEEDS_WORK spelling and markdown bold wrappers.
+// Closing ** after the colon covers **VERDICT:** BLOCK (bold label, plain value).
+const PRIMARY_RE = /^(?:\*{1,2})?VERDICT:(?:\*{1,2})?\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)(?:\*{1,2})?\s*$/im
 // Fallback: VERDICT: token anywhere in the text (e.g. inline prose, blockquote)
 const FALLBACK_RE = /VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)/gi
 

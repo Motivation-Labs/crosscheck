@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  model: z.string().optional(),
+  model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
   effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
 })

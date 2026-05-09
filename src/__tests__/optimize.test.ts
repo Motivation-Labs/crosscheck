@@ -14,8 +14,8 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
-      claude: { enabled: claudeEnabled, auth: 'subscription', effort: 'medium' },
-      codex: { enabled: codexEnabled, auth: 'subscription', effort: 'medium', quality: 'medium' },
+      claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium' },
+      codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium' },
     },
     logs: { enabled: false, retention_days: 7 },
     tunnel: { backend: 'localhost.run', smee_channel: '' },

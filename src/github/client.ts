@@ -349,6 +349,13 @@ export async function fetchActiveRepos(login: string, token: string): Promise<Re
   return results
 }
 
+export interface BrandOptions {
+  service_name?: string
+  comment_header?: string
+  comment_footer?: string
+  reviewer_attribution?: string
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,
@@ -356,16 +363,27 @@ export async function postReviewComment(
   pullNumber: number,
   body: string,
   reviewer: string,
+  brand: BrandOptions = {},
 ): Promise<void> {
   const isClaude = reviewer === 'claude'
-  const header = `### Code Review by ${isClaude ? '🤖 Claude Code' : '⚡ Codex'}\n\n`
-  const footer = isClaude
-    ? '\n\n---\n_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
+  const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
+  const headerLabel = hasCustomName ? `${vendorLabel} — ${brand.service_name}` : vendorLabel
+  const header = `### Code Review by ${headerLabel}\n\n`
+
+  const defaultAttribution = isClaude
+    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
+    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+  const attribution = brand.reviewer_attribution || defaultAttribution
+  const footer = `\n\n---\n${attribution}`
+
+  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
+  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
+
   await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: header + body + footer,
+    body: customHeader + header + body + footer + customFooter,
   })
 }

@@ -78,7 +78,7 @@ export async function promptRepoPicker(repos: RepoActivity[], defaults?: string[
 
         if (t === '') {
           rl.close()
-          resolve(visible.filter(r => selected.has(r.fullName)).map(r => r.fullName))
+          resolve([...selected])
           return
         }
 

@@ -197,7 +197,9 @@ export async function runOnboard(opts: OnboardOpts): Promise<void> {
     const existingScope = existing
       ? (existing.users.length > 0 && existing.orgs.length > 0 ? 3
         : existing.users.length > 0 ? 1
-        : existing.orgs.length > 0 ? 2 : 3)
+        : existing.orgs.length > 0 ? 2
+        : existing.repos.length > 0 ? 1  // curated repos-only = personal scope
+        : 3)
       : 3
 
     const scopeIdx = await pickOne(`What should crosscheck monitor?${orgSuffix}`, [
@@ -243,9 +245,22 @@ export async function runOnboard(opts: OnboardOpts): Promise<void> {
       `  ${chalk.bold('[2] Everyone')} in the monitored scope`,
     ], currentFilterDefault)
 
-    if (filterIdx === 1 && login) {
-      allowedAuthors = [login]
-      authorRoutes = { [login]: 'claude' }
+    if (filterIdx === 1) {
+      if (login) {
+        allowedAuthors = [login]
+        authorRoutes = { [login]: 'claude' }
+      } else {
+        // Login undetectable — writing an empty allowed_authors would disable filtering entirely.
+        // Prompt so the user can provide their handle manually.
+        const manual = await ask('  GitHub login (needed for author filter, Enter to skip): ')
+        if (manual) {
+          allowedAuthors = [manual]
+          authorRoutes = { [manual]: 'claude' }
+        } else {
+          console.log(chalk.yellow('  ⚠ allowed_authors left empty — all authors in scope will be reviewed.'))
+          console.log(chalk.dim('    Add routing.allowed_authors to your config to restrict later.\n'))
+        }
+      }
     }
 
   // ── Team path ─────────────────────────────────────────────────────────────

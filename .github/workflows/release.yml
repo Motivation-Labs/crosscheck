@@ -121,6 +121,20 @@ jobs:
             git push origin staging
           fi
 
+      # GITHUB_TOKEN pushes do not trigger downstream workflows, so the staging
+      # push above never fires publish.yml on its own. Dispatch it explicitly.
+      - name: Trigger @beta publish on staging
+        if: steps.semver.outputs.new_tag != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'publish.yml',
+              ref: 'staging',
+            })
+
       - name: No release needed
         if: steps.semver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."

@@ -7,8 +7,8 @@ export const VendorConfigSchema = z.object({
   effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
 })
 
-// Codex-specific vendor config: extends VendorConfigSchema with the
-// codex review `--quality` flag (low=fast/shallow, high=slow/thorough).
+// Codex-specific vendor config. The `quality` field is retained for
+// backwards compat but is no longer passed as --quality (removed from codex CLI).
 export const CodexVendorConfigSchema = VendorConfigSchema.extend({
   quality: z.enum(['low', 'medium', 'high']).default('medium'),
 })

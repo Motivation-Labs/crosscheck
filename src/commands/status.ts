@@ -38,7 +38,6 @@ export async function runStatus(configPath?: string) {
   row('mode', config.mode)
   row('quality tier', config.quality.tier)
   row('codex auth', config.vendors.codex.auth)
-  row('codex quality', config.vendors.codex.quality)
   row('codex model', config.vendors.codex.model ?? 'auto (by tier)')
   row('claude model', config.vendors.claude.model ?? 'default')
   row('per-review budget', config.vendors.codex.auth === 'subscription'

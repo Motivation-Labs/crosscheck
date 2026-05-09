@@ -62,13 +62,12 @@ export async function runCodexReview(
 
   try {
     const modelArgs = model ? ['-c', `model="${model}"`] : []
-    const qualityArgs = ['--quality', vendor.quality]
-    onLog?.(`  running: codex review --base ${baseBranch} --quality ${vendor.quality}${model ? ` -c model="${model}"` : ''}`)
+    onLog?.(`  running: codex review --base ${baseBranch}${model ? ` -c model="${model}"` : ''}`)
 
     const timeoutMs = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
     const result = await execa(
       'codex',
-      ['review', '--base', baseBranch, '--title', prTitle, ...qualityArgs, ...modelArgs],
+      ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
       {
         cwd: repoDir,
         timeout: timeoutMs,

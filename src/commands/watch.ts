@@ -423,30 +423,27 @@ export async function runWatch(opts: WatchOpts = {}) {
   console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
   console.log(chalk.bold('crosscheck watch\n'))
   if (effectiveDeployment) {
-    const label = sessionOnly
+    const deployLabel = sessionOnly
       ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
       : chalk.cyan(effectiveDeployment)
-    console.log(`  deployment  ${label}`)
+    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
+  } else {
+    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
   }
   if (config.orgs.length > 0) {
     console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)
   }
   if (config.users.length > 0) {
-    console.log(`  users       ${chalk.cyan(config.users.join(', '))}`)
-    for (const r of userRepoResults) {
-      if ('error' in r) {
-        console.log(`              ${chalk.yellow(`⚠ ${r.user}: could not list repos — ${r.error}`)}`)
-      } else {
-        console.log(`              ${chalk.dim(`${r.user}: ${r.count} repo(s) registered`)}`)
-      }
-    }
+    const userParts = userRepoResults.map(r => {
+      if ('error' in r) return chalk.yellow(`${r.user} (⚠ list failed)`)
+      return `${chalk.cyan(r.user)} ${chalk.dim(`(${r.count} repos)`)}`
+    })
+    console.log(`  users       ${userParts.join(', ')}`)
   }
   if (config.orgs.length === 0 && config.users.length === 0) {
     const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
     console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
   }
-  console.log(`  mode        ${chalk.cyan(config.mode)}`)
-  console.log(`  quality     ${chalk.cyan(config.quality.tier)}`)
   const cfgPath = resolveConfigPath(configPath)
   console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
   if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {

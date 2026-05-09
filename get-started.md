@@ -15,13 +15,16 @@
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
   - [init](#crosscheck-init)
+  - [onboard](#crosscheck-onboard)
   - [review](#crosscheck-review-pr-url)
+  - [run](#crosscheck-run-pr-url)
   - [watch](#crosscheck-watch)
   - [serve](#crosscheck-serve-beta)
   - [status](#crosscheck-status)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
+  - [issue](#crosscheck-issue)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
 - [Post-review auto-fix](#post-review-auto-fix)
@@ -361,6 +364,30 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ---
 
+### `crosscheck onboard`
+
+Guided first-time setup. Walks you through selecting a deployment mode (personal or team), detects your GitHub login and org memberships, lets you pick which repos to monitor, and writes the result to `crosscheck.config.yml`. Run this instead of manually editing the config.
+
+```bash
+crosscheck onboard
+crosscheck onboard --yes          # accept defaults without prompts
+crosscheck onboard --personal     # force personal mode for this session
+crosscheck onboard --team         # force team mode for this session
+crosscheck onboard --reconfigure  # re-run setup even if config already exists
+```
+
+`onboard` is the recommended starting point for new installs. `crosscheck init` remains a pure environment check (CLIs, auth, secrets) — `onboard` is the repo-selection and deployment-mode wizard that follows it.
+
+| Flag | Description |
+|---|---|
+| `-c, --config <path>` | Write the config to a specific path |
+| `-y, --yes` | Accept defaults without interactive prompts |
+| `--personal` | Use personal deployment mode for this session only |
+| `--team` | Use team deployment mode for this session only |
+| `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+---
+
 ### `crosscheck review <pr-url>`
 
 Manually triggers a review for a single PR.
@@ -374,6 +401,28 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 | Flag | Description |
 |---|---|
 | `-r, --reviewer codex\|claude` | Skip auto-detection and force a specific reviewer |
+| `-c, --config <path>` | Use a specific config file |
+
+---
+
+### `crosscheck run <pr-url>`
+
+Executes the full configured workflow against a single PR: review → auto-fix → recheck. Where `crosscheck review` stops after posting a comment, `crosscheck run` closes the loop — if issues are found, the authoring agent opens a fix PR and crosscheck re-reviews it.
+
+```bash
+crosscheck run https://github.com/owner/repo/pull/123
+crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
+crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
+crosscheck run https://github.com/owner/repo/pull/123 --dry-run
+```
+
+The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
+
+| Flag | Description |
+|---|---|
+| `-r, --reviewer codex\|claude` | Force a specific reviewer; skip auto-detection |
+| `--steps <list>` | Run only the listed step types, comma-separated: `review`, `fix`, `recheck` |
+| `--dry-run` | Run the review but do not post a comment or apply fixes |
 | `-c, --config <path>` | Use a specific config file |
 
 ---
@@ -594,6 +643,57 @@ crosscheck impact  (all time · 47 reviews)
 
 The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
 
+---
+
+### `crosscheck issue`
+
+Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `Motivation-Labs/crosscheck` after you confirm. No manual log-digging or issue writing required.
+
+```bash
+crosscheck issue               # interactive — review draft before submitting
+crosscheck issue --dry-run     # print draft only, never submit
+crosscheck issue --yes         # submit immediately after displaying draft
+crosscheck issue --since 2026-05-01
+```
+
+```
+crosscheck issue
+
+  Scanning logs (last 3 days)...
+  Found error pattern: command_not_found: tsc  ×4  (codex)
+
+  Can you reproduce this consistently?
+    [1] Every time  [2] Sometimes  [3] Happened once
+  Choice [1]: 1
+
+  Which command triggered this?
+    [1] watch  [2] serve  [3] review  [4] Unknown
+  Choice [1]: 1
+
+  Is this blocking you?
+    [1] Blocked  [2] Degraded  [3] Cosmetic
+  Choice [2]: 2
+
+  Draft issue:
+  ────────────────────────────────────────────────────────
+  TITLE: codex: command not found: tsc during review in temp clone
+
+  ## Description
+  When crosscheck runs a Codex review, the reviewer tries to execute `tsc`
+  ...
+
+  Submit to Motivation-Labs/crosscheck? [y/N]: y
+  ✓ https://github.com/Motivation-Labs/crosscheck/issues/99
+```
+
+If no errors are found in recent logs, crosscheck prints `No errors found in recent logs — nothing to report` and exits cleanly.
+
+| Flag | Description |
+|---|---|
+| `--since <YYYY-MM-DD>` | Limit log scan to this date onward (default: last 3 days) |
+| `--dry-run` | Print the draft without submitting |
+| `-y, --yes` | Submit immediately after displaying the draft (skip confirmation) |
+| `-c, --config <path>` | Config file path |
 
 ---
 

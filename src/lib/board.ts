@@ -297,7 +297,10 @@ export class PRBoard {
   private writeLive(content: string): void {
     this.eraseLive()
     process.stdout.write(content + '\n')
-    this.liveLines = content.split('\n').length
+    const w = process.stdout.columns || 80
+    this.liveLines = content.split('\n').reduce((sum, line) => {
+      return sum + Math.max(1, Math.ceil(stripAnsi(line).length / w))
+    }, 0)
   }
 
   // ── Private: theme helpers ─────────────────────────────────────────────────

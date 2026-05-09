@@ -143,16 +143,16 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 
 ---
 
-## Step 1 — Check your environment
+## Step 1 — Set up crosscheck
 
 ```bash
-crosscheck init
+crosscheck onboard
 ```
 
-This scans your machine, reports the status of every dependency, writes a starter `crosscheck.config.yml`, and auto-fills `routing.allowed_authors` with your GitHub login.
+`crosscheck onboard` is the recommended first step. It checks your CLIs, detects your GitHub login and org memberships, walks you through picking which repos to monitor, and writes a ready-to-use config file — all in one guided flow.
 
 ```
-crosscheck — environment check
+crosscheck onboard
 
   ✓ codex CLI            codex-cli 0.128.0 — authenticated
   ✓ claude CLI           2.1.x (Claude Code)
@@ -160,18 +160,27 @@ crosscheck — environment check
   ✓ GITHUB_TOKEN         set (gh auth login)
   ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
 
-  ✓ allowed_authors set to beingzy (github)
+  How are you using crosscheck?
+    [1] personal  — monitor all your repos and orgs; review only PRs you author
+    [2] team      — monitor org repos only; review all PRs from any author
+  Choice [1]:
+
+  Detected orgs: motivation-labs, codatta
+  Select repos to monitor (or press Enter to monitor all):
+  ...
+
+  ✓ config written to ~/.crosscheck/config.yml
 ```
 
-`allowed_authors` is detected from `gh auth login` — crosscheck will only review PRs you open, which is the right default when you're the one running the AI agents. If you run `crosscheck watch` before running `init`, the same detection runs automatically on first launch.
+Fix any CLI failures before continuing. Once onboard completes, you have a working config and can go straight to `crosscheck watch`.
 
-Fix any failures before continuing.
+> **`crosscheck init` vs `crosscheck onboard`** — `init` is a lightweight environment check only (no repo selection, no deployment mode prompt). Use it for a quick health check or in CI. `onboard` is the full first-time setup.
 
 ---
 
 ## Step 2 — Test with a single PR
 
-The fastest way to verify everything is working end-to-end:
+Verify end-to-end before running continuously:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex

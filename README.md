@@ -56,17 +56,14 @@ npm install -g @anthropic-ai/claude-code && claude        # Claude Pro/Max subsc
 npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus/Pro subscription
 brew install gh && gh auth login                          # GitHub CLI
 
-# 2. Check your environment
-crosscheck init
+# 2. Set up — checks auth, picks repos, writes config
+crosscheck onboard
 
-# 3. Test against a single PR
-crosscheck review https://github.com/your-org/repo/pull/42
-
-# 4. Run continuously
+# 3. Run continuously
 crosscheck watch
 ```
 
-`crosscheck watch` opens a `localhost.run` SSH tunnel (no install, no account), auto-registers a GitHub webhook, and starts listening. GitHub delivers PR events; crosscheck routes them to the right reviewer.
+`crosscheck onboard` verifies your CLIs, detects your GitHub login and org memberships, lets you pick which repos to monitor, and writes a ready-to-use `crosscheck.config.yml`. Then `crosscheck watch` opens a `localhost.run` SSH tunnel, auto-registers the webhook, and starts listening.
 
 ---
 

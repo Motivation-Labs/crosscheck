@@ -24,11 +24,11 @@ import {
   detectGitHubLogin,
 } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
+import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
-import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { PRBoard } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -185,6 +185,104 @@ export async function runWatch(opts: WatchOpts = {}) {
   // SHAs pushed by the address step — skip synchronize events from our own commits
   const crosscheckShas = new Set<string>()
 
+  async function reviewPR(params: {
+    owner: string; repoName: string; prNumber: number; title: string;
+    body: string | null; author: string; headSha: string; headRef: string;
+    headRepo: string | null; baseRef: string; action: string;
+  }): Promise<void> {
+    const { owner, repoName, prNumber } = params
+    const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
+    if (inFlight.has(key)) return
+    inFlight.add(key)
+
+    // Outer try/finally ensures the inFlight key is always released, even if
+    // detectOriginFull / assignReviewer throw before the inner try block starts.
+    try {
+      if (!isAuthorAllowed(config.routing.allowed_authors, params.author)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
+        return
+      }
+
+      const { origin, method: originMethod } = await detectOriginFull(
+        params.body ?? '', params.headRef,
+        owner, repoName, prNumber,
+        config, token, params.author,
+      )
+      const reviewer = await assignReviewer(origin, config)
+
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author })
+
+      if (!reviewer) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
+        return
+      }
+
+      const ts = chalk.dim(new Date().toLocaleTimeString())
+      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+      bLog(
+        `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
+        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
+      )
+
+      const pr: PREvent['pull_request'] = {
+        title: params.title,
+        body: params.body ?? '',
+        head: { ref: params.headRef, sha: params.headSha, repo: params.headRepo ? { full_name: params.headRepo } : null },
+        base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
+        html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+        user: { login: params.author },
+      }
+
+      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef)
+      const reviewStart = Date.now()
+      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+
+      try {
+        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
+        execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Fetch the base branch after checking out the PR branch so we are never
+        // on the base branch during the fetch (git refuses to update a checked-out ref).
+        // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
+        // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
+        // shallow clones when the branch is absent from the default refspec mapping.
+        try {
+          execSync(`git fetch origin ${params.baseRef}:refs/remotes/origin/${params.baseRef}`, { cwd: tmpDir, stdio: 'pipe' })
+        } catch {
+          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef })
+        }
+
+        const prLoc = computePRLoc(tmpDir, params.baseRef)
+        board.updatePR(key, { prLoc })
+
+        const { verdict } = await runWorkflow({
+          owner, repoName, prNumber, pr,
+          tmpDir, token, config, origin,
+          reviewStart,
+          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+          onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
+          crosscheckShas,
+        })
+
+        void verdict
+        board.completePR(key, {
+          elapsedMs: Date.now() - reviewStart,
+          url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+        })
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        board.failPR(key, message)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true })
+      }
+    } catch (err: unknown) {
+      logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'setup' }, err)
+    } finally {
+      inFlight.delete(key)
+    }
+  }
+
   // Start local webhook server
   const server = createWebhookServer(
     config,
@@ -207,84 +305,12 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      inFlight.add(key)
-
-      const author = pr.user.login
-
-      if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
-        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
-        inFlight.delete(key)
-        return
-      }
-
-      const { origin, method: originMethod } = await detectOriginFull(
-        pr.body ?? '', pr.head.ref,
+      await reviewPR({
         owner, repoName, prNumber,
-        config, token, pr.user.login,
-      )
-      const reviewer = await assignReviewer(origin, config)
-
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
-
-      if (!reviewer) {
-        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
-        inFlight.delete(key)
-        return
-      }
-
-      const ts = chalk.dim(new Date().toLocaleTimeString())
-      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
-      bLog(
-        `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
-        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
-      )
-
-      board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
-      const reviewStart = Date.now()
-      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
-
-      try {
-        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
-        execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-        execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-        // Fetch the base branch after checking out the PR branch so we are never
-        // on the base branch during the fetch (git refuses to update a checked-out ref).
-        // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
-        // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
-        // shallow clones when the branch is absent from the default refspec mapping.
-        try {
-          execSync(`git fetch origin ${pr.base.ref}:refs/remotes/origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
-        } catch {
-          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
-        }
-
-        // Measure PR size (excluding noise files) and push to the board slot
-        const prLoc = computePRLoc(tmpDir, pr.base.ref)
-        board.updatePR(key, { prLoc })
-
-        const { verdict } = await runWorkflow({
-          owner, repoName, prNumber, pr,
-          tmpDir, token, config, origin,
-          reviewStart,
-          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
-          onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
-          crosscheckShas,
-        })
-
-        void verdict  // verdict already flowed into the board slot via onPhaseChange
-        board.completePR(key, {
-          elapsedMs: Date.now() - reviewStart,
-          url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
-        })
-
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err)
-        board.failPR(key, message)
-        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
-      } finally {
-        rmSync(tmpDir, { force: true, recursive: true })
-        inFlight.delete(key)
-      }
+        title: pr.title, body: pr.body, author: pr.user.login,
+        headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref, action: event.action,
+      })
     },
     (msg: string) => bLog(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
     fileLog,
@@ -461,6 +487,26 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
+
+  // ── Backtrace scan ────────────────────────────────────────────────────────
+  if (config.backtrace.enabled) {
+    void (async () => {
+      try {
+        cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)
+        const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(scopes, config, token)
+        cLog(`${chalk.dim('✦')} backtrace: ${queued.length} unreviewed, ${alreadyReviewed} already reviewed, ${skippedAuthor} skipped (author filter)`)
+        void Promise.all(queued.map(pr => reviewPR({
+          owner: pr.owner, repoName: pr.repo, prNumber: pr.number,
+          title: pr.title, body: pr.body, author: pr.author,
+          headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
+          baseRef: pr.baseRef, action: 'backtrace',
+        })))
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        cLog(`${chalk.yellow('⚠')} backtrace: scan failed — ${msg}`)
+      }
+    })()
+  }
 
   // ── Smee mode ─────────────────────────────────────────────────────────────
   // Smee channel URL is stable — webhooks are registered once and survive restarts.

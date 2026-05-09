@@ -193,3 +193,9 @@ logs:
 #     cr_needs_work: yellow  # CR bar + verdict label when NEEDS WORK
 #     cr_block: red          # CR bar + verdict label when BLOCK
 #     fix_fill: cyan         # filled segments on the FIX bar
+
+# ─── Backtrace ───────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that have
+# never received a [crosscheck] comment.
+# backtrace:
+#   enabled: true   # set to false to disable the startup scan entirely

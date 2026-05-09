@@ -103,6 +103,24 @@ jobs:
             Changes:
             ${{ steps.semver.outputs.changelog }}
 
+      # After publishing @latest, sync the bumped package.json back to staging so
+      # the next @beta build produces a pre-release of the *next* version rather than
+      # re-stamping a pre-release of the version that's already stable.
+      # Requires: staging branch protection must allow pushes from github-actions[bot],
+      # or replace GITHUB_TOKEN with a PAT that has the bypass permission.
+      - name: Sync release version to staging
+        if: steps.semver.outputs.new_tag != ''
+        run: |
+          git fetch origin staging
+          git checkout staging
+          git checkout main -- package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "staging already at ${{ steps.semver.outputs.new_tag }} — nothing to sync"
+          else
+            git commit -m "chore: sync ${{ steps.semver.outputs.new_tag }} version to staging"
+            git push origin staging
+          fi
+
       - name: No release needed
         if: steps.semver.outputs.new_tag == ''
         run: echo "No version-worthy commits since last tag — skipping publish."

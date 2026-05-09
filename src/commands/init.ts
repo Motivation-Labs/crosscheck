@@ -7,14 +7,14 @@ import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getWebhookSecret, getWebhookSecretPath, detectGitHubLogin, patchAllowedAuthors, patchAuthorRoutes, loadConfig, resolveConfigPath } from '../config/loader.js'
 
-interface CheckResult {
+export interface CheckResult {
   label: string
   ok: boolean
   detail: string
   fix?: string
 }
 
-async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount: number }> {
+export async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount: number }> {
   const results: CheckResult[] = []
   let aiCliCount = 0
 
@@ -186,4 +186,6 @@ export async function runInit(configPath?: string) {
     console.log(chalk.dim('  npm install -g smee-client'))
     console.log(chalk.dim('  Then set tunnel: backend: smee in your config.\n'))
   }
+
+  console.log(chalk.dim('  Run  crosscheck onboard  to configure scope and persona.\n'))
 }

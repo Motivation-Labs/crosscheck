@@ -2,8 +2,9 @@
 import { Command } from 'commander'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { runInit } from './commands/init.js'
+import { runOnboard } from './commands/onboard.js'
 import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
 import { runReview } from './commands/review.js'
@@ -16,10 +17,13 @@ import { runIssue } from './commands/issue.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
 
+const invokedAs = basename(process.argv[1] ?? 'crosscheck').replace(/\.js$/, '')
+const programName = invokedAs === 'ck' ? 'ck' : 'crosscheck'
+
 const program = new Command()
 
 program
-  .name('crosscheck')
+  .name(programName)
   .description('Cross-vendor AI code review — Claude Code ↔ Codex')
   .version(`❤️  ${version}`)
 
@@ -28,6 +32,15 @@ program
   .description('Check environment, verify CLI auth, write starter config')
   .option('-c, --config <path>', 'path to write config file')
   .action((opts: { config?: string }) => runInit(opts.config))
+
+program
+  .command('onboard')
+  .description('Interactive setup — configure deployment persona, scope, and routing')
+  .option('-c, --config <path>', 'config file path')
+  .option('--personal', 'skip questionnaire and write personal-mode config')
+  .option('--team', 'skip questionnaire and write team-mode config')
+  .option('--reconfigure', 're-run setup even if config already exists')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
   .command('serve')

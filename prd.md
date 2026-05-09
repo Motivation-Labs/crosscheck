@@ -2,7 +2,11 @@
 
 ## What This Is
 
-crosscheck is a cross-vendor AI code review orchestrator. When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. It runs locally using your existing AI subscriptions — no separate API billing required.
+crosscheck is an AI code review orchestrator. It monitors your GitHub repos and ensures every open PR that hasn't been reviewed yet gets a review from the right AI agent — automatically.
+
+In **cross-vendor mode** (default): each PR is reviewed by the vendor that *didn't* write it (Claude reviews Codex PRs; Codex reviews Claude PRs). In **single-vendor mode**: every PR in scope gets reviewed by the one configured vendor. Either way, crosscheck handles detection, attribution, assignment, and posting — no manual coordination required.
+
+It runs locally using your existing AI subscriptions — no separate API billing required.
 
 Published as `@motivation-labs/crosscheck` on npm.
 
@@ -10,12 +14,14 @@ Published as `@motivation-labs/crosscheck` on npm.
 
 ## Goals
 
+- **Universal coverage** — every open PR in the monitored scope that lacks a crosscheck review is a candidate, regardless of whether the authoring agent can be identified
 - **Use existing subscriptions** — run `claude` and `codex` CLIs locally, no per-token billing
 - **Zero infrastructure** — one command on any machine with both CLIs installed
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
 - **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
 - **Org-level coverage** — one webhook covers all repos in an org
 - **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
+- **Self-annotating** — each crosscheck action embeds machine-readable attribution metadata that makes future attribution more accurate, without relying on external conventions
 
 ## Non-Goals
 
@@ -23,6 +29,62 @@ Published as `@motivation-labs/crosscheck` on npm.
 - Not a merge gate — posts comments, does not block PRs
 - Not a hosted service — runs on your machine
 - Not a one-size-fits-all reviewer — instructions should adapt to your stack and team conventions
+
+---
+
+## Design Principles
+
+These principles are authoritative. They override default assumptions when building new features or resolving ambiguous design decisions.
+
+### P1 — Detection is attribution-agnostic
+
+Whether to queue a PR for review is determined entirely by scope and review status — not by whether the authoring agent can be identified.
+
+A PR is a review candidate if and only if:
+1. Its author is in scope (`allowed_authors` if set, or any author in the monitored org/user/repo otherwise), AND
+2. It has no existing crosscheck review comment.
+
+`allowed_authors` is a **scope gate** (which authors crosscheck watches), not an attribution filter (who *wrote* the code). A PR from `beingzy` is in scope if `beingzy` is in `allowed_authors`, regardless of whether `beingzy` used Claude, Codex, or wrote the code by hand.
+
+**Consequence**: attribution failure never silently drops a review. A PR that reaches the assignment step with unknown attribution is handled by the fallback policy, not silently skipped.
+
+### P2 — Attribution determines assignment, not eligibility
+
+Once a PR is queued (passes P1), attribution determines *which reviewer* is assigned. It does not re-gate whether a review happens.
+
+**Attribution detection chain** — evaluated in order, stops at first match:
+1. PR body — scan for configured `codex_reviews_patterns` / `claude_reviews_patterns`
+2. Commit messages — same patterns applied to each commit message in the PR
+3. Branch name prefix — `claude_branch_prefixes` / `codex_branch_prefixes`
+4. PR comments — scan for crosscheck annotation tags (see P3); skipped if steps 1–3 resolved
+5. `author_routes` — explicit `login → vendor` map in config
+6. Fallback — apply `routing.fallback_reviewer` (default: `skip`)
+
+**Assignment logic** given detected origin and config:
+
+| Mode | Origin | Reviewer |
+|---|---|---|
+| cross-vendor | claude | codex (if enabled) |
+| cross-vendor | codex | claude (if enabled) |
+| cross-vendor | human / unknown | `routing.fallback_reviewer` (skip \| claude \| codex) |
+| single-vendor | any | the one enabled vendor |
+
+In single-vendor mode, attribution is still detected and logged (for analytics) — it just has no effect on assignment.
+
+### P3 — Crosscheck annotates what it touches
+
+Every action crosscheck takes embeds a machine-readable annotation so future runs can read attribution state without guessing.
+
+**Annotation format** (these are stable — changing them is a breaking change):
+
+| Action | Annotation location | Format |
+|---|---|---|
+| Review comment posted | End of comment body | `<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE -->` |
+| Address commit pushed | Commit message trailer | `Crosscheck-Reviewer: codex` |
+
+Detection step 4 (PR comments) scans for `<!-- crosscheck: origin=... -->` tags to recover attribution from a prior crosscheck review, even when the PR body and commit messages contain no patterns.
+
+**Why this matters**: the first time crosscheck reviews a PR, attribution may be inferred from patterns. On follow-up events (new commits, recheck), the annotation provides a durable, precise attribution record — no re-inference needed.
 
 ---
 
@@ -73,7 +135,43 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ## Build Queue
 
+### 🚨 P0 — Structural correctness (fix before next routing/detection work)
+
+These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
+
+- [ ] **Consolidate skip decision: delete `shouldReview()`, rely solely on `assignReviewer`** — `shouldReview` (detector.ts:82) and `assignReviewer` both independently gate on `origin === 'human'` in cross-vendor mode. Adding `fallback_reviewer` to only one of them creates a silent divergence. Full spec below.
+  - **Acceptance Criteria:**
+    - `shouldReview` is deleted from `detector.ts` and from all exports.
+    - Call sites in `serve.ts`, `watch.ts`, and `review.ts` that check `shouldReview(...)` are replaced with `assignReviewer(...) !== null`.
+    - Behavior for all existing origin values is unchanged.
+    - No type error or lint warning from the removed export.
+  - **Technical Notes:** call sites pass `origin` and `config` to `shouldReview`; the equivalent is `assignReviewer(origin, config) !== null`. Both code paths already have `reviewer` from `assignReviewer` in scope — no new variable needed.
+  - **Tests Required:** `shouldReview` not exported; serve/watch/review behavior unchanged for `origin: 'claude'`, `'codex'`, `'human'`.
+
+- [ ] **`routing.fallback_reviewer` config field (P2 assignment)** — full spec in Next Up.
+
+- [ ] **Comment-based attribution detection (P2 step 4)** — full spec in Next Up.
+
+- [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
+
+---
+
 ### 🔜 Next Up
+
+- [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
+  - **User:** Any developer who wants faster CLI invocations.
+  - **Acceptance Criteria:**
+    - `ck <command>` works identically to `crosscheck <command>` for all subcommands.
+    - `ck --help` shows `Usage: ck [options] [command]` (not `crosscheck`).
+    - `crosscheck --help` continues to show `Usage: crosscheck [options] [command]`.
+    - Both aliases are published to npm and installed as symlinks on `npm i -g`.
+  - **Technical Notes:** Add `"ck": "dist/ck.js"` to `package.json` `bin` field. `src/ck.ts` sets `argv[1]='ck'` via dynamic import so the name is correct on all platforms including Windows shims.
+  - **Tests Required:** invocation-name detection unit test; no CLI contract change (patch bump).
+
+- [x] **Fix `watch` event log timestamp misalignment** — zero-pad single-digit hours so all timestamps are the same width (`01:08:08 PM` not `1:08:08 PM`). `fmtTime()` helper added to `board.ts`; all `toLocaleTimeString()` calls replaced.
+- [x] **Fix `watch` status bar embedded in scrolling log** — confirmed already anchored via `writeLive()`; no structural change needed.
+- [x] **Fix `watch` event log — show failure state in counters** — `errorsOccurred` stat counter added; shown in red in the status bar when > 0, omitted when 0.
+- [x] **Fix `watch` event log — improve two-line event readability** — `board.log()` prepends a blank line for 2-line events so consecutive PR entries are visually separated in the scrollback.
 
 - [x] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
   - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.
@@ -304,6 +402,54 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - `board.ts`: add `private connLog: string[]` (max 2 entries); `logConnectivity(line): void` appends with timestamp, shifts oldest when full.
     - `render()`: add `Section 1.5` between `sep` and PR slots, always `CONN_LOG_MAX` lines.
     - `watch.ts`: add `cLog(line)` helper → `board.logConnectivity(line)` + `fileLog`; route tunnel open/close/fail and webhook registered/failed to `cLog`.
+
+- [ ] **Comment-based attribution detection (P2 step 4)** — extend `detectOriginFull` to scan PR review comments for crosscheck annotation tags (`<!-- crosscheck: origin=... -->`), positioned after body/commit/branch checks and before `author_routes`. This is the mechanism that enables P3 annotations to feed back into future detections.
+  - **User:** Anyone running crosscheck on repos where PRs are authored by agents that don't leave body footers (e.g., agents that only commit code, or agents whose PR template doesn't include attribution text).
+  - **Acceptance Criteria:**
+    - `detectOriginFull` gains a new step 4: if steps 1–3 return null, fetch PR comments via `GET /repos/{owner}/{repo}/issues/{number}/comments`; scan each body for `<!-- crosscheck: origin=(claude|codex) -->`. Return the first match found.
+    - Step 4 is only called when steps 1–3 are inconclusive — no extra API call on the fast path.
+    - Comment fetch failure is non-fatal; falls through to `author_routes` (same pattern as commit fetch).
+    - `detectOriginFull` logs `method: 'comment'` when attribution is resolved at this step.
+    - Works correctly with both `<!--` (HTML comment) and `<!-- crosscheck: ... -->` — the crosscheck annotation subset.
+  - **Technical Notes:**
+    - New function `src/github/client.ts`: `listPRComments(owner, repo, prNumber, token): Promise<string[]>` — returns comment bodies, paginated (100/page).
+    - `src/github/detector.ts`: new step between branch check and author_routes; wraps `listPRComments` + `matchPatterns` on the annotation tag `<!-- crosscheck: origin=(claude|codex)`.
+    - Annotation regex: `/<!--\s*crosscheck:\s*origin=(claude|codex)/i` — case-insensitive, whitespace-tolerant.
+    - `src/__tests__/detector.test.ts`: add test cases for comment-resolved attribution (mock `listPRComments`), step-4-skipped-when-body-matches, API failure falls through.
+  - **Tests Required:** Step 4 resolves 'claude' from annotation tag; step 4 resolves 'codex'; step 4 not called when body matches; step 4 API failure → falls through to author_routes; no annotation tag in comments → falls through; annotation tag with extra fields → still matches.
+
+- [ ] **`routing.fallback_reviewer` config field (P2 assignment)** — when attribution detection returns 'human' or unknown in cross-vendor mode, apply a configured policy instead of silently skipping. Default `skip` preserves backward-compatible behavior; setting to `claude` or `codex` ensures all unattributed in-scope PRs get reviewed.
+  - **User:** Anyone running crosscheck on repos where PR attribution is inconsistent — mixed human/AI authors, agents that don't leave footers, or early adopters who want to ensure 100% coverage regardless of attribution confidence.
+  - **Acceptance Criteria:**
+    - New field `routing.fallback_reviewer: 'claude' | 'codex' | 'skip'` in `RoutingConfigSchema`, default `'skip'`.
+    - `assignReviewer` uses `fallback_reviewer` when `origin === 'human'` in cross-vendor mode. Returns `null` when `skip`; returns the named vendor when `claude` or `codex`.
+    - Existing behavior (silently skip human-origin PRs) is preserved when `fallback_reviewer` is absent or `'skip'`.
+    - `serve.ts` / `watch.ts` log `origin_method: 'none', fallback: 'claude'` (or skip) when the fallback fires.
+    - `crosscheck.config.example.yml` documents the field with a comment explaining the coverage/noise tradeoff.
+    - `crosscheck status` shows the active fallback policy.
+  - **Technical Notes:**
+    - `src/config/schema.ts`: add `fallback_reviewer: z.enum(['claude', 'codex', 'skip']).default('skip')` to `RoutingConfigSchema`.
+    - `src/github/detector.ts`: `assignReviewer` already returns `null` for `origin === 'human'` in cross-vendor mode; update to `return config.routing.fallback_reviewer === 'skip' ? null : config.routing.fallback_reviewer`.
+    - `crosscheck.config.example.yml`: add commented `fallback_reviewer: skip` under `routing:`.
+  - **Tests Required:** `fallback_reviewer: 'skip'` → null on human origin; `fallback_reviewer: 'claude'` → 'claude' on human origin; `fallback_reviewer: 'codex'` → 'codex' on human origin; single-vendor mode ignores fallback_reviewer; cross-vendor with both vendors enabled + fallback → fallback vendor returned; named fallback vendor is disabled → still returned (reviewer availability check is separate).
+
+- [ ] **Crosscheck annotation system (P3)** — embed machine-readable attribution metadata in every review comment crosscheck posts, and in every commit crosscheck pushes. This creates a durable, self-consistent attribution record that Step 4 detection (comment-based) can read on future events.
+  - **User:** Long-running crosscheck installations where PRs accumulate history — reruns, rechecks, follow-up commits. Without annotations, each event re-infers attribution from scratch, which can diverge if PR body is edited or commits are amended.
+  - **Acceptance Criteria:**
+    - Every review comment posted by `postReviewComment` in `client.ts` appends `\n<!-- crosscheck: origin=<origin> reviewer=<reviewer> verdict=<verdict> -->` to the comment body (after the existing footer).
+    - Every `[crosscheck]` commit pushed in `address` step includes `Crosscheck-Reviewer: <reviewer>` as a Git trailer in the commit message.
+    - The annotation tag is invisible in GitHub's rendered Markdown (HTML comment).
+    - `parseAnnotation(commentBody: string): { origin: PROrigin; reviewer: string; verdict: string } | null` — pure function in `src/lib/annotation.ts`. Returns null if no tag found.
+    - `postReviewComment` accepts `origin` parameter (already known at call site in serve.ts/watch.ts) and embeds it.
+    - Round-trip: `parseAnnotation(postReviewComment output)` returns the correct origin/reviewer/verdict.
+    - Annotation format is tested as a stable schema — any format change is flagged in tests.
+  - **Technical Notes:**
+    - New file `src/lib/annotation.ts`: `buildAnnotation(origin, reviewer, verdict): string` → `<!-- crosscheck: origin=<o> reviewer=<r> verdict=<v> -->`; `parseAnnotation(body): Annotation | null` — regex parse.
+    - `src/github/client.ts`: `postReviewComment` gains `origin: PROrigin` parameter; appends `buildAnnotation(origin, reviewer, verdict)` after the existing footer.
+    - Call sites in `serve.ts` / `watch.ts` / `review.ts`: pass `origin` to `postReviewComment`.
+    - `src/lib/runner.ts` `address` step: append `\nCrosscheck-Reviewer: <reviewer>` to `[crosscheck]` commit message.
+    - `src/__tests__/annotation.test.ts`: round-trip tests; format stability tests (snapshot the exact tag string).
+  - **Tests Required:** `buildAnnotation('claude', 'codex', 'APPROVE')` produces expected tag; `parseAnnotation` returns correct fields; `parseAnnotation` on comment without tag returns null; `parseAnnotation` is whitespace-tolerant; annotation appended correctly to full comment body; round-trip: build then parse returns original values; format snapshot — tag string does not drift between test runs.
 
 - [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
   - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
@@ -673,6 +819,260 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Connectivity log: buffer all per-repo results and emit a single aggregated line.
     - `src/commands/status.ts`: show active webhook count.
   - **Tests Required:** `getExistingWebhook` returns hook ID when matching URL exists; returns null when no match; registration skipped when hook already exists; old hook deleted before new registration on reconnect; retry fires on 422 response with correct delays; aggregated log line shows correct count; status shows hook count.
+
+- [ ] **`crosscheck onboard` — Guided Persona Setup and Smart Scope Configuration** — an interactive wizard that runs all `init` environment checks and then guides the user through persona selection, repo/org scope picking, author filtering, workflow depth, and optional comment branding. Produces a complete, working `crosscheck.config.yml` without manual YAML editing. Supersedes the minimal first-run prompts in `watch`/`serve` as the recommended entry point for new users.
+
+  **The deployment scenarios this command covers:**
+
+  | ID | Name | Core need |
+  |---|---|---|
+  | UC-01 | Personal — curated repos | Personal + org accounts; building personal projects; wants to limit monitoring to a hand-picked set of active repos (backtracing feature requires tight scope) |
+  | UC-02 | Personal — cross-scope, author-filtered | Monitors both personal and org repos but only wants their own PRs reviewed |
+  | UC-03 | Team shared CR | Each member uses local Claude Code to author PRs; team shares a Codex account for review; configurable depth: CR-only vs CR + auto-fix |
+  | UC-04 | CRaaS / branded service | Any of the above, plus custom service name and comment annotations; available as an optional add-on at the end of any onboarding path |
+
+  **Command:** `crosscheck onboard [--reconfigure]`
+
+  ---
+
+  **Step 0 — Environment checks (same as `crosscheck init`, compact output):**
+
+  Re-use `runChecks()` from `init.ts`. Print a compact one-line-per-tool summary. Non-fatal failures (e.g., codex CLI not installed) show the fix hint and continue — `onboard` never aborts because a reviewer CLI is missing. Print `  ✓ environment ready — proceeding to setup` or `  ⚠ 1 issue to address — see above; continuing setup` before advancing to Step 1.
+
+  ---
+
+  **Step 1 — Persona selection:**
+
+  ```
+  How will you use crosscheck?
+
+    [1] personal  — I author PRs; review only my own work across my repos and orgs
+    [2] team      — shared CR workflow; review PRs from multiple authors in org repos
+
+  Choice [1]:
+  ```
+
+  ---
+
+  **Personal path (UC-01 and UC-02):**
+
+  Step 2 — Monitoring scope (auto-detect org memberships before showing):
+  ```
+  What should crosscheck monitor?  (detected: member of my-company, another-org)
+
+    [1] My personal repos only     — github.com/beingzy/* — side projects and tools you own directly
+    [2] My org repos only          — github.com/my-company/*, another-org/* — team repos you contribute to
+    [3] Both personal repos + orgs — everything across your GitHub account  ← recommended
+
+  Choice [3]:
+  ```
+
+  Step 3 — Repo picker (shown only when personal repos are in scope):
+
+  Fetch `GET /users/{login}/repos?type=owner&sort=pushed&per_page=100`. Partition into three tiers:
+  - **Tier 1 — New repos** (created within last 7 days): shown first in the primary list, tagged `new`, pre-selected. A newly-created repo signals active intent even before its first PR lands — missing it would frustrate the user immediately.
+  - **Tier 2 — Active repos** (≥ 1 PR in last 90 days): sorted by PR count descending.
+  - **Tier 3 — Inactive repos** (no PRs in 90 days, not new): deferred behind `[ ] Show more`.
+
+  Primary list shows all Tier-1 repos + top Tier-2 repos up to a combined cap of 8. A `[ ] Show more` row expands inline to all Tier-2 + Tier-3 repos. Repos with zero PRs in 180 days that are not new are omitted entirely and noted: "add manually to config.repos if needed."
+
+  ```
+  Which personal repos should crosscheck monitor?
+
+    [x] beingzy/new-side-project   (new · 0 PRs)
+    [x] beingzy/api-service        18 PRs (last 90 days)
+    [x] beingzy/cool-project       12 PRs
+    [ ] beingzy/dashboard           3 PRs
+    [ ] beingzy/old-tool            1 PR
+        ────────────────────────────────────────────────
+    [ ] Show more  (3 repos with no recent activity — or add to config.yml manually)
+
+  Space to toggle · Enter to confirm
+  ```
+
+  Step 4 — Author filter:
+  ```
+  Whose PRs should be reviewed?
+
+    [1] Only mine  (author = beingzy)    ← recommended for UC-02
+    [2] Everyone in the monitored scope
+
+  Choice [1]:
+  ```
+
+  Config written by personal path:
+  - UC-01 (curated personal repos): `deployment: personal`, `repos: [selected]`, `users: []`, `orgs: []`, `allowed_authors: [login]`
+  - UC-02 (both scopes, author-filtered): `deployment: personal`, `users: [login]`, `orgs: [detected]`, `allowed_authors: [login]`
+  - Personal + everyone: `deployment: personal`, `users: [login]`, `orgs: [detected]`, `allowed_authors: []`
+
+  ---
+
+  **Team path (UC-03):**
+
+  Step 2 — Org selection (auto-detect memberships via `GET /user/memberships/orgs?state=active`):
+  ```
+  Which orgs should crosscheck monitor?
+
+    [x] my-company           (member · 42 repos)
+    [ ] open-source-project  (member ·  7 repos)
+
+  Space to toggle · Enter to confirm
+  ```
+
+  Step 3 — Author filter:
+  ```
+  Whose PRs should be reviewed?
+
+    [1] All authors (no filter) — review every PR in the org
+    [2] Specific GitHub logins  — restrict to listed team members
+
+  Choice [1]:
+  ```
+  If [2]: `  Enter logins (comma-separated): john, jane, alice`
+
+  Step 4 — Review depth:
+  ```
+  How deep should the CR workflow go?
+
+    [1] CR only       — post review comments; humans apply fixes
+    [2] CR + Auto-fix — crosscheck also proposes and commits fixes
+
+  Choice [1]:
+  ```
+  If [2]:
+  ```
+  How should auto-fixes be delivered?
+
+    [1] Open a fix PR  (human reviews and merges before merge)   ← recommended
+    [2] Push directly onto the PR branch
+
+  Choice [1]:
+  ```
+
+  Config written by team path (CR + fix PR example):
+  `deployment: team`, `orgs: [selected]`, `users: []`, `allowed_authors: [logins or []]`, `post_review.auto_fix.enabled: true`, `post_review.auto_fix.delivery.mode: pull_request`
+
+  ---
+
+  **Optional — Custom comment branding (available for all personas, including UC-04 CRaaS):**
+
+  After the persona-specific questions complete, all paths ask one optional step:
+
+  ```
+  Add custom branding to review comments? (for teams, services, or personal flair) [y/N]:
+  ```
+
+  If yes:
+  ```
+  Name or label shown in every review comment:
+  > My Team
+
+  Comment header (prepended to every review, Enter to skip):
+  > [Enter]
+
+  Comment footer (appended to every review, Enter to skip):
+  > Code review powered by My Team · AI-assisted, human-approved.
+
+  Reviewer attribution line (replaces "Reviewed by {vendor}", Enter to skip):
+  > [Enter]
+  ```
+
+  Branding is lightweight for personal users (e.g., a footer with a link) and richer for CRaaS operators (service name + attribution + footer). All fields are optional and independently skippable. Saved to the `brand` config section; comment format unchanged when all fields are empty.
+
+  ---
+
+  **Confirmation preview and write:**
+
+  After all steps, show a compact summary and prompt before writing:
+  ```
+    Your crosscheck config:
+
+      persona      personal
+      scope        repos (beingzy/api-service, beingzy/cool-project) + orgs (my-company)
+      filter       author = beingzy
+      reviewer     cross-vendor (claude ↔ codex)
+      config       ~/.crosscheck/config.yml
+
+  Write config? [Y/n]:
+  ```
+  On confirm: write config, print `  ✓ config written — run  crosscheck watch  to start`.
+  On decline: print `  Cancelled. No files written.` and exit 0.
+
+  **`--reconfigure` flag:** Re-runs all steps even if config already exists. Shows the current saved value as the default at each prompt. Useful when joining a new org, switching personas, or correcting a first-run mistake.
+
+  ---
+
+  **New config schema — `brand` section (available to all personas):**
+
+  ```typescript
+  export const BrandConfigSchema = z.object({
+    service_name: z.string().default('crosscheck'),
+    comment_header: z.string().default(''),
+    comment_footer: z.string().default(''),
+    reviewer_attribution: z.string().default(''),
+  })
+  ```
+  Added to `ConfigSchema` as `brand: BrandConfigSchema.default({})`.
+
+  Both `claude.ts` and `codex.ts` apply `config.brand` when composing the GitHub comment:
+  - Non-empty `brand.comment_header` → prepend to comment (followed by a blank line).
+  - Non-empty `brand.comment_footer` → append to comment (preceded by a blank line).
+  - Non-empty `brand.reviewer_attribution` → replace the default `> Reviewed by {vendor}` attribution line.
+  - When all `brand` fields are empty (the default), comment format is unchanged.
+
+  ---
+
+  **Relationship to existing commands:**
+
+  - `crosscheck init` remains unchanged — environment check only. `onboard` calls `runChecks()` internally as Step 0. `init` is for diagnosing environment issues; `onboard` is for first-time configuration.
+  - The minimal first-run prompts in `watch`/`serve` (from the Deployment Mode spec) remain as a lightweight fallback for users who skip `onboard`. They show a binary `personal`/`team` choice without repo picking or brand customization.
+  - `crosscheck init` output adds a one-line hint: `Run  crosscheck onboard  to configure scope and persona.`
+  - `crosscheck status` shows a `persona` row with the deployment value (or `service` when `brand.service_name` is non-default) and `brand.service_name` when set.
+
+  ---
+
+  - **User:** New crosscheck users of any persona — solo developers building side projects, teams running shared CR pipelines, and anyone (personal or team) who wants light or rich comment branding.
+  - **Acceptance Criteria:**
+    - `crosscheck onboard` runs environment checks first and prints a compact one-line-per-tool summary.
+    - Persona question is always shown with two choices (personal / team); no third "service" option — branding is an optional add-on step for all paths.
+    - Personal path: scope (with per-option descriptions) → repo picker (when personal repos in scope) → author filter → optional branding → correct config for UC-01, UC-02, and the unrestricted variant.
+    - Team path: org picker → author filter → review depth → (if auto-fix) delivery mode (fix PR or direct push only — no inline-suggestion option) → optional branding → correct config for UC-03.
+    - Repo picker: Tier-1 new repos (< 7 days) shown first and pre-selected; Tier-2 active repos (≥ 1 PR last 90 days) sorted by count; Tier-3 inactive repos behind "Show more"; repos absent from both tiers for 180+ days noted as "add manually."
+    - Branding step is optional (`[y/N]`, default N); if yes, shows 4 fields each independently skippable.
+    - Confirmation preview accurately reflects all choices before writing.
+    - `--reconfigure` re-runs all steps with current config values pre-filled as defaults; overwrites on confirm; exits without writing on decline.
+    - `brand` fields injected into GitHub comments by both `claude.ts` and `codex.ts` when non-empty; comment format unchanged when all `brand` fields are empty.
+    - `crosscheck status` shows `persona` row and `brand.service_name` when non-default.
+    - `crosscheck init` output includes the onboard hint line.
+    - Running `onboard` twice produces identical config (no duplicate entries).
+    - `onboard` with environment check failures still completes all questions and writes config; it does not abort.
+  - **Technical Notes:**
+    - New file: `src/commands/onboard.ts`. Imports `runChecks` from `init.ts`. Drives persona branching. Branding step runs for all paths after persona-specific questions. At the end, calls `patchDeploymentConfig` + `patchBrandConfig` to write all config values atomically.
+    - New file: `src/lib/repo-picker.ts`: `fetchActiveRepos(login: string, token: string): Promise<{ tier: 1 | 2 | 3; repo: string; prCount: number; createdAt: Date }[]>` — GitHub API calls, three-tier partition; `promptRepoPicker(repos, defaults?)` — readline-based checkbox UI showing Tier 1 + Tier 2 up to 8 combined, "Show more" expands Tier 3; no new prompt-library dependency.
+    - `src/config/schema.ts`: add `BrandConfigSchema` and `brand: BrandConfigSchema.default({})` to `ConfigSchema`.
+    - `src/config/loader.ts`: add `patchBrandConfig(configPath: string, brand: Partial<BrandConfig>): boolean`.
+    - `src/reviewers/claude.ts`: inject `brand.comment_header` / `comment_footer` / `reviewer_attribution` when composing the final comment string; no-op when all empty.
+    - `src/reviewers/codex.ts`: same injection logic.
+    - `src/commands/status.ts`: add `persona` row showing deployment + `brand.service_name` when non-default.
+    - `src/commands/init.ts`: append hint line at the end of output.
+    - Wire into `cli.ts` as `crosscheck onboard [--reconfigure]`.
+    - `crosscheck.config.example.yml`: add commented `brand:` block with all four fields.
+    - `get-started.md`: add **First-time setup** section with each UC described in 2–3 sentences.
+  - **Tests Required:**
+    - `fetchActiveRepos`: repos < 7 days old in Tier 1 regardless of PR count; repos ≥ 1 PR in last 90 days in Tier 2 sorted by count; zero-PR repos older than 7 days in Tier 3; returns `[]` gracefully when GitHub returns nothing.
+    - `promptRepoPicker`: Tier-1 repos shown first and pre-selected; Tier-2 shown next up to cap; "Show more" expands Tier-3 inline; returns correct selection array.
+    - Personal + both scopes + author-mine → `{ deployment: 'personal', users: [login], orgs: [...], allowed_authors: [login] }`.
+    - Personal + personal-only + 2 repos selected → `{ deployment: 'personal', repos: [r1, r2], users: [], orgs: [], allowed_authors: [login] }`.
+    - Team + all-authors + CR-only → `{ deployment: 'team', allowed_authors: [], post_review: { auto_fix: { enabled: false } } }`.
+    - Team + specific logins + CR + fix-PR → `{ deployment: 'team', allowed_authors: ['john', 'jane'], post_review: { auto_fix: { enabled: true, delivery: { mode: 'pull_request' } } } }`.
+    - Branding opt-in → `brand.service_name`, `brand.comment_footer` written; skipped fields remain empty string.
+    - Branding opt-out (default N) → no `brand` fields written (all remain at schema defaults).
+    - `claude.ts` with non-empty `brand.comment_header` → header prepended to posted comment.
+    - `claude.ts` with empty `brand` fields → comment format unchanged.
+    - `patchBrandConfig` writes correctly; idempotent on second run.
+    - `--reconfigure` re-prompts with current values as defaults; overwrites on confirm; no-ops on decline.
+    - `crosscheck status` shows `persona` row.
+    - `crosscheck init` output includes hint line.
 
 ---
 

@@ -120,7 +120,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer)
+    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

@@ -194,6 +194,7 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [x] **Fix `watch` status bar embedded in scrolling log** — confirmed already anchored via `writeLive()`; no structural change needed.
 - [x] **Fix `watch` event log — show failure state in counters** — `errorsOccurred` stat counter added; shown in red in the status bar when > 0, omitted when 0.
 - [x] **Fix `watch` event log — improve two-line event readability** — `board.log()` prepends a blank line for 2-line events so consecutive PR entries are visually separated in the scrollback.
+- [x] **Fix `crosscheck issue` codex invocation — replace `-q` with `exec` subcommand** — `runWithCodex()` in `src/commands/issue.ts` was calling `codex -q`, which was removed from the Codex CLI; replaced with `codex exec` (issue #57).
 
 - [x] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
   - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.

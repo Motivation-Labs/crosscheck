@@ -144,7 +144,8 @@ async function runWithCodex(prompt: string): Promise<string> {
   try {
     writeFileSync(join(tmpDir, 'ISSUE_PROMPT.md'), prompt)
     const result = await execa('codex', [
-      '-q',
+      'exec',
+      '--skip-git-repo-check',
       'Read ISSUE_PROMPT.md and produce a GitHub issue draft. ' +
       'Output exactly: TITLE: line, then ---, then the markdown body.',
     ], {

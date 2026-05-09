@@ -433,7 +433,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
     **Coverage measurement:**
     - Computes an *uptime window* from `session_start` events in `~/.crosscheck/logs/` — the union of all periods crosscheck was running.
-    - For each repo/org/user in the current config, calls the GitHub API to enumerate all PRs opened or updated during the uptime window.
+    - For each repo/org/user in the current config, calls the GitHub API to enumerate all PRs opened or updated during the full analysis period (from the earliest `session_start` in logs, or `--since` if provided — not limited to uptime windows). This ensures PRs that were active only while crosscheck was offline are still enumerated and can be classified as `offline_window`.
     - Cross-references that list against `pr_received` + `review_complete` log entries to find PRs in scope that were never reviewed.
     - Reports a coverage percentage per scope and overall: `63 / 71 PRs reviewed (89%)`.
 
@@ -452,7 +452,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     **Config-fix recommendations:**
     - Each `config_fix` gap produces a specific, copy-pasteable suggestion:
       - `author_filtered`: "3 PRs from `dependabot[bot]` skipped — add to `allowed_authors` or switch to team mode."
-      - `no_attribution`: "5 PRs from `beingzy` had no attribution footer — add `author_routes: { beingzy: claude }` to route them."
+      - `no_attribution`: "5 PRs from a human author had no attribution footer — add an `author_routes` entry to route them."
       - `no_reviewer`: "2 PRs detected as `codex`-origin but Codex is disabled — set `vendors.codex.enabled: true`."
     - `--apply` writes the suggested config changes directly to `crosscheck.config.yml` after confirmation.
     - `--issue` files the config gap as a best-practice issue to `motivation-labs/crosscheck` using the same `gh issue create` pipeline as `crosscheck issue`. Issue title: `config: [gap type] — best practice recommendation`. The issue describes the condition, the ideal config, and asks the maintainers to surface it in `crosscheck init` as a warning.
@@ -482,18 +482,13 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
       Missing:   8 PRs
 
       author_filtered    3 PRs  → add to allowed_authors or switch to team mode
-        PR #44  dependabot[bot] · acme/api
-        PR #47  dependabot[bot] · acme/api
-        PR #51  dependabot[bot] · acme/frontend
+        from: bot account (*[bot] pattern)  ×3
 
       no_attribution     3 PRs  → add author_routes to config
-        PR #48  beingzy · acme/api        (no Claude/Codex footer detected)
-        PR #52  beingzy · acme/frontend
-        PR #53  beingzy · acme/tools
+        from: human author (no Claude/Codex footer detected)  ×3
 
       unsupported_agent  2 PRs  → feature gap (GitHub Copilot attribution not recognized)
-        PR #49  copilot-swe-agent[bot] · acme/api
-        PR #55  copilot-swe-agent[bot] · acme/tools
+        from: copilot-swe-agent[bot]  ×2
 
     Config fixes available:
       Run  crosscheck coverage --apply   to apply the config fixes above.
@@ -507,9 +502,10 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
   - **Technical Notes:**
     - New file: `src/commands/coverage.ts`.
     - **Uptime computation:** scan log entries for `session_start` / `session_end` pairs; merge overlapping windows; the result is a list of `[start, end]` intervals. For `session_start` with no matching `session_end` (process killed), assume the window ended at the timestamp of the next non-session log entry.
-    - **Scope enumeration:** for each org in `config.orgs`, call `GET /orgs/{org}/pulls?state=all&per_page=100&since=<earliest-window-start>`; for each user in `config.users`, call `GET /repos/{owner}/{name}/pulls?state=all` per-repo. Intersect `created_at` / `updated_at` with uptime windows.
+    - **Scope enumeration:** GitHub has no `GET /orgs/{org}/pulls` endpoint and the pulls list API has no `since` filter. Use the Search API for org scopes: `GET /search/issues?q=type:pr+org:{org}+updated:>{since}&per_page=100` where `since` is the earliest analysis period boundary. Using `updated:>` (not `created:>`) ensures long-lived PRs opened before the window but updated during it are included, matching the "opened or updated during analysis period" requirement. For `config.users` entries, enumerate repos first via `listUserRepos` (already in `client.ts`) then query `GET /repos/{owner}/{repo}/pulls?state=all&per_page=100` per repo. For `config.repos`, query each repo directly the same way. Search API rate limit is 30 req/min authenticated — add a small delay between org queries if the user has many orgs.
     - **Log join:** a PR is "reviewed" if there is a `pr_received` log entry matching `owner/repo#number` AND a `review_complete` entry for the same key.
-    - **Gap classification:** applied in priority order; first matching rule wins. `offline_window` fires only if the PR's `created_at` and `updated_at` both fall outside all uptime windows.
+    - **Scope enumeration uses the full analysis period, not uptime windows.** The `since` parameter for Search/pulls queries is `max(--since flag, earliest session_start in logs)` — it covers everything crosscheck has ever been configured to watch, regardless of whether it was online. This ensures `offline_window` is reachable.
+    - **Gap classification:** applied in priority order; first matching rule wins. `offline_window` fires when a PR is not in the reviewed set AND all of its `created_at`/`updated_at` timestamps fall outside every uptime window — meaning crosscheck simply wasn't running when the PR was active. PRs that overlap at least one uptime window but were still not reviewed proceed to the author/attribution/routing checks.
     - **Config apply:** uses `yaml.load` + `yaml.dump` pattern (same as `patchDeploymentConfig`). Shows a before/after diff and prompts `Apply? [y/N]` unless `--yes` is passed.
     - **Issue filing (`--issue`):** calls `gh issue create --repo motivation-labs/crosscheck` with a templated body. Body includes: gap type, frequency, ideal config, and a request to add a startup warning. No PR data included — only the gap pattern and config suggestion.
     - **PR contribution (`--prd`, `--build`):**
@@ -523,7 +519,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
   - **Tests Required:**
     - Uptime window computation: two overlapping sessions → merged; unclosed session → window ends at next log entry timestamp.
     - Scope enumeration stub: given a mock GitHub API, returns correct PR list within uptime window.
-    - Gap classification: `author_filtered` fires before `no_attribution`; `offline_window` only fires when both `created_at` and `updated_at` are outside all windows.
+    - Gap classification: `author_filtered` fires before `no_attribution`; `offline_window` fires when all of a PR's timestamps are outside uptime windows AND the PR is enumerated from the full analysis period (not pre-filtered to uptime windows).
     - `--apply` shows diff and writes correct YAML; is a no-op when `--yes` not passed and user declines.
     - `--issue` calls `gh issue create` with no PR identifiers or repo names in the body.
     - `--prd` clones repo, creates branch, appends to prd.md, opens draft PR.
@@ -1400,23 +1396,26 @@ The `--build` path makes this the first crosscheck command that contributes back
 **Gap classification decision tree:**
 
 ```
-PR in scope, not in reviewed logs
-  └─ PR author in allowed_authors?
-       NO → author_filtered        (config_fix: add to allowed_authors)
+PR in scope (full analysis period), not in reviewed logs
+  └─ PR overlaps any uptime window?
+       NO → offline_window          (config_info: crosscheck was offline)
        YES
-       └─ PR body matches any attribution pattern?
-            YES → reviewer assigned?
-                    NO → no_reviewer       (config_fix: enable vendor)
-                    YES → this shouldn't happen — flag as anomaly
-            NO → author in author_routes?
-                    YES → reviewer assigned → reviewed (shouldn't be here)
-                    NO  → no_attribution   (config_fix: add author_routes)
-                           └─ PR authored by unknown AI agent?
-                                YES → unsupported_agent  (feature_request)
-                                NO  → no_attribution     (config_fix)
-              └─ Did webhook arrive?
-                   NO, and PR in uptime window → webhook_miss (config_fix)
-                   NO, PR outside all uptime windows → offline_window (config_info)
+       └─ PR author in allowed_authors?
+            NO → author_filtered    (config_fix: add to allowed_authors)
+            YES
+            └─ webhook event arrived for this PR?
+                 NO → webhook_miss  (config_fix: webhook not registered)
+                 YES
+                 └─ PR body matches any attribution pattern?
+                      YES → reviewer assigned?
+                              NO → no_reviewer       (config_fix: enable vendor)
+                              YES → flag as anomaly (reviewed but not logged)
+                      NO → PR authored by a known-but-unsupported AI agent?
+                              YES → unsupported_agent  (feature_request: add detection pattern)
+                              NO
+                              └─ author in author_routes?
+                                   YES → (shouldn't be here — flag as anomaly)
+                                   NO  → no_attribution  (config_fix: add author_routes)
 ```
 
 **Uptime window computation:**
@@ -1431,25 +1430,26 @@ Overlapping windows are merged. A PR's uptime membership check: `window.some(w =
 
 **`--issue` payload (config gaps):**
 
-Filed to `motivation-labs/crosscheck`. Body structure:
+Filed to `motivation-labs/crosscheck`. Body uses only aggregate counts and pattern types — no GitHub usernames, repo names, org names, PR numbers, or branch names. Body structure:
 ```
 ## Config best-practice gap: author_filtered
 
-**Condition:** User has `allowed_authors: [beingzy]` and PRs from `dependabot[bot]` are being skipped.
+**Condition:** `allowed_authors` is set and PRs from a bot account matching the
+pattern `*[bot]` are being skipped.
 
-**Ideal behavior:** `crosscheck init` or `crosscheck watch` startup should warn when known bot accounts (dependabot, renovate, copilot-workspace) are present in the repo's PR history but absent from `allowed_authors`.
+**Ideal behavior:** `crosscheck init` or `crosscheck watch` startup should warn when
+known bot accounts (dependabot, renovate, copilot-workspace) are active in any
+monitored repo but absent from `allowed_authors`.
 
-**Suggested config:**
-routing:
-  allowed_authors:
-    - beingzy
-    - dependabot[bot]
-    - renovate[bot]
+**Suggested detection:** at startup, if `allowed_authors` is non-empty, check whether
+recent PR authors in monitored scope include any `*[bot]` logins not in the list.
+Warn with: "3 PRs from bot accounts were skipped — add them to allowed_authors or
+switch to team mode."
 
-**Supporting data:** 3 PRs skipped over 14 days in 1 repo.
+**Supporting data:** N PRs skipped over 14 days across M repos (counts only — no identifiers).
 ```
 
-No repo names, PR numbers, or user identities beyond the pattern type are included.
+Sanitization applied before generating the body: all GitHub logins replaced with their category (e.g., `bot account`, `human author`); repo/org names replaced with counts; PR numbers omitted entirely.
 
 **`--build` agent prompt structure:**
 

@@ -248,10 +248,11 @@ export async function runWatch(opts: WatchOpts = {}) {
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         // Fetch the base branch after checking out the PR branch so we are never
         // on the base branch during the fetch (git refuses to update a checked-out ref).
-        // Use no refspec so git creates origin/<base> as a remote-tracking ref — both
-        // computePRLoc and `codex review --base` rely on origin/<base>...HEAD diffs.
+        // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
+        // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
+        // shallow clones when the branch is absent from the default refspec mapping.
         try {
-          execSync(`git fetch origin ${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+          execSync(`git fetch origin ${pr.base.ref}:refs/remotes/origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
         } catch {
           fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
         }

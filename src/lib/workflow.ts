@@ -28,7 +28,7 @@ const DEFAULT_REVIEW_INSTRUCTIONS = [
   'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
   'Be concise. Skip praise.',
   '## Verdict',
-  'End with one of: VERDICT: APPROVE | NEEDS_WORK | BLOCK',
+  'End with one of: VERDICT: APPROVE | NEEDS WORK | BLOCK',
 ].join('\n')
 
 const DEFAULT_FIX_INSTRUCTIONS = [

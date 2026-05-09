@@ -43,7 +43,7 @@ export async function runFixStep(
 ): Promise<{ appliedCount: number }> {
   let diff = ''
   try {
-    diff = execSync(`git diff ${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+    diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
   } catch {
     try {
       diff = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' })

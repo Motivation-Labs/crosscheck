@@ -108,8 +108,10 @@ export async function runInit(configPath?: string) {
     console.log(chalk.green('\nAll checks passed.\n'))
   }
 
-  // Write config if none exists, pre-filling allowed_authors with the detected GitHub login
-  const dest = configPath ?? join(homedir(), '.crosscheck', 'config.yml')
+  // Write config if none exists, pre-filling allowed_authors with the detected GitHub login.
+  // Prefer the active config (local project file or explicit path) before falling back to
+  // the global default, so `crosscheck init` patches the same file that `watch` reads.
+  const dest = configPath ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
   mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
   if (!existsSync(dest)) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname

@@ -5,7 +5,7 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
@@ -57,12 +57,21 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let origin: import('../github/detector.js').PROrigin
   if (opts.reviewer === 'codex' || opts.reviewer === 'claude') {
     // --reviewer forces the origin to the opposite vendor (cross-vendor semantics)
-    // but we still need an origin value; treat the forced reviewer as the reviewer directly
     origin = opts.reviewer === 'codex' ? 'claude' : 'codex'
     console.log(chalk.dim(`  reviewer: ${opts.reviewer} (forced)`))
   } else {
-    origin = detectPROrigin(prData.body ?? '', config, prData.user?.login)
-    console.log(chalk.dim(`  PR origin: ${origin}`))
+    const { origin: detectedOrigin, method } = await detectOriginFull(
+      prData.body ?? '',
+      prData.head.ref,
+      owner,
+      repo,
+      number,
+      config,
+      token,
+      prData.user?.login,
+    )
+    origin = detectedOrigin
+    console.log(chalk.dim(`  PR origin: ${origin} (via ${method})`))
   }
 
   const assignedReviewer = opts.reviewer === 'codex' || opts.reviewer === 'claude'
@@ -77,12 +86,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  assigned reviewer: ${assignedReviewer}`))
   }
 
-  // Resolve steps — filter from workflow.yml by type if --steps is specified
+  // Resolve steps — filter from workflow.yml by type if --steps is specified, then pin the
+  // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
   const allSteps = loadWorkflow(process.cwd())
   const stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
-  const filteredSteps = stepFilter
+  const filteredSteps = (stepFilter
     ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
     : allSteps
+  ).map(s =>
+    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
+  )
 
   if (opts.dryRun) {
     console.log(chalk.dim('  dry-run: review will run but no comment will be posted; fix step skipped'))

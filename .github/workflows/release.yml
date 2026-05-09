@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: write   # push version-bump commit + tag
       id-token: write   # npm provenance (optional but good practice)
+      actions: write    # dispatch publish.yml after syncing version to staging
 
     steps:
       - uses: actions/checkout@v4

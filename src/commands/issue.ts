@@ -227,19 +227,23 @@ export async function runIssue(opts: {
     since,
   )
 
-  // 4. Select agent
+  // 4. Select agents — primary first, then other enabled vendor as fallback
   const config = loadConfig(opts.config)
-  let agentName: 'claude' | 'codex' = 'claude'
-  let agentReason = 'default'
+  const candidates: Array<'claude' | 'codex'> = []
+  let primaryReason = 'default'
   try {
     const sel = selectOptimizeAgent(config, report)
-    agentName = sel.agent
-    agentReason = sel.reason
+    candidates.push(sel.agent)
+    primaryReason = sel.reason
   } catch {
-    // No vendors configured — fall back to claude
+    candidates.push('claude')
   }
+  const fallbackVendor = (['claude', 'codex'] as const).find(
+    v => !candidates.includes(v) && config.vendors[v].enabled,
+  )
+  if (fallbackVendor) candidates.push(fallbackVendor)
 
-  // 5. Draft issue via AI agent
+  // 5. Draft issue via AI agent — try each candidate in order
   const days = daysBetween(since)
   const prompt = buildAgentPrompt(
     errorLabel(selected),
@@ -250,14 +254,25 @@ export async function runIssue(opts: {
     config.mode,
   )
 
-  console.log(chalk.dim(`  drafting issue with ${agentName} (${agentReason})...`))
-  let agentOutput: string
-  try {
-    agentOutput = agentName === 'claude'
-      ? await runWithClaude(prompt)
-      : await runWithCodex(prompt)
-  } catch (err) {
-    console.error(chalk.red(`✗ ${agentName} failed: ${err instanceof Error ? err.message : String(err)}`))
+  let agentOutput: string | undefined
+  for (let i = 0; i < candidates.length; i++) {
+    const agent = candidates[i] as 'claude' | 'codex'
+    const reason = i === 0 ? primaryReason : `fallback — ${candidates[i - 1]} failed`
+    console.log(chalk.dim(`  drafting issue with ${agent} (${reason})...`))
+    try {
+      agentOutput = agent === 'claude'
+        ? await runWithClaude(prompt)
+        : await runWithCodex(prompt)
+      break
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const hasNext = i < candidates.length - 1
+      console.error(chalk.yellow(`  ✗ ${agent} failed: ${msg}${hasNext ? ' — trying next agent...' : ''}`))
+    }
+  }
+
+  if (agentOutput === undefined) {
+    console.error(chalk.red('✗ all configured agents failed to draft the issue'))
     process.exit(1)
   }
 

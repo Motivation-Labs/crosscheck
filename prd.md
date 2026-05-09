@@ -2,7 +2,11 @@
 
 ## What This Is
 
-crosscheck is a cross-vendor AI code review orchestrator. When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. It runs locally using your existing AI subscriptions — no separate API billing required.
+crosscheck is an AI code review orchestrator. It monitors your GitHub repos and ensures every open PR that hasn't been reviewed yet gets a review from the right AI agent — automatically.
+
+In **cross-vendor mode** (default): each PR is reviewed by the vendor that *didn't* write it (Claude reviews Codex PRs; Codex reviews Claude PRs). In **single-vendor mode**: every PR in scope gets reviewed by the one configured vendor. Either way, crosscheck handles detection, attribution, assignment, and posting — no manual coordination required.
+
+It runs locally using your existing AI subscriptions — no separate API billing required.
 
 Published as `@motivation-labs/crosscheck` on npm.
 
@@ -10,12 +14,14 @@ Published as `@motivation-labs/crosscheck` on npm.
 
 ## Goals
 
+- **Universal coverage** — every open PR in the monitored scope that lacks a crosscheck review is a candidate, regardless of whether the authoring agent can be identified
 - **Use existing subscriptions** — run `claude` and `codex` CLIs locally, no per-token billing
 - **Zero infrastructure** — one command on any machine with both CLIs installed
 - **Config-as-code** — one flat YAML file, readable and writable by coding agents
 - **Two deployment modes** — `watch` for laptops, `serve` for always-on machines
 - **Org-level coverage** — one webhook covers all repos in an org
 - **Self-improving** — `diagnose` + `optimize` create a feedback loop from observed failures to better review instructions; crosscheck gets more useful the longer it runs
+- **Self-annotating** — each crosscheck action embeds machine-readable attribution metadata that makes future attribution more accurate, without relying on external conventions
 
 ## Non-Goals
 
@@ -23,6 +29,62 @@ Published as `@motivation-labs/crosscheck` on npm.
 - Not a merge gate — posts comments, does not block PRs
 - Not a hosted service — runs on your machine
 - Not a one-size-fits-all reviewer — instructions should adapt to your stack and team conventions
+
+---
+
+## Design Principles
+
+These principles are authoritative. They override default assumptions when building new features or resolving ambiguous design decisions.
+
+### P1 — Detection is attribution-agnostic
+
+Whether to queue a PR for review is determined entirely by scope and review status — not by whether the authoring agent can be identified.
+
+A PR is a review candidate if and only if:
+1. Its author is in scope (`allowed_authors` if set, or any author in the monitored org/user/repo otherwise), AND
+2. It has no existing crosscheck review comment.
+
+`allowed_authors` is a **scope gate** (which authors crosscheck watches), not an attribution filter (who *wrote* the code). A PR from `beingzy` is in scope if `beingzy` is in `allowed_authors`, regardless of whether `beingzy` used Claude, Codex, or wrote the code by hand.
+
+**Consequence**: attribution failure never silently drops a review. A PR that reaches the assignment step with unknown attribution is handled by the fallback policy, not silently skipped.
+
+### P2 — Attribution determines assignment, not eligibility
+
+Once a PR is queued (passes P1), attribution determines *which reviewer* is assigned. It does not re-gate whether a review happens.
+
+**Attribution detection chain** — evaluated in order, stops at first match:
+1. PR body — scan for configured `codex_reviews_patterns` / `claude_reviews_patterns`
+2. Commit messages — same patterns applied to each commit message in the PR
+3. Branch name prefix — `claude_branch_prefixes` / `codex_branch_prefixes`
+4. PR comments — scan for crosscheck annotation tags (see P3); skipped if steps 1–3 resolved
+5. `author_routes` — explicit `login → vendor` map in config
+6. Fallback — apply `routing.fallback_reviewer` (default: `skip`)
+
+**Assignment logic** given detected origin and config:
+
+| Mode | Origin | Reviewer |
+|---|---|---|
+| cross-vendor | claude | codex (if enabled) |
+| cross-vendor | codex | claude (if enabled) |
+| cross-vendor | human / unknown | `routing.fallback_reviewer` (skip \| claude \| codex) |
+| single-vendor | any | the one enabled vendor |
+
+In single-vendor mode, attribution is still detected and logged (for analytics) — it just has no effect on assignment.
+
+### P3 — Crosscheck annotates what it touches
+
+Every action crosscheck takes embeds a machine-readable annotation so future runs can read attribution state without guessing.
+
+**Annotation format** (these are stable — changing them is a breaking change):
+
+| Action | Annotation location | Format |
+|---|---|---|
+| Review comment posted | End of comment body | `<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE -->` |
+| Address commit pushed | Commit message trailer | `Crosscheck-Reviewer: codex` |
+
+Detection step 4 (PR comments) scans for `<!-- crosscheck: origin=... -->` tags to recover attribution from a prior crosscheck review, even when the PR body and commit messages contain no patterns.
+
+**Why this matters**: the first time crosscheck reviews a PR, attribution may be inferred from patterns. On follow-up events (new commits, recheck), the annotation provides a durable, precise attribution record — no re-inference needed.
 
 ---
 
@@ -72,6 +134,27 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 ---
 
 ## Build Queue
+
+### 🚨 P0 — Structural correctness (fix before next routing/detection work)
+
+These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
+
+- [ ] **Consolidate skip decision: delete `shouldReview()`, rely solely on `assignReviewer`** — `shouldReview` (detector.ts:82) and `assignReviewer` both independently gate on `origin === 'human'` in cross-vendor mode. Adding `fallback_reviewer` to only one of them creates a silent divergence. Full spec below.
+  - **Acceptance Criteria:**
+    - `shouldReview` is deleted from `detector.ts` and from all exports.
+    - Call sites in `serve.ts`, `watch.ts`, and `review.ts` that check `shouldReview(...)` are replaced with `assignReviewer(...) !== null`.
+    - Behavior for all existing origin values is unchanged.
+    - No type error or lint warning from the removed export.
+  - **Technical Notes:** call sites pass `origin` and `config` to `shouldReview`; the equivalent is `assignReviewer(origin, config) !== null`. Both code paths already have `reviewer` from `assignReviewer` in scope — no new variable needed.
+  - **Tests Required:** `shouldReview` not exported; serve/watch/review behavior unchanged for `origin: 'claude'`, `'codex'`, `'human'`.
+
+- [ ] **`routing.fallback_reviewer` config field (P2 assignment)** — full spec in Next Up.
+
+- [ ] **Comment-based attribution detection (P2 step 4)** — full spec in Next Up.
+
+- [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
+
+---
 
 ### 🔜 Next Up
 
@@ -319,6 +402,54 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - `board.ts`: add `private connLog: string[]` (max 2 entries); `logConnectivity(line): void` appends with timestamp, shifts oldest when full.
     - `render()`: add `Section 1.5` between `sep` and PR slots, always `CONN_LOG_MAX` lines.
     - `watch.ts`: add `cLog(line)` helper → `board.logConnectivity(line)` + `fileLog`; route tunnel open/close/fail and webhook registered/failed to `cLog`.
+
+- [ ] **Comment-based attribution detection (P2 step 4)** — extend `detectOriginFull` to scan PR review comments for crosscheck annotation tags (`<!-- crosscheck: origin=... -->`), positioned after body/commit/branch checks and before `author_routes`. This is the mechanism that enables P3 annotations to feed back into future detections.
+  - **User:** Anyone running crosscheck on repos where PRs are authored by agents that don't leave body footers (e.g., agents that only commit code, or agents whose PR template doesn't include attribution text).
+  - **Acceptance Criteria:**
+    - `detectOriginFull` gains a new step 4: if steps 1–3 return null, fetch PR comments via `GET /repos/{owner}/{repo}/issues/{number}/comments`; scan each body for `<!-- crosscheck: origin=(claude|codex) -->`. Return the first match found.
+    - Step 4 is only called when steps 1–3 are inconclusive — no extra API call on the fast path.
+    - Comment fetch failure is non-fatal; falls through to `author_routes` (same pattern as commit fetch).
+    - `detectOriginFull` logs `method: 'comment'` when attribution is resolved at this step.
+    - Works correctly with both `<!--` (HTML comment) and `<!-- crosscheck: ... -->` — the crosscheck annotation subset.
+  - **Technical Notes:**
+    - New function `src/github/client.ts`: `listPRComments(owner, repo, prNumber, token): Promise<string[]>` — returns comment bodies, paginated (100/page).
+    - `src/github/detector.ts`: new step between branch check and author_routes; wraps `listPRComments` + `matchPatterns` on the annotation tag `<!-- crosscheck: origin=(claude|codex)`.
+    - Annotation regex: `/<!--\s*crosscheck:\s*origin=(claude|codex)/i` — case-insensitive, whitespace-tolerant.
+    - `src/__tests__/detector.test.ts`: add test cases for comment-resolved attribution (mock `listPRComments`), step-4-skipped-when-body-matches, API failure falls through.
+  - **Tests Required:** Step 4 resolves 'claude' from annotation tag; step 4 resolves 'codex'; step 4 not called when body matches; step 4 API failure → falls through to author_routes; no annotation tag in comments → falls through; annotation tag with extra fields → still matches.
+
+- [ ] **`routing.fallback_reviewer` config field (P2 assignment)** — when attribution detection returns 'human' or unknown in cross-vendor mode, apply a configured policy instead of silently skipping. Default `skip` preserves backward-compatible behavior; setting to `claude` or `codex` ensures all unattributed in-scope PRs get reviewed.
+  - **User:** Anyone running crosscheck on repos where PR attribution is inconsistent — mixed human/AI authors, agents that don't leave footers, or early adopters who want to ensure 100% coverage regardless of attribution confidence.
+  - **Acceptance Criteria:**
+    - New field `routing.fallback_reviewer: 'claude' | 'codex' | 'skip'` in `RoutingConfigSchema`, default `'skip'`.
+    - `assignReviewer` uses `fallback_reviewer` when `origin === 'human'` in cross-vendor mode. Returns `null` when `skip`; returns the named vendor when `claude` or `codex`.
+    - Existing behavior (silently skip human-origin PRs) is preserved when `fallback_reviewer` is absent or `'skip'`.
+    - `serve.ts` / `watch.ts` log `origin_method: 'none', fallback: 'claude'` (or skip) when the fallback fires.
+    - `crosscheck.config.example.yml` documents the field with a comment explaining the coverage/noise tradeoff.
+    - `crosscheck status` shows the active fallback policy.
+  - **Technical Notes:**
+    - `src/config/schema.ts`: add `fallback_reviewer: z.enum(['claude', 'codex', 'skip']).default('skip')` to `RoutingConfigSchema`.
+    - `src/github/detector.ts`: `assignReviewer` already returns `null` for `origin === 'human'` in cross-vendor mode; update to `return config.routing.fallback_reviewer === 'skip' ? null : config.routing.fallback_reviewer`.
+    - `crosscheck.config.example.yml`: add commented `fallback_reviewer: skip` under `routing:`.
+  - **Tests Required:** `fallback_reviewer: 'skip'` → null on human origin; `fallback_reviewer: 'claude'` → 'claude' on human origin; `fallback_reviewer: 'codex'` → 'codex' on human origin; single-vendor mode ignores fallback_reviewer; cross-vendor with both vendors enabled + fallback → fallback vendor returned; named fallback vendor is disabled → still returned (reviewer availability check is separate).
+
+- [ ] **Crosscheck annotation system (P3)** — embed machine-readable attribution metadata in every review comment crosscheck posts, and in every commit crosscheck pushes. This creates a durable, self-consistent attribution record that Step 4 detection (comment-based) can read on future events.
+  - **User:** Long-running crosscheck installations where PRs accumulate history — reruns, rechecks, follow-up commits. Without annotations, each event re-infers attribution from scratch, which can diverge if PR body is edited or commits are amended.
+  - **Acceptance Criteria:**
+    - Every review comment posted by `postReviewComment` in `client.ts` appends `\n<!-- crosscheck: origin=<origin> reviewer=<reviewer> verdict=<verdict> -->` to the comment body (after the existing footer).
+    - Every `[crosscheck]` commit pushed in `address` step includes `Crosscheck-Reviewer: <reviewer>` as a Git trailer in the commit message.
+    - The annotation tag is invisible in GitHub's rendered Markdown (HTML comment).
+    - `parseAnnotation(commentBody: string): { origin: PROrigin; reviewer: string; verdict: string } | null` — pure function in `src/lib/annotation.ts`. Returns null if no tag found.
+    - `postReviewComment` accepts `origin` parameter (already known at call site in serve.ts/watch.ts) and embeds it.
+    - Round-trip: `parseAnnotation(postReviewComment output)` returns the correct origin/reviewer/verdict.
+    - Annotation format is tested as a stable schema — any format change is flagged in tests.
+  - **Technical Notes:**
+    - New file `src/lib/annotation.ts`: `buildAnnotation(origin, reviewer, verdict): string` → `<!-- crosscheck: origin=<o> reviewer=<r> verdict=<v> -->`; `parseAnnotation(body): Annotation | null` — regex parse.
+    - `src/github/client.ts`: `postReviewComment` gains `origin: PROrigin` parameter; appends `buildAnnotation(origin, reviewer, verdict)` after the existing footer.
+    - Call sites in `serve.ts` / `watch.ts` / `review.ts`: pass `origin` to `postReviewComment`.
+    - `src/lib/runner.ts` `address` step: append `\nCrosscheck-Reviewer: <reviewer>` to `[crosscheck]` commit message.
+    - `src/__tests__/annotation.test.ts`: round-trip tests; format stability tests (snapshot the exact tag string).
+  - **Tests Required:** `buildAnnotation('claude', 'codex', 'APPROVE')` produces expected tag; `parseAnnotation` returns correct fields; `parseAnnotation` on comment without tag returns null; `parseAnnotation` is whitespace-tolerant; annotation appended correctly to full comment body; round-trip: build then parse returns original values; format snapshot — tag string does not drift between test runs.
 
 - [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
   - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.

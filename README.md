@@ -63,7 +63,7 @@ crosscheck onboard
 crosscheck watch
 ```
 
-`crosscheck onboard` walks you through seven steps: environment check, deployment mode (personal vs team), repo selection, review mode (cross-vendor or single-vendor), workflow pipeline (review-only / review+fix / review+fix+recheck), connection type (localhost.run vs smee.io), and config write. `crosscheck watch` then opens a `localhost.run` SSH tunnel, auto-registers the webhook, and starts listening.
+`crosscheck onboard` walks you through seven steps: environment check, deployment mode (personal vs team), repo selection, review mode (cross-vendor or single-vendor), workflow pipeline (review-only / review+fix / review+fix+recheck), connection type (localhost.run vs smee.io), and config write. `crosscheck watch` then opens a tunnel (localhost.run by default, or smee.io if you selected it), auto-registers the webhook, and starts listening.
 
 ---
 

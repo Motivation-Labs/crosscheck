@@ -381,9 +381,26 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     tunnelBackend = await promptConnectionType()
   }
 
-  if (tunnelBackend === 'smee' && !(existingConfig?.tunnel?.smee_channel)) {
-    console.log(chalk.dim('  → Install smee client: npm install -g smee-client'))
-    console.log(chalk.dim('  → Create a channel at https://smee.io, then set tunnel.smee_channel in your config.'))
+  let smeeChannel = existingConfig?.tunnel?.smee_channel ?? ''
+  if (tunnelBackend === 'smee') {
+    if (smeeChannel) {
+      console.log(`  smee channel ${chalk.cyan(smeeChannel)}`)
+    } else if (!opts.yes) {
+      console.log(chalk.dim('  smee.io requires a channel URL. Create one at https://smee.io/new, then paste it here.'))
+      console.log(chalk.dim('  Leave blank to fall back to localhost.run.\n'))
+      const channel = await ask('  smee channel URL: ')
+      if (channel) {
+        smeeChannel = channel
+      } else {
+        tunnelBackend = 'localhost.run'
+        console.log(chalk.yellow('  No channel provided — falling back to localhost.run.'))
+      }
+    } else {
+      // --yes with no existing channel: smee is unusable, fall back
+      tunnelBackend = 'localhost.run'
+      console.log(chalk.yellow('  smee selected but no channel configured — falling back to localhost.run.'))
+      console.log(chalk.dim('  Set tunnel.smee_channel in config.yml and re-run onboard to use smee.io.'))
+    }
   }
   console.log()
 
@@ -391,7 +408,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   console.log(chalk.bold('Step 7 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
-  console.log(`  connection   ${chalk.cyan(tunnelBackend)}`)
+  console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
@@ -430,7 +447,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   // Connection type
   if (!raw.tunnel || typeof raw.tunnel !== 'object') raw.tunnel = {}
-  ;(raw.tunnel as Record<string, unknown>).backend = tunnelBackend
+  const tunnelObj = raw.tunnel as Record<string, unknown>
+  tunnelObj.backend = tunnelBackend
+  if (tunnelBackend === 'smee' && smeeChannel) tunnelObj.smee_channel = smeeChannel
 
   // Repos
   raw.repos = selectedRepos.map(r => {

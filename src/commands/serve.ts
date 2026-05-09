@@ -20,13 +20,33 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import { loadWorkflow } from '../lib/workflow.js'
+import { PRBoard } from '../lib/board.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
 // SHAs pushed by the address step — skip synchronize events from our own commits
 const crosscheckShas = new Set<string>()
 
-async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, token: string, log: (msg: string) => void) {
+const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
+
+function computePRLoc(tmpDir: string, baseBranch: string): number {
+  try {
+    const stat = execSync(`git diff --stat origin/${baseBranch}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+    let total = 0
+    for (const line of stat.split('\n')) {
+      const m = line.match(/^\s+(.+?)\s+\|\s+(\d+)/)
+      if (!m) continue
+      const file = m[1].trim().replace(/\{.*?=> /, '').replace('}', '')
+      if (!NOISE_EXT.test(file)) total += parseInt(m[2], 10)
+    }
+    return total
+  } catch {
+    return 0
+  }
+}
+
+async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, token: string, board: PRBoard) {
   const { pull_request: pr, repository: repo } = event
   const owner = repo.owner.login
   const repoName = repo.name
@@ -34,11 +54,10 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const key = `${owner}/${repoName}#${prNumber}@${pr.head.sha}`
 
   if (inFlight.has(key)) {
-    log(`PR #${prNumber} already in review — skipping duplicate event`)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
     return
   }
 
-  // Skip synchronize events triggered by our own address commits
   if (crosscheckShas.has(pr.head.sha)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
     return
@@ -54,8 +73,6 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     return
   }
 
-  log(`PR #${prNumber} ${event.action}: ${pr.title}`)
-
   const { origin, method: originMethod } = await detectOriginFull(
     pr.body ?? '', pr.head.ref,
     owner, repoName, prNumber,
@@ -65,18 +82,28 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 
+  const ts = chalk.dim(new Date().toLocaleTimeString())
+  const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+
   if (!reviewer) {
-    log(`  → origin=${origin} (via ${originMethod}), no reviewer — skipping`)
+    board.log(
+      `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
+      `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  no reviewer — skipping`,
+    )
     inFlight.delete(key)
     return
   }
 
-  log(`  → origin=${origin} (via ${originMethod}), reviewer=${reviewer}`)
+  board.log(
+    `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
+    `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`,
+  )
 
-  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
   const reviewStart = Date.now()
+  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+
   try {
-    log('  → cloning...')
     execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
     execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
     execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
@@ -86,17 +113,25 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
     }
 
+    const prLoc = computePRLoc(tmpDir, pr.base.ref)
+    board.updatePR(key, { prLoc })
+
     await runWorkflow({
       owner, repoName, prNumber, pr,
       tmpDir, token, config, origin,
       reviewStart,
-      log,
-      onPhaseChange: (label: string) => log(`  → ${label}`),
+      log: (msg: string) => board.log(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+      onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
+    })
+
+    board.completePR(key, {
+      elapsedMs: Date.now() - reviewStart,
+      url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
-    log(`  ✗ review failed: ${message}`)
+    board.failPR(key, message)
     logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
@@ -138,6 +173,9 @@ export async function runServe(opts: ServeOpts = {}) {
 
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
 
+  const board = new PRBoard()
+  board.setConfig(config, loadWorkflow(process.cwd()))
+
   // ── Deployment setup ─────────────────────────────────────────────────────
   let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment
   let sessionOnly = false
@@ -172,16 +210,11 @@ export async function runServe(opts: ServeOpts = {}) {
 
   const webhookSecret = getWebhookSecret()
 
-  const log = (msg: string) => {
-    console.log(`[${new Date().toISOString()}] ${msg}`)
-    fileLog({ level: 'info', event: 'message', message: msg })
-  }
-
   const server = createWebhookServer(
     config,
     webhookSecret,
-    (event) => { void handlePR(event, config, token, log) },
-    log,
+    (event) => { void handlePR(event, config, token, board) },
+    (msg: string) => board.log(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
     fileLog,
   )
 
@@ -215,13 +248,11 @@ export async function runServe(opts: ServeOpts = {}) {
       console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck serve --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
     }
     console.log()
+    console.log(chalk.dim('Register the endpoint above as a GitHub webhook (content-type: application/json).'))
     if (config.orgs.length > 0) {
-      console.log(chalk.dim('Register the endpoint above as a GitHub org webhook (content-type: application/json).'))
       for (const org of config.orgs) {
         console.log(chalk.dim(`  → https://github.com/organizations/${org}/settings/hooks`))
       }
-    } else {
-      console.log(chalk.dim('Register this URL as a GitHub webhook (content-type: application/json).'))
     }
     console.log(chalk.dim('Listening for pull_request events...\n'))
 
@@ -229,17 +260,17 @@ export async function runServe(opts: ServeOpts = {}) {
     if (config.backtrace.enabled) {
       void (async () => {
         try {
-          log('backtrace: scanning open PRs in monitored scope...')
+          board.log('backtrace: scanning open PRs in monitored scope...')
           fileLog({ level: 'info', event: 'backtrace_start' })
           const backtraceScopes = await buildScopesFromConfig(config, token)
           const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(backtraceScopes, config, token)
           if (queued.length === 0) {
-            log('backtrace: no unreviewed open PRs found')
+            board.log('backtrace: no unreviewed open PRs found')
           } else {
             const parts = [`${queued.length} PR${queued.length !== 1 ? 's' : ''} queued`]
             if (alreadyReviewed > 0) parts.push(`${alreadyReviewed} already reviewed`)
             if (skippedAuthor > 0) parts.push(`${skippedAuthor} skipped (author filter)`)
-            log(`backtrace: ${parts.join(', ')}`)
+            board.log(`backtrace: ${parts.join(', ')}`)
           }
           fileLog({ level: 'info', event: 'backtrace_complete', queued: queued.length, already_reviewed: alreadyReviewed, skipped_author: skippedAuthor })
           void Promise.all(queued.map(pr => handlePR({
@@ -258,17 +289,21 @@ export async function runServe(opts: ServeOpts = {}) {
               owner: { login: pr.owner },
               clone_url: `https://github.com/${pr.owner}/${pr.repo}.git`,
             },
-          }, config, token, log)))
+          }, config, token, board)))
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
-          log(`backtrace: scan failed — ${msg}`)
+          board.log(`backtrace: scan failed — ${msg}`)
           fileLog({ level: 'warn', event: 'backtrace_error', message: msg })
         }
       })()
     }
+
+    board.setTunnel('serve', webhookUrl, true)
+    board.start()
   })
 
   process.on('SIGINT', () => {
+    board.stop()
     console.log('\nShutting down...')
     fileLog({ level: 'info', event: 'session_end', command: 'serve' })
     server.close(() => process.exit(0))

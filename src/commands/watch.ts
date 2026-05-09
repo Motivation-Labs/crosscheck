@@ -322,8 +322,11 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (err.code === 'EADDRINUSE') {
         reject(new Error(
           `Port ${config.server.port} is already in use.\n` +
-          `  Another crosscheck instance may be running. Stop it first, or change the port in config:\n` +
-          `    server:\n      port: 7892`
+          `  Another crosscheck watch instance is likely running on this port.\n` +
+          `  Stop it first — running two instances against the same scopes will\n` +
+          `  register duplicate webhooks and post duplicate reviews.\n` +
+          `  To run intentionally on a different port, change it in config:\n` +
+          `    server:\n      port: ${config.server.port + 1}`
         ))
       } else {
         reject(err)

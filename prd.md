@@ -630,6 +630,54 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
 
+- [ ] **Fix `verdict: null` — handle Codex reviews that complete without a parseable verdict line** — when Codex finishes a review but its output contains no `VERDICT: APPROVE|NEEDS WORK|BLOCK` line, the current code logs `verdict: null` and posts the comment without a verdict badge. The missing verdict silently degrades the review experience and breaks downstream features (`diagnose` verdict counts, `impact` BLOCK metrics). This fix adds a fallback extraction pass, a warning comment annotation, and a structured log field so the failure is visible.
+  - **User:** Anyone running `crosscheck watch`/`serve` with Codex as the reviewer — especially on large diffs where Codex may truncate or reformat output.
+  - **Acceptance Criteria:**
+    - Primary extraction: scan the full Codex output for the last line matching `/^VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)/i`. Case-insensitive; tolerate `NEEDS_WORK` and `NEEDS WORK` spellings.
+    - Fallback extraction: if the primary scan fails, scan for any line containing `APPROVE`, `NEEDS WORK`, `NEEDS_WORK`, or `BLOCK` as a standalone word (not mid-sentence). Use the last match.
+    - If both scans fail, set verdict to `null`, prepend a warning line to the posted comment: `> ⚠️ crosscheck could not extract a verdict from this review. See the full output below.`, and log `{ event: 'verdict_parse_failed', reviewer: 'codex', output_length: N }` at `warn` level.
+    - Verdict extraction logic is extracted into a pure function `parseVerdict(text: string): 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | null` in `src/lib/verdict.ts` — shared by `codex.ts` and `claude.ts`.
+    - `crosscheck diagnose` counts `verdict_parse_failed` events as a distinct error pattern with a suggestion: "Codex did not emit a VERDICT line — check your Codex instructions file or lower the quality tier."
+  - **Technical Notes:**
+    - New file: `src/lib/verdict.ts` — `parseVerdict(text)`. Primary regex: `/^VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)\s*$/im`. Fallback regex: `/\b(APPROVE|NEEDS[_ ]WORK|BLOCK)\b/gi` — last match wins.
+    - `src/reviewers/codex.ts`: replace inline verdict parsing with `parseVerdict(output)`.
+    - `src/reviewers/claude.ts`: same — also use `parseVerdict`.
+    - `src/commands/watch.ts` / `review.ts`: when `verdict === null`, prepend the warning line to the comment body before posting; log `verdict_parse_failed`.
+    - `src/lib/logger.ts`: add `verdict_parse_failed` to the known event union type.
+  - **Tests Required:** `parseVerdict` with correct `VERDICT:` line → correct verdict; with `NEEDS_WORK` spelling → `NEEDS_WORK`; with verdict buried mid-paragraph (fallback) → correct; with no verdict → `null`; with multiple verdicts → last one wins; with `BLOCK` in a sentence ("this will not block deployment") → does not match.
+
+- [ ] **Codex reviewer quality tier and model config** — the 5+ minute Codex review on large diffs (observed: 318s for PR #42 on o4-mini) is at the high end and blocks the watch terminal for the full duration. Expose `quality` and `model` as per-vendor config fields so users can trade review depth for speed.
+  - **User:** Anyone running `crosscheck watch` who finds Codex reviews taking 3–6 minutes on large diffs.
+  - **Acceptance Criteria:**
+    - New config fields under `vendors.codex`:
+      - `quality: 'low' | 'medium' | 'high'` — maps to Codex `--quality` flag; default `'medium'`.
+      - `model: string | null` — passed as `--model <value>` to Codex; default `null` (uses Codex's own default). Only usable with API key auth; subscription auth ignores this field with a logged warning.
+    - `crosscheck watch` banner `profile` row shows the active quality tier: `  profile  personal · watch · medium`.
+    - `crosscheck status` shows `vendors.codex.quality` and `vendors.codex.model` (or `default` if unset).
+    - `crosscheck.config.example.yml` documents both fields with comments explaining the speed/depth tradeoff.
+    - `get-started.md` adds a **Review speed** section explaining quality tiers and when to use each.
+  - **Technical Notes:**
+    - `src/config/schema.ts`: add `quality: z.enum(['low', 'medium', 'high']).default('medium')` and `model: z.string().nullable().default(null)` to the `codex` vendor sub-schema.
+    - `src/reviewers/codex.ts`: pass `--quality ${config.vendors.codex.quality}` to the Codex CLI call. If `model` is set, append `--model ${model}`; if `model` is set but auth is subscription-mode, log `warn: model override ignored — requires API key auth`.
+    - `src/commands/watch.ts`: read `config.vendors.codex.quality` for the banner profile row.
+    - `src/commands/status.ts`: add Codex quality and model to the vendor section.
+  - **Tests Required:** schema defaults to `medium` quality and `null` model; `codex.ts` passes `--quality low` when configured; `--model` flag omitted when `model` is null; `--model` flag omitted with a warning when subscription auth is detected; banner shows configured quality tier.
+
+- [ ] **Webhook re-registration flood on tunnel reconnect — deduplicate and back off** — when the smee/localhost.run tunnel drops and reconnects (new URL), `watch.ts` re-registers webhooks for all monitored repos. On a large org this produces a burst of GitHub API calls that can hit rate limits and fills the connectivity log with redundant entries. Add deduplication (skip re-registration if the webhook for a given URL is already registered) and exponential back-off for failed registrations.
+  - **User:** Anyone monitoring large orgs (10+ repos) or experiencing frequent tunnel reconnects.
+  - **Acceptance Criteria:**
+    - Before registering a webhook for a repo/org, check whether a webhook pointing to the new tunnel URL is already registered via `GET /repos/{owner}/{repo}/hooks` (or org equivalent). If a matching hook exists, skip the `POST` and log `webhook already registered — skipped`.
+    - After a tunnel reconnect, delete the old webhook (by stored hook ID) before registering the new one, rather than leaving orphaned hooks.
+    - Failed webhook registrations are retried with exponential back-off: 2s → 4s → 8s → give up. Log each retry attempt at `warn` level. Do not block the main event loop — registration runs in background.
+    - Connectivity log shows one summary line per tunnel reconnect event, not one line per repo: `  ✓ webhooks re-registered: 14/14 repos`.
+    - `crosscheck status` shows the count of active (known) webhooks and their URLs.
+  - **Technical Notes:**
+    - `src/github/webhook.ts`: add `getExistingWebhook(owner, repo, url, token): Promise<number | null>` — returns hook ID if a hook with matching `config.url` exists, else null.
+    - `src/commands/watch.ts`: store registered hook IDs in a `Map<string, number>` (key: `owner/repo` or `org`). On tunnel reconnect: 1) delete old hooks using stored IDs; 2) call `getExistingWebhook` for each scope; 3) skip `POST` if hook already exists (stale ID from a previous session). Retry loop: max 3 attempts with 2^n second delays.
+    - Connectivity log: buffer all per-repo results and emit a single aggregated line.
+    - `src/commands/status.ts`: show active webhook count.
+  - **Tests Required:** `getExistingWebhook` returns hook ID when matching URL exists; returns null when no match; registration skipped when hook already exists; old hook deleted before new registration on reconnect; retry fires on 422 response with correct delays; aggregated log line shows correct count; status shows hook count.
+
 ---
 
 ### Feature designs

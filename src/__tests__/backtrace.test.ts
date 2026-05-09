@@ -111,8 +111,8 @@ describe('scanUnreviewedPRs', () => {
   it('expands org scopes to individual repos', async () => {
     const scopes: BacktraceScope[] = [{ org: 'acme' }]
     mockListOrgRepos.mockResolvedValue([
-      { owner: 'acme', name: 'api' },
-      { owner: 'acme', name: 'frontend' },
+      { owner: 'acme', name: 'api', pushedAt: null },
+      { owner: 'acme', name: 'frontend', pushedAt: null },
     ])
     mockListOpenPRs.mockResolvedValue([])
 

@@ -9,14 +9,13 @@ import {
   loadConfig,
   resolveConfigPath,
   detectGitHubLogin,
-  promptDeploymentMode,
   patchDeploymentConfig,
 } from '../config/loader.js'
-import { listUserRepos, listUserOrgs, listOrgRepos } from '../github/client.js'
+import { listUserOrgs, listOrgRepos, fetchActiveRepos, type RepoActivity } from '../github/client.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { execSync } from 'child_process'
-import { promptRepoPicker } from '../lib/repo-picker.js'
+import { promptRepoPicker, promptSinglePicker, type PickerItem } from '../lib/repo-picker.js'
 
 export interface OnboardOpts {
   config?: string
@@ -45,6 +44,15 @@ function ask(question: string): Promise<string> {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     rl.question(question, answer => { rl.close(); resolve(answer.trim()) })
   })
+}
+
+function formatAge(date: Date): string {
+  const days = Math.floor((Date.now() - date.getTime()) / 86_400_000)
+  if (days === 0) return 'today'
+  if (days < 7) return `${days}d ago`
+  if (days < 30) return `${Math.floor(days / 7)}w ago`
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`
+  return `${Math.floor(days / 365)}y ago`
 }
 
 async function checkEnv(): Promise<EnvCheckResult> {
@@ -103,64 +111,57 @@ async function checkEnv(): Promise<EnvCheckResult> {
 async function promptVendorMode(
   claudeOk: boolean,
   codexOk: boolean,
-  currentMode: string | undefined,
-  currentClaudeEnabled: boolean,
-  currentCodexEnabled: boolean,
+  existingMode: string | undefined,
+  existingClaudeEnabled: boolean,
+  existingCodexEnabled: boolean,
   opts: OnboardOpts,
 ): Promise<VendorModeConfig> {
   const bothAvailable = claudeOk && codexOk
 
   if (!bothAvailable) {
-    // Only one CLI is available — auto-select single-vendor
     const vendor = claudeOk ? 'claude' : 'codex'
     console.log(`  Mode: ${chalk.cyan('single-vendor')} (only ${chalk.bold(vendor)} is available)`)
     return { mode: 'single-vendor', claudeEnabled: claudeOk, codexEnabled: codexOk }
   }
 
-  if (opts.yes && currentMode) {
-    console.log(`  Using existing mode: ${chalk.cyan(currentMode)}`)
-    return {
-      mode: currentMode as 'cross-vendor' | 'single-vendor',
-      claudeEnabled: currentClaudeEnabled,
-      codexEnabled: currentCodexEnabled,
-    }
+  if (opts.yes) {
+    const mode = (existingMode ?? 'cross-vendor') as 'cross-vendor' | 'single-vendor'
+    console.log(`  Mode: ${chalk.cyan(mode)}`)
+    return { mode, claudeEnabled: existingClaudeEnabled, codexEnabled: existingCodexEnabled }
   }
 
-  if (currentMode && !opts.yes) {
-    const keep = await ask(`  Current mode: ${chalk.cyan(currentMode)}. Keep this? [Y/n]: `)
-    if (keep.toLowerCase() !== 'n') {
-      return {
-        mode: currentMode as 'cross-vendor' | 'single-vendor',
-        claudeEnabled: currentClaudeEnabled,
-        codexEnabled: currentCodexEnabled,
-      }
-    }
-    console.log()
-  }
-
-  console.log('  How should reviews be assigned?\n')
-  console.log(`  [1] cross-vendor   — ${chalk.dim('Claude reviews Codex PRs; Codex reviews Claude PRs')}`)
-  console.log(`  [2] single-vendor  — ${chalk.dim('one AI reviews all PRs')}`)
-  console.log()
-  const choice = await ask('  Choice [1]: ')
+  const modeItems: PickerItem[] = [
+    { label: 'cross-vendor', description: 'Claude reviews Codex PRs; Codex reviews Claude PRs' },
+    { label: 'single-vendor', description: 'one AI reviews all PRs' },
+  ]
+  const defaultModeIdx = existingMode === 'single-vendor' ? 1 : 0
+  const modeIdx = await promptSinglePicker(modeItems, {
+    title: 'How should reviews be assigned?',
+    defaultIndex: defaultModeIdx,
+  })
   console.log()
 
-  if (choice === '2') {
-    console.log('  Which AI should review all PRs?\n')
-    console.log(`  [1] claude`)
-    console.log(`  [2] codex`)
-    console.log()
-    const vendorChoice = await ask('  Choice [1]: ')
-    console.log()
-    const vendor = vendorChoice === '2' ? 'codex' : 'claude'
-    return {
-      mode: 'single-vendor',
-      claudeEnabled: vendor === 'claude',
-      codexEnabled: vendor === 'codex',
-    }
+  if (modeIdx === 0) {
+    return { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true }
   }
 
-  return { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true }
+  // Single-vendor: ask which one
+  const defaultVendorIdx = (existingMode === 'single-vendor' && existingCodexEnabled && !existingClaudeEnabled) ? 1 : 0
+  const vendorItems: PickerItem[] = [
+    { label: 'claude', description: 'Claude Code reviews all PRs' },
+    { label: 'codex', description: 'OpenAI Codex reviews all PRs' },
+  ]
+  const vendorIdx = await promptSinglePicker(vendorItems, {
+    title: 'Which AI should review all PRs?',
+    defaultIndex: defaultVendorIdx,
+  })
+  console.log()
+
+  return {
+    mode: 'single-vendor',
+    claudeEnabled: vendorIdx === 0,
+    codexEnabled: vendorIdx === 1,
+  }
 }
 
 async function promptWorkflowPipeline(
@@ -169,36 +170,61 @@ async function promptWorkflowPipeline(
 ): Promise<WorkflowPreset> {
   if (opts.yes) {
     const preset: WorkflowPreset = currentAutoFixEnabled === true ? 'review-fix' : 'review-only'
-    console.log(`  Using existing pipeline: ${chalk.cyan(preset)}`)
+    console.log(`  Pipeline: ${chalk.cyan(preset)}`)
     return preset
   }
 
-  console.log('  What should happen after a review?\n')
-  console.log(`  [1] review only              — ${chalk.dim('AI posts a comment; you handle fixes')}`)
-  console.log(`  [2] review → fix             — ${chalk.dim('AI reviews, then auto-applies fixes')}  ${chalk.green('(recommended)')}`)
-  console.log(`  [3] review → fix → re-check  — ${chalk.dim('full loop: review, fix, re-review to confirm')}`)
-  console.log()
-  const choice = await ask('  Choice [2]: ')
+  const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+  const hasRecheckWorkflow = existsSync(globalWorkflowPath)
+  const defaultIdx = hasRecheckWorkflow ? 2 : (currentAutoFixEnabled ? 1 : 1)
+
+  const items: PickerItem[] = [
+    { label: 'review only', description: 'AI posts a comment; you handle fixes' },
+    { label: 'review → fix', description: 'AI reviews, then auto-applies fixes' },
+    { label: 'review → fix → re-check', description: 'full loop: review, fix, then re-review to confirm' },
+  ]
+
+  const idx = await promptSinglePicker(items, {
+    title: 'What should happen after a review?',
+    defaultIndex: defaultIdx,
+  })
   console.log()
 
-  if (choice === '1') return 'review-only'
-  if (choice === '3') return 'review-fix-recheck'
+  if (idx === 0) return 'review-only'
+  if (idx === 2) return 'review-fix-recheck'
   return 'review-fix'
 }
 
-async function promptConnectionType(current?: 'localhost.run' | 'smee'): Promise<'localhost.run' | 'smee'> {
-  return new Promise<'localhost.run' | 'smee'>(resolve => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    console.log('  How will GitHub reach your crosscheck server?\n')
-    console.log(`  [1] localhost.run  — ${chalk.dim('zero-config SSH tunnel; reconnects automatically, no install required')}`)
-    console.log(`  [2] smee.io        — ${chalk.dim('webhook relay; events queued while offline, stable channel URL')}`)
-    if (current) console.log(`\n  Current: ${current}`)
-    console.log()
-    rl.question('  Choice [1]: ', (answer) => {
-      rl.close()
-      resolve(answer.trim() === '2' ? 'smee' : 'localhost.run')
-    })
+async function promptConnectionType(
+  currentTunnel: 'localhost.run' | 'smee' | undefined,
+  opts: OnboardOpts,
+): Promise<'localhost.run' | 'smee'> {
+  if (opts.yes) {
+    const backend = currentTunnel ?? 'localhost.run'
+    console.log(`  Connection: ${chalk.cyan(backend)}`)
+    return backend
+  }
+
+  const items: PickerItem[] = [
+    {
+      label: 'localhost.run',
+      description: 'zero-config SSH tunnel — reconnects automatically, no install needed',
+    },
+    {
+      label: 'smee.io',
+      description: 'webhook relay — events queued while offline, stable channel URL',
+      hint: 'Get a free channel URL at smee.io/new — you\'ll paste it in the next step',
+    },
+  ]
+  const defaultIdx = currentTunnel === 'smee' ? 1 : 0
+
+  const idx = await promptSinglePicker(items, {
+    title: 'How will GitHub reach your crosscheck server?',
+    defaultIndex: defaultIdx,
   })
+  console.log()
+
+  return idx === 1 ? 'smee' : 'localhost.run'
 }
 
 // Workflow YAML for the recheck preset — written to ~/.crosscheck/workflow.yml
@@ -253,18 +279,24 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   } else if (opts.team) {
     deployment = 'team'
     console.log(`  Mode: ${chalk.cyan('team')} (--team flag)`)
-  } else if (currentDeployment && !opts.yes) {
-    const keep = await ask(`  Current mode: ${chalk.cyan(currentDeployment)}. Keep this? [Y/n]: `)
-    deployment = keep.toLowerCase() === 'n' ? await promptDeploymentMode() : currentDeployment
-  } else if (currentDeployment && opts.yes) {
+  } else if (opts.yes && currentDeployment) {
     deployment = currentDeployment
-    console.log(`  Using existing mode: ${chalk.cyan(deployment)}`)
+    console.log(`  Mode: ${chalk.cyan(deployment)}`)
   } else {
-    deployment = await promptDeploymentMode()
+    const deployItems: PickerItem[] = [
+      { label: 'personal', description: 'monitor your own repos; review only your PRs' },
+      { label: 'team', description: 'monitor org repos; review all PRs from any author' },
+    ]
+    const defaultDeployIdx = currentDeployment === 'team' ? 1 : 0
+    const deployIdx = await promptSinglePicker(deployItems, {
+      title: 'How are you using crosscheck?',
+      defaultIndex: defaultDeployIdx,
+    })
+    deployment = deployIdx === 1 ? 'team' : 'personal'
   }
   console.log()
 
-  // ── Step 3: Repo selection ─────────────────────────────────────────────────
+  // ── Step 3: Repo selection (hierarchical: namespace → repos) ───────────────
   console.log(chalk.bold('Step 3 — select repos to monitor'))
 
   let token: string
@@ -278,20 +310,15 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const login = detectGitHubLogin() ?? ''
   console.log(chalk.dim(`  Fetching repos for ${login || 'your account'}...`))
 
-  const [personalRepos, orgs] = await Promise.all([
-    login ? listUserRepos(login, token, true).catch(() => []) : Promise.resolve([]),
-    listUserOrgs(token).catch(() => []),
+  const [personalActivityRepos, orgs] = await Promise.all([
+    login ? fetchActiveRepos(login, token).catch((): RepoActivity[] => []) : Promise.resolve<RepoActivity[]>([]),
+    listUserOrgs(token).catch((): string[] => []),
   ])
 
+  type OrgRepo = Awaited<ReturnType<typeof listOrgRepos>>[number]
   const orgRepoLists = await Promise.all(
-    orgs.map(org => listOrgRepos(org, token).catch(() => []))
+    orgs.map(org => listOrgRepos(org, token).catch((): OrgRepo[] => []))
   )
-
-  const allRepos: string[] = []
-  for (const r of personalRepos) allRepos.push(`${r.owner}/${r.name}`)
-  for (let i = 0; i < orgs.length; i++) {
-    for (const r of orgRepoLists[i]) allRepos.push(`${r.owner}/${r.name}`)
-  }
 
   const currentRepoKeys = new Set(
     (existingConfig?.repos ?? []).map(r => `${r.owner}/${r.name}`)
@@ -306,37 +333,105 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     selectedOrgs = [...currentOrgs]
     console.log(`  Using existing repo selection (${selectedRepos.length} repos, ${selectedOrgs.length} orgs)`)
   } else {
-    if (allRepos.length === 0) {
+    const totalRepos = personalActivityRepos.length + orgRepoLists.reduce((sum, l) => sum + l.length, 0)
+
+    if (totalRepos === 0) {
       console.log(chalk.yellow('  No repos found. You can add repos manually in your config file.'))
       selectedRepos = []
       selectedOrgs = []
     } else {
-      const sorted = [
-        ...allRepos.filter(r => currentRepoKeys.has(r)),
-        ...allRepos.filter(r => !currentRepoKeys.has(r)),
-      ]
-
-      console.log(chalk.dim(`  Found ${sorted.length} repos. Use arrows + space to select, enter to confirm.\n`))
-      const picked = await promptRepoPicker(sorted, {
-        title: 'Select repos to monitor:',
-        initialSelected: [...currentRepoKeys],
-      })
       console.log()
+      selectedRepos = []
+      selectedOrgs = [...currentOrgs]
 
+      // Build namespace list: personal account + each org
+      const namespaces: string[] = []
+      if (login && personalActivityRepos.length > 0) namespaces.push(login)
+      for (const org of orgs) namespaces.push(org)
+
+      let namespacesToBrowse: string[]
+
+      if (namespaces.length <= 1) {
+        // Only one namespace — skip group picker
+        namespacesToBrowse = namespaces
+      } else {
+        // Step 3a: pick which namespaces to browse
+        const nsDescriptions = new Map<string, string>()
+        if (login) {
+          const c = personalActivityRepos.length
+          nsDescriptions.set(login, `personal · ${c} repo${c === 1 ? '' : 's'}`)
+        }
+        for (let i = 0; i < orgs.length; i++) {
+          const c = orgRepoLists[i].length
+          nsDescriptions.set(orgs[i], `org · ${c} repo${c === 1 ? '' : 's'}`)
+        }
+
+        // Pre-select namespaces that already have configured repos/orgs; default all on first run
+        const currentNamespaces = new Set<string>()
+        for (const key of currentRepoKeys) currentNamespaces.add(key.split('/')[0])
+        for (const org of currentOrgs) currentNamespaces.add(org)
+        const initialNs = currentNamespaces.size === 0
+          ? namespaces
+          : namespaces.filter(ns => currentNamespaces.has(ns))
+
+        namespacesToBrowse = await promptRepoPicker(namespaces, {
+          title: 'Which accounts do you want to browse?',
+          initialSelected: initialNs,
+          getDescription: (ns) => nsDescriptions.get(ns) ?? '',
+          pageSize: Math.min(namespaces.length, 6),
+        })
+        console.log()
+      }
+
+      // Step 3b: for each selected namespace, show a focused repo picker
+      for (const ns of namespacesToBrowse) {
+        let repoKeys: string[]
+        const descMap = new Map<string, string>()
+
+        if (ns === login) {
+          // Personal repos — already sorted by activity (tier 1 → tier 3, then pushedAt desc)
+          repoKeys = personalActivityRepos.map(r => r.fullName)
+          for (const r of personalActivityRepos) {
+            descMap.set(r.fullName, formatAge(r.pushedAt))
+          }
+        } else {
+          // Org repos — already sorted by pushedAt desc (sort=pushed in API call)
+          const orgIdx = orgs.indexOf(ns)
+          const orgRepos = orgIdx >= 0 ? orgRepoLists[orgIdx] : []
+          repoKeys = orgRepos.map(r => `${r.owner}/${r.name}`)
+          for (const r of orgRepos) {
+            if (r.pushedAt) descMap.set(`${r.owner}/${r.name}`, formatAge(r.pushedAt))
+          }
+        }
+
+        if (repoKeys.length === 0) continue
+
+        const initialSel = repoKeys.filter(k => currentRepoKeys.has(k))
+
+        const picked = await promptRepoPicker(repoKeys, {
+          title: `Select repos from ${ns}:`,
+          initialSelected: initialSel,
+          getDescription: (key) => descMap.get(key) ?? '',
+          pageSize: 5,
+        })
+        console.log()
+        selectedRepos.push(...picked)
+      }
+
+      // Offer org-level monitoring when 3+ repos from the same org are selected
       const orgSet = new Set(orgs)
       const orgCounts: Record<string, number> = {}
-      for (const r of picked) {
+      for (const r of selectedRepos) {
         const owner = r.split('/')[0]
         if (orgSet.has(owner)) orgCounts[owner] = (orgCounts[owner] ?? 0) + 1
       }
-      const orgOffers = Object.entries(orgCounts).filter(([, count]) => count >= 3).map(([org]) => org)
-
-      selectedOrgs = [...currentOrgs]
-      selectedRepos = picked
+      const orgOffers = Object.entries(orgCounts)
+        .filter(([, count]) => count >= 3)
+        .map(([org]) => org)
 
       for (const org of orgOffers) {
         if (currentOrgs.has(org)) continue
-        const answer = opts.yes ? 'n' : await ask(`  Monitor all of ${chalk.cyan(org)} instead of individual repos? [y/N]: `)
+        const answer = await ask(`  Monitor all of ${chalk.cyan(org)} instead of individual repos? [y/N]: `)
         if (answer.toLowerCase() === 'y') {
           selectedOrgs.push(org)
           selectedRepos = selectedRepos.filter(r => !r.startsWith(`${org}/`))
@@ -369,25 +464,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   // ── Step 6: Connection type ────────────────────────────────────────────────
   console.log(chalk.bold('Step 6 — connection type'))
   const currentTunnel = existingConfig?.tunnel?.backend
-
-  let tunnelBackend: 'localhost.run' | 'smee'
-  if (opts.yes && currentTunnel) {
-    tunnelBackend = currentTunnel
-    console.log(`  Using existing connection type: ${chalk.cyan(tunnelBackend)}`)
-  } else if (currentTunnel && !opts.yes) {
-    const keep = await ask(`  Current: ${chalk.cyan(currentTunnel)}. Keep this? [Y/n]: `)
-    tunnelBackend = keep.toLowerCase() === 'n' ? await promptConnectionType(currentTunnel) : currentTunnel
-  } else {
-    tunnelBackend = await promptConnectionType()
-  }
+  let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
   let smeeChannel = existingConfig?.tunnel?.smee_channel ?? ''
   if (tunnelBackend === 'smee') {
     if (smeeChannel) {
       console.log(`  smee channel ${chalk.cyan(smeeChannel)}`)
     } else if (!opts.yes) {
-      console.log(chalk.dim('  smee.io requires a channel URL. Create one at https://smee.io/new, then paste it here.'))
-      console.log(chalk.dim('  Leave blank to fall back to localhost.run.\n'))
+      console.log(chalk.dim('  Paste your smee.io channel URL below (leave blank to use localhost.run instead).\n'))
       const channel = await ask('  smee channel URL: ')
       if (channel) {
         smeeChannel = channel
@@ -396,7 +480,6 @@ export async function runOnboard(opts: OnboardOpts = {}) {
         console.log(chalk.yellow('  No channel provided — falling back to localhost.run.'))
       }
     } else {
-      // --yes with no existing channel: smee is unusable, fall back
       tunnelBackend = 'localhost.run'
       console.log(chalk.yellow('  smee selected but no channel configured — falling back to localhost.run.'))
       console.log(chalk.dim('  Set tunnel.smee_channel in config.yml and re-run onboard to use smee.io.'))
@@ -499,6 +582,6 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   console.log()
 
-  // ── Step 8: Next step hint ────────────────────────────────────────────────
+  // ── Next step hint ─────────────────────────────────────────────────────────
   console.log(chalk.dim('  Run crosscheck watch to start monitoring.\n'))
 }

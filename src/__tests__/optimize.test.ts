@@ -7,18 +7,30 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
   return {
     mode: 'cross-vendor',
     orgs: [],
+    users: [],
     repos: [],
-    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], allowed_authors: [], author_routes: {} },
+    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
-      claude: { enabled: claudeEnabled, auth: 'subscription', effort: 'medium' },
-      codex: { enabled: codexEnabled, auth: 'subscription', effort: 'medium' },
+      claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium' },
+      codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium' },
     },
     logs: { enabled: false, retention_days: 7 },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
+    backtrace: { enabled: true },
+    display: { theme: { bar_fill: 'blue', bar_empty: 'dim', cr_approve: 'green', cr_needs_work: 'yellow', cr_block: 'red', fix_fill: 'cyan' } },
+    post_review: {
+      auto_fix: {
+        enabled: false,
+        trigger: 'on_issues',
+        min_severity: 'warning',
+        fixer: 'same-as-author',
+        delivery: { mode: 'pull_request', pr_title: 'fix: address CR issues in #{original_pr_title}', label: 'cr-autofix' },
+      },
+    },
   }
 }
 
@@ -46,6 +58,7 @@ function makeReport(
     summary: { total_reviews: 0, successful: 0, failed: 0, failure_rate: 0 },
     errors: [],
     verdict_distribution: { APPROVE: 0, NEEDS_WORK: 0, BLOCK: 0 },
+    verdict_parse_failures: 0,
     repos_seen: [],
     languages_detected: [],
     reviewer_performance: performance,

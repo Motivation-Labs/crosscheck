@@ -2,7 +2,7 @@ import { execa } from 'execa'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import type { QualityConfig } from '../config/schema.js'
+import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { readInstructions } from '../lib/instructions.js'
 
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
@@ -38,13 +38,13 @@ export async function runCodexReview(
   baseBranch: string,
   prTitle: string,
   quality: QualityConfig,
-  overrideModel?: string,
-  authMode: 'subscription' | 'api-key' = 'subscription',
+  vendor: CodexVendorConfig,
+  stepInstructions?: string,
   onLog?: (msg: string) => void,
 ): Promise<string> {
   // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
-  const model = authMode === 'api-key'
-    ? (overrideModel ?? TIER_MODELS_API[quality.tier] ?? 'o4-mini')
+  const model = vendor.auth === 'api-key'
+    ? (vendor.model ?? TIER_MODELS_API[quality.tier] ?? 'o4-mini')
     : undefined
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
 
@@ -54,9 +54,9 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  // Adaptive instructions from ~/.crosscheck/instructions.md (managed by `crosscheck optimize`)
-  const adaptiveInstructions = readInstructions(repoDir)
-  const instructionsNote = [focusNote, customNote, adaptiveInstructions].filter(Boolean).join('\n\n')
+  // stepInstructions from workflow step takes precedence; fall back to ~/.crosscheck/instructions.md
+  const behaviorInstructions = stepInstructions !== undefined ? stepInstructions : readInstructions(repoDir)
+  const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 

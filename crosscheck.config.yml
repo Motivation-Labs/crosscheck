@@ -50,11 +50,32 @@ orgs:
 # ─── Routing (cross-vendor mode only) ────────────────────────────────────────
 # Which AI reviews PRs from which author patterns
 routing:
+  allowed_authors:
+    - beingzy  # auto-detected from gh auth
   codex_reviews_patterns:
     - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
   claude_reviews_patterns:
     - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
     - "Co-Authored-By: codex"
+
+# ─── Post-Review Auto-Fix ────────────────────────────────────────────────────
+# Complete loop:
+#   agent opens PR  →  opposite vendor reviews  →  authoring vendor fixes
+#                              ↓
+#              fix PR opened targeting original branch
+#                              ↓
+#              human reviews fix PR → merges → original PR updated
+#
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues          # only run when reviewer found actionable issues
+    min_severity: warning       # skip info-level / cosmetic findings
+    fixer: same-as-author       # Claude-authored PR → Claude fixes; Codex-authored → Codex fixes
+    delivery:
+      mode: pull_request        # opens a fix PR; human approves before merge
+      pr_title: "fix: address CR issues in #{original_pr_title}"
+      label: cr-autofix
 
 # ─── Server (serve mode only) ────────────────────────────────────────────────
 server:

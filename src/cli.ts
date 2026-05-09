@@ -33,13 +33,19 @@ program
   .command('serve')
   .description('[BETA] Always-on webhook server (mac-mini / home server mode)')
   .option('-c, --config <path>', 'config file path')
-  .action((opts: { config?: string }) => runServe(opts.config))
+  .option('--personal', 'personal mode this session only (does not save to config)')
+  .option('--team', 'team mode this session only (does not save to config)')
+  .option('--reconfigure', 're-run deployment setup and save new choice to config')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runServe(opts))
 
 program
   .command('watch')
   .description('Local dev mode — listen for PRs via gh webhook forward')
   .option('-c, --config <path>', 'config file path')
-  .action((opts: { config?: string }) => void runWatch(opts.config))
+  .option('--personal', 'personal mode this session only (does not save to config)')
+  .option('--team', 'team mode this session only (does not save to config)')
+  .option('--reconfigure', 're-run deployment setup and save new choice to config')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-url>')

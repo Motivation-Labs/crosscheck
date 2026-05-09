@@ -24,6 +24,7 @@
   - [impact](#crosscheck-impact)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
+- [Post-review auto-fix](#post-review-auto-fix)
 - [FAQ](#faq)
 
 ---
@@ -184,6 +185,43 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 ---
 
 ## Step 3 — Choose a deployment mode
+
+### Personal vs team
+
+On first run, `crosscheck watch` (or `crosscheck serve`) will ask how you're using it:
+
+```
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+  Choice [1]:
+```
+
+The choice is saved to `crosscheck.config.yml` as `deployment: personal` or `deployment: team`.
+
+**Personal mode** (default, recommended for individuals)
+- Monitors all repos under your personal GitHub account + all orgs you belong to
+- Only reviews PRs you authored — ignores everyone else's
+- Sets `routing.allowed_authors` to your GitHub login automatically
+
+**Team mode** (recommended for shared machines)
+- Monitors all orgs you belong to (no personal repos)
+- Reviews all PRs from any author — no author filter applied
+
+You can override the saved choice for a single session without touching the config:
+
+```bash
+crosscheck watch --personal   # personal mode this session only
+crosscheck watch --team       # team mode this session only
+```
+
+To re-run the prompt and permanently change your choice:
+
+```bash
+crosscheck watch --reconfigure
+```
 
 ### Watch mode — for your development machine
 
@@ -561,17 +599,25 @@ The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caugh
 
 ## Configuration
 
-crosscheck looks for a config file in these locations (first found wins):
+crosscheck stores its config in `~/.crosscheck/config.yml` by default — persistent across projects, no per-repo file needed. It also looks in these locations (first found wins):
 
 1. `./crosscheck.config.yml`
 2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml`
+3. `~/.crosscheck/config.yml` ← **default location**
 
-Run `crosscheck init` to generate a starter file with all options commented.
+Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
+
+Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 days by default.
 
 ### Full reference
 
 ```yaml
+# ── Deployment ────────────────────────────────────────────────────────────────
+# Set automatically on first run. Re-run the prompt with: crosscheck watch --reconfigure
+# personal — monitor your repos + orgs; review only your PRs
+# team     — monitor org repos only; review all PRs from any author
+# deployment: personal
+
 # ── Mode ──────────────────────────────────────────────────────────────────────
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  Claude ↔ Codex review each other
@@ -605,24 +651,43 @@ budget:
   per_review_usd: 2.00      # passed to claude --max-budget-usd
 
 # ── Orgs — covers all repos in each org with one webhook ─────────────────────
-# Takes priority over `repos` when both are set.
 orgs:
   - motivation-labs
   - codatta
 
+# ── Users — monitors all repos owned by personal GitHub accounts (non-org) ───
+# At startup, crosscheck enumerates each user's repos and registers webhooks.
+# Useful when your AI agents open PRs across many personal repos.
+# Combines with `orgs` and `repos` — all configured sources are additive.
+users:
+  - beingzy           # your personal account
+  # - my-agent-login  # a bot account that pushes to its own repos
+
 # ── Repos — for monitoring specific repos only ────────────────────────────────
-# Omit when using `orgs`. In watch mode, auto-detected from git remote if empty.
+# Omit when using `orgs`/`users`. Auto-detected from git remote if all are empty.
 repos:
   - owner: acme
     name: specific-repo
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
+  # Origin is detected via a four-signal chain:
+  #   1. PR body patterns below (fastest)
+  #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
+  #   3. Branch prefix (claude/ or codex/)
+  #   4. author_routes fallback (last resort)
   codex_reviews_patterns:
-    - "Generated with \\[Claude Code\\]"
+    - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
+    - "Co-Authored-By: Claude"              # commit trailer
   claude_reviews_patterns:
-    - "Generated with \\[OpenAI Codex\\]"
-    - "Co-Authored-By: codex"
+    - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
+    - "Co-Authored-By: codex"               # commit trailer
+
+  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
+  claude_branch_prefixes:
+    - "claude/"
+  codex_branch_prefixes:
+    - "codex/"
 
   # Restrict reviews to PRs opened by these GitHub logins.
   # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.
@@ -630,12 +695,11 @@ routing:
   allowed_authors:
     - your-github-login  # auto-detected from gh auth
 
-  # Author-based routing fallback — used when no body pattern matches.
+  # Author-based routing fallback (signal 4) — used when no pattern or prefix matches.
   # Maps GitHub login → vendor origin so crosscheck routes PRs even without
   # the attribution footer (e.g. when creating PRs via gh CLI directly).
   author_routes:
     your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
-    - your-codex-bot-account
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.
@@ -652,6 +716,26 @@ impact:
   assumed_human_review_minutes: 60   # baseline for time-saved calculation
   hourly_rate_usd: 150               # for --money estimate
   defect_cost_usd: 150               # per issue caught, for --money estimate
+
+# ── Post-review auto-fix ──────────────────────────────────────────────────────
+# Runs after each review. When issues are found, the authoring vendor opens a
+# fix PR targeting the original branch. You approve and merge it; the original
+# PR updates automatically.
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues        # on_issues | always | never
+    min_severity: warning     # error | warning | info — skip cosmetic findings
+    # same-as-author: the vendor that wrote the PR also applies the fix
+    # In cross-vendor mode: Claude-authored → Claude fixes; Codex-authored → Codex fixes
+    fixer: same-as-author     # same-as-author | same-as-reviewer | codex | claude
+    delivery:
+      mode: pull_request      # pull_request | commit | comment
+      # pull_request → fix PR targets original branch; human approves before merge
+      # commit       → fixes pushed directly onto the original PR branch
+      # comment      → suggested fixes posted as review comments only
+      pr_title: "fix: address CR issues in #{original_pr_title}"
+      label: cr-autofix       # GitHub label applied to the fix PR
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
@@ -715,15 +799,38 @@ clone PR branch into temp directory
             ▼
     post comment to PR via GitHub API
     delete temp clone
+            │
+            ▼  post_review.auto_fix (if enabled and issues found)
+    authoring vendor reads review comment
+            │
+    ├─ claude --print ...  (Claude authored the PR)
+    │  or
+    └─ codex ...           (Codex authored the PR)
+            │
+            ▼
+    opens fix PR → fix/cr-<pr-number>-review-issues → original branch
+    (you review and merge the fix PR; original PR updates automatically)
 ```
 
 ### PR origin detection
 
+crosscheck uses a four-signal chain to determine whether a PR was authored by Claude Code, Codex, or a human:
+
+1. **PR body** — looks for attribution footers (e.g. `Generated with [Claude Code]`)
+2. **Commit messages** — scans all commit messages for `Co-Authored-By:` trailers
+3. **Branch prefix** — `claude/` → Claude origin; `codex/` → Codex origin
+4. **`author_routes`** — per-login fallback in config
+
+If none match, origin is `human` and the PR is skipped in cross-vendor mode.
+
 | Default pattern | Matches |
 |---|---|
-| `Generated with \[Claude Code\]` | PRs opened by Claude Code |
-| `Generated with \[OpenAI Codex\]` | PRs opened by Codex CLI |
-| `Co-Authored-By: codex` | Commits co-authored by Codex |
+| `Generated with \[Claude Code\]` | Claude Code attribution footer in PR body |
+| `Generated with \[OpenAI Codex\]` | Codex attribution footer in PR body |
+| `Co-Authored-By: Claude` | Commit trailers from Claude Code |
+| `Co-Authored-By: codex` | Commit trailers from Codex |
+| branch prefix `claude/` | Branch naming convention for Claude-authored PRs |
+| branch prefix `codex/` | Branch naming convention for Codex-authored PRs |
 
 ### Reviewer assignment
 
@@ -780,6 +887,39 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 
 ---
 
+## Post-review auto-fix
+
+When `post_review.auto_fix.enabled` is `true` (the default), crosscheck completes the full loop automatically after every review that finds issues:
+
+```
+agent opens PR #42  →  opposite vendor reviews  →  issues found?
+                                                         │ yes
+                                        authoring vendor generates fixes
+                                                         │
+                                    fix PR #43 opened → feat/my-feature
+                                                         │
+                                    you review and merge PR #43
+                                                         │
+                                    PR #42 updates → you merge to main
+```
+
+**Key design decisions:**
+
+| Setting | Default | Why |
+|---|---|---|
+| `fixer: same-as-author` | the vendor that wrote the PR also fixes it | The authoring agent knows its own code and style best |
+| `delivery: pull_request` | opens a new PR, doesn't push directly | You stay in the loop — no code lands without your approval |
+| `trigger: on_issues` | only fires when the reviewer found warnings or worse | Skips the fix step on clean PRs |
+| `min_severity: warning` | ignores info/cosmetic findings | Avoids noisy fix PRs for style-only comments |
+
+**Fix PR branch naming:** `fix/cr-<original-pr-number>-review-issues`
+
+**Original PR number:** never changes. The fix PR targets the original branch; once merged, its commits appear in the original PR automatically.
+
+**To disable:** set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`.
+
+---
+
 ## FAQ
 
 ### How does crosscheck improve over time?
@@ -796,19 +936,38 @@ It picks automatically:
 
 The agent used for `optimize` is independent of which agent reviews your PRs — `optimize` is about improving the instructions, not reviewing code.
 
-### What is `~/.crosscheck/instructions.md` and can I edit it?
+### How do I customize reviewer behavior?
 
-Yes — it is a plain Markdown file that both `codex` and `claude` read before every review. On first use, crosscheck seeds it with safe defaults (no build-tool constraints, a focused review prompt, and the VERDICT format). You can edit it manually at any time. `crosscheck optimize --apply` rewrites it, so keep a backup or use version control if you've made custom edits you want to preserve.
+The primary place is the workflow file. Each step has an `instructions` field that is passed verbatim to the reviewer or fixer agent:
 
-To reset to defaults, delete the file:
+```yaml
+# .crosscheck/workflow.yml
+steps:
+  - name: review
+    type: review
+    reviewer: auto
+    instructions: |
+      Do not suggest TypeScript patterns — this is a Rust project.
+      Focus on memory safety and error handling.
+      ## Verdict
+      End with: VERDICT: APPROVE | NEEDS_WORK | BLOCK
+  - name: fix
+    type: fix
+    reviewer: origin
+    when: "review.verdict != 'APPROVE'"
+    instructions: "Only fix issues explicitly called out. Do not refactor unrelated code."
+```
+
+`~/.crosscheck/instructions.md` serves as a fallback when a workflow step has no `instructions:` field. `crosscheck optimize --apply` writes to that file to persist learned improvements across sessions.
+
+To reset instructions.md to defaults, delete the file:
 ```bash
 rm ~/.crosscheck/instructions.md
 ```
-The next review will re-seed it from the built-in defaults.
 
-### Can I have per-project instructions?
+### Can I have per-project workflow?
 
-Yes. Create `.crosscheck/instructions.md` in your repo root. crosscheck checks for a project-level file first and uses it instead of the user-level one. This lets you enforce project-specific constraints (e.g. "this is a Rust project — do not suggest TypeScript patterns") without affecting other repos.
+Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
 
 ### What is `AGENT.md`?
 
@@ -835,7 +994,7 @@ crosscheck fetches the PR base branch (e.g. `staging`) into the temp clone befor
 npm install -g smee-client
 ```
 
-Visit [smee.io/new](https://smee.io/new) and copy the channel URL. Then in `crosscheck.config.yml`:
+Visit [smee.io/new](https://smee.io/new) and copy the channel URL. Then in `~/.crosscheck/config.yml`:
 
 ```yaml
 tunnel:
@@ -843,8 +1002,18 @@ tunnel:
   smee_channel: https://smee.io/your-channel-id
 ```
 
-Register the smee channel URL as your GitHub webhook Payload URL once. crosscheck will forward events from the channel to the local server automatically. Unlike `localhost.run`, no re-registration is needed on restart.
+crosscheck registers the smee channel URL as your GitHub webhook automatically on first `watch` start. The channel URL never changes, so no re-registration is needed on restart. Unlike `localhost.run`, events are queued while you're offline and replayed when you reconnect.
 
+
+### Can I disable the auto-fix step?
+
+Yes. Set `post_review.auto_fix.enabled: false` in your config, or set `trigger: never`. You can also raise `min_severity` to `error` to limit fixes to blocking issues only.
+
+To push fixes directly without a separate PR (skipping your review), switch to `delivery: commit`. To get suggested fixes as review comments without any code push, use `delivery: comment`.
+
+### Why does the fixer use the same vendor that wrote the PR?
+
+The authoring agent has the most context about its own code — the same style, constraints, and intent behind the original changes. Using `fixer: same-as-author` keeps the feedback loop tight: the agent writes the code, another agent reviews it, the original agent fixes it. You can override this to `same-as-reviewer`, `codex`, or `claude` if you prefer a different arrangement.
 
 ### Does optimize run automatically?
 

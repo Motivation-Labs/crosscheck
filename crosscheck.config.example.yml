@@ -2,6 +2,13 @@
 # This file is designed to be easily read and modified by coding agents.
 # All fields are optional — crosscheck uses sensible defaults.
 
+# ─── Deployment ──────────────────────────────────────────────────────────────
+# Set automatically on first run of `crosscheck watch` or `crosscheck serve`.
+# personal — monitor your own repos and orgs; review only PRs you author
+# team     — monitor org repos only; review all PRs from any author
+# Absent = first-run prompt will ask you to choose.
+# deployment: personal
+
 # ─── Mode ────────────────────────────────────────────────────────────────────
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  each AI reviews the other's PRs (Claude ↔ Codex)
@@ -49,6 +56,15 @@ orgs:
   - motivation-labs
   - codatta
 
+# ─── Users ───────────────────────────────────────────────────────────────────
+# Monitor all repos owned by personal GitHub accounts (non-org).
+# At startup, crosscheck enumerates each user's repos and registers webhooks.
+# Useful when your AI agents open PRs across many personal repos.
+# Combines with `orgs` and `repos` — all configured sources are additive.
+# users:
+#   - beingzy          # your personal account
+#   - my-agent-login   # a bot account that pushes to its own repos
+
 # ─── Repos ───────────────────────────────────────────────────────────────────
 # Omit entirely to auto-detect from `git remote` (useful in watch mode)
 # repos: still works for monitoring specific repos only
@@ -75,12 +91,28 @@ routing:
   # author_routes:
   #   beingzy: claude
 
-  # Body-pattern matching — determines which reviewer is assigned
+  # Fallback reviewer when origin cannot be determined (no pattern/branch/route matched).
+  # 'auto'  = pick whichever vendor is currently authenticated (codex first, then claude).
+  # 'codex' / 'claude' = always use that vendor.
+  # null    = skip the PR (legacy cross-vendor behaviour).
+  fallback_reviewer: auto
+
+  # Branch-prefix routing — checked when body and commit patterns don't match.
+  # Agents should branch with these prefixes (claude/* and codex/*) so origin is
+  # always detectable even without attribution text in the PR body.
+  claude_branch_prefixes:
+    - "claude/"
+  codex_branch_prefixes:
+    - "codex/"
+
+  # Body and commit pattern matching — checked first, before branch prefix.
+  # Patterns are matched against both the PR body and commit messages (Co-Authored-By trailers).
   codex_reviews_patterns:
-    - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
+    - "Generated with \\[Claude Code\\]"    # PR body attribution footer
+    - "Co-Authored-By: Claude"              # commit trailer added by Claude Code
   claude_reviews_patterns:
-    - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
-    - "Co-Authored-By: codex"
+    - "Generated with \\[OpenAI Codex\\]"   # PR body attribution footer
+    - "Co-Authored-By: codex"               # commit trailer added by Codex
 
 # ─── Tunnel (watch mode only) ────────────────────────────────────────────────
 # Controls how crosscheck watch receives GitHub webhook events on your laptop.
@@ -107,9 +139,63 @@ server:
   webhook_path: /webhook
   # pid_file: ~/.crosscheck/crosscheck.pid  # for daemon management
 
+# ─── Post-Review Auto-Fix ────────────────────────────────────────────────────
+# After a CR completes, optionally dispatch the authoring agent to fix the issues.
+#
+# Complete loop:
+#   agent opens PR  →  opposite vendor reviews  →  authoring vendor fixes
+#                                                          ↓
+#                              fix PR opened targeting original branch
+#                                                          ↓
+#                              human reviews fix PR → merges → original PR updated
+#
+post_review:
+  auto_fix:
+    enabled: true
+    trigger: on_issues          # on_issues | always | never
+    min_severity: warning       # error | warning | info — skip cosmetic findings
+
+    # same-as-author: the vendor that wrote the PR also applies the fix (recommended)
+    # In cross-vendor mode: Claude wrote it → Claude fixes it, Codex wrote it → Codex fixes it
+    fixer: same-as-author       # same-as-author | same-as-reviewer | codex | claude
+
+    delivery:
+      mode: pull_request        # pull_request | commit | comment
+      # pull_request → fix PR targets the original branch; human approves before merge
+      # commit       → fixes pushed directly onto the original PR branch
+      # comment      → suggested fixes posted as review comments only
+      pr_title: "fix: address CR issues in #{original_pr_title}"
+      label: cr-autofix         # GitHub label applied to the fix PR
+
+# ─── Backtrace ───────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that have
+# never received a [crosscheck] comment. Ensures coverage for PRs opened while
+# crosscheck was offline or before it was first set up.
+# backtrace:
+#   enabled: true   # set to false to disable the startup scan entirely
+
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson
 # Each line is a JSON object: { ts, level, event, ...context }
 logs:
   enabled: true
   retention_days: 7   # delete files older than N days (min: 1, max: 30)
+
+# ─── Display ─────────────────────────────────────────────────────────────────
+# Terminal output theme for crosscheck watch.
+# Override individual colors using chalk color names (red, green, blue, cyan,
+# yellow, magenta, white, gray, dim, bold) or hex values (#rrggbb).
+# display:
+#   theme:
+#     bar_fill: blue         # filled █ segments on the PR size bar
+#     bar_empty: dim         # empty  ░ segments (all bars)
+#     cr_approve: green      # CR bar + verdict label when APPROVE
+#     cr_needs_work: yellow  # CR bar + verdict label when NEEDS WORK
+#     cr_block: red          # CR bar + verdict label when BLOCK
+#     fix_fill: cyan         # filled segments on the FIX bar
+
+# ─── Backtrace ───────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that have
+# never received a [crosscheck] comment.
+# backtrace:
+#   enabled: true   # set to false to disable the startup scan entirely

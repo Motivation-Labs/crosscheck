@@ -4,8 +4,18 @@ import { join } from 'path'
 import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getWebhookSecret } from '../config/loader.js'
+import { checkRepoAccessible } from '../github/client.js'
+import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
+import {
+  loadConfig,
+  getGithubToken,
+  getWebhookSecret,
+  resolveConfigPath,
+  promptDeploymentMode,
+  detectScopesForDeployment,
+  patchDeploymentConfig,
+} from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
@@ -46,18 +56,22 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 
-  const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
-  const reviewer = assignReviewer(origin, config)
+  const { origin, method: originMethod } = await detectOriginFull(
+    pr.body ?? '', pr.head.ref,
+    owner, repoName, prNumber,
+    config, token, pr.user.login,
+  )
+  const reviewer = await assignReviewer(origin, config)
 
-  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 
   if (!reviewer) {
-    log(`  → origin=${origin}, no reviewer — skipping`)
+    log(`  → origin=${origin} (via ${originMethod}), no reviewer — skipping`)
     inFlight.delete(key)
     return
   }
 
-  log(`  → origin=${origin}, reviewer=${reviewer}`)
+  log(`  → origin=${origin} (via ${originMethod}), reviewer=${reviewer}`)
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   const reviewStart = Date.now()
@@ -77,6 +91,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       tmpDir, token, config, origin,
       reviewStart,
       log,
+      onPhaseChange: (label: string) => log(`  → ${label}`),
       crosscheckShas,
     })
   } catch (err: unknown) {
@@ -89,8 +104,16 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   }
 }
 
-export function runServe(configPath?: string) {
-  const config = loadConfig(configPath)
+export interface ServeOpts {
+  config?: string
+  personal?: boolean
+  team?: boolean
+  reconfigure?: boolean
+}
+
+export async function runServe(opts: ServeOpts = {}) {
+  const configPath = opts.config
+  let config = loadConfig(configPath)
   initLogger(config.logs)
 
   process.on('uncaughtException', (err) => {
@@ -114,6 +137,39 @@ export function runServe(configPath?: string) {
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
+
+  // ── Deployment setup ─────────────────────────────────────────────────────
+  let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment
+  let sessionOnly = false
+
+  if (opts.personal || opts.team) {
+    effectiveDeployment = opts.personal ? 'personal' : 'team'
+    sessionOnly = true
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    config = { ...config, users: detected.users, orgs: detected.orgs, repos: [] }
+  } else if (opts.reconfigure || !config.deployment) {
+    effectiveDeployment = await promptDeploymentMode(opts.reconfigure ? config.deployment : undefined)
+    const cfgPath = resolveConfigPath(configPath) ?? join(process.cwd(), 'crosscheck.config.yml')
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
+    config = loadConfig(configPath)
+    console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
+  }
+
+  // ── Repo accessibility validation ─────────────────────────────────────────
+  const repoChecks = await Promise.all(
+    config.repos.map(async ({ owner, name }) => ({
+      owner, name,
+      ok: await checkRepoAccessible(owner, name, token).catch(() => false),
+    }))
+  )
+  for (const { owner, name, ok } of repoChecks) {
+    if (!ok) {
+      console.log(chalk.yellow(`  ✗ repo not accessible: ${owner}/${name} — skipped`))
+      fileLog({ level: 'warn', event: 'repo_inaccessible', repo: `${owner}/${name}` })
+    }
+  }
+
   const webhookSecret = getWebhookSecret()
 
   const log = (msg: string) => {
@@ -134,15 +190,29 @@ export function runServe(configPath?: string) {
     console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
     console.log(chalk.bold('crosscheck serving\n'))
     console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
-    console.log(`  mode      ${chalk.cyan(config.mode)}`)
-    console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
-    console.log(`  port      ${chalk.cyan(String(config.server.port))}`)
-    console.log(`  endpoint  ${chalk.cyan(webhookUrl)}`)
-    if (config.routing.allowed_authors.length === 0) {
+    if (effectiveDeployment) {
+      const label = sessionOnly
+        ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
+        : chalk.cyan(effectiveDeployment)
+      console.log(`  deployment  ${label}`)
+    }
+    if (config.orgs.length > 0) {
+      console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)
+    }
+    console.log(`  mode        ${chalk.cyan(config.mode)}`)
+    console.log(`  quality     ${chalk.cyan(config.quality.tier)}`)
+    console.log(`  port        ${chalk.cyan(String(config.server.port))}`)
+    console.log(`  endpoint    ${chalk.cyan(webhookUrl)}`)
+    const cfgPath = resolveConfigPath(configPath)
+    console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}`)
+    if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {
+      console.log(`  authors     ${chalk.dim('all PRs (team mode)')}`)
+    } else if (config.routing.allowed_authors.length > 0) {
+      console.log(`  authors     ${chalk.cyan(config.routing.allowed_authors.join(', '))}`)
+    } else {
       console.log()
       console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
-      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
-      console.log(`     ${chalk.dim('Or run')} ${chalk.cyan('crosscheck init')} ${chalk.dim('to auto-detect and apply.')}`)
+      console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck serve --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
     }
     console.log()
     if (config.orgs.length > 0) {
@@ -154,6 +224,48 @@ export function runServe(configPath?: string) {
       console.log(chalk.dim('Register this URL as a GitHub webhook (content-type: application/json).'))
     }
     console.log(chalk.dim('Listening for pull_request events...\n'))
+
+    // Backtrace: find open PRs that haven't been reviewed yet
+    if (config.backtrace.enabled) {
+      void (async () => {
+        try {
+          log('backtrace: scanning open PRs in monitored scope...')
+          fileLog({ level: 'info', event: 'backtrace_start' })
+          const backtraceScopes = await buildScopesFromConfig(config, token)
+          const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(backtraceScopes, config, token)
+          if (queued.length === 0) {
+            log('backtrace: no unreviewed open PRs found')
+          } else {
+            const parts = [`${queued.length} PR${queued.length !== 1 ? 's' : ''} queued`]
+            if (alreadyReviewed > 0) parts.push(`${alreadyReviewed} already reviewed`)
+            if (skippedAuthor > 0) parts.push(`${skippedAuthor} skipped (author filter)`)
+            log(`backtrace: ${parts.join(', ')}`)
+          }
+          fileLog({ level: 'info', event: 'backtrace_complete', queued: queued.length, already_reviewed: alreadyReviewed, skipped_author: skippedAuthor })
+          void Promise.all(queued.map(pr => handlePR({
+            action: 'backtrace',
+            number: pr.number,
+            pull_request: {
+              title: pr.title,
+              body: pr.body ?? '',
+              head: { ref: pr.headRef, sha: pr.headSha, repo: pr.headRepo ? { full_name: pr.headRepo } : null },
+              base: { ref: pr.baseRef, repo: { full_name: `${pr.owner}/${pr.repo}` } },
+              html_url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`,
+              user: { login: pr.author },
+            },
+            repository: {
+              name: pr.repo,
+              owner: { login: pr.owner },
+              clone_url: `https://github.com/${pr.owner}/${pr.repo}.git`,
+            },
+          }, config, token, log)))
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log(`backtrace: scan failed — ${msg}`)
+          fileLog({ level: 'warn', event: 'backtrace_error', message: msg })
+        }
+      })()
+    }
   })
 
   process.on('SIGINT', () => {

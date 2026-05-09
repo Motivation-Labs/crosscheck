@@ -1,23 +1,57 @@
 import { execSync, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
-import ora from 'ora'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
+  findOrgWebhook,
+  findRepoWebhook,
+  listUserRepos,
+  checkRepoAccessible,
 } from '../github/client.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath, detectGitHubLogin, patchAllowedAuthors } from '../config/loader.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
+import {
+  loadConfig,
+  getGithubToken,
+  getWebhookSecret,
+  resolveConfigPath,
+  promptDeploymentMode,
+  detectScopesForDeployment,
+  patchDeploymentConfig,
+  detectGitHubLogin,
+} from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
+import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import { loadWorkflow } from '../lib/workflow.js'
+import { PRBoard } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+
+// Compute PR diff size in lines, excluding noise (lockfiles, binaries, data files)
+const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
+
+function computePRLoc(tmpDir: string, baseBranch: string): number {
+  try {
+    const stat = execSync(`git diff --stat origin/${baseBranch}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+    let total = 0
+    for (const line of stat.split('\n')) {
+      const m = line.match(/^\s+(.+?)\s+\|\s+(\d+)/)
+      if (!m) continue
+      const file = m[1].trim().replace(/\{.*?=> /, '').replace('}', '')  // handle rename notation
+      if (!NOISE_EXT.test(file)) total += parseInt(m[2], 10)
+    }
+    return total
+  } catch {
+    return 0
+  }
+}
 
 function detectCurrentRepo(): { owner: string; repo: string } | null {
   try {
@@ -94,7 +128,15 @@ function openTunnel(localPort: number): Promise<{ url: string; proc: ChildProces
   })
 }
 
-export async function runWatch(configPath?: string) {
+export interface WatchOpts {
+  config?: string
+  personal?: boolean
+  team?: boolean
+  reconfigure?: boolean
+}
+
+export async function runWatch(opts: WatchOpts = {}) {
+  const configPath = opts.config
   let config = loadConfig(configPath)
   initLogger(config.logs)
 
@@ -122,15 +164,124 @@ export async function runWatch(configPath?: string) {
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
 
-  const log = (msg: string) => {
-    console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
-    fileLog({ level: 'info', event: 'message', message: msg })
+  // Board manages all terminal output after startup
+  const board = new PRBoard()
+  board.setConfig(config, loadWorkflow(process.cwd()))
+
+  // Thin wrapper: routes important messages to both terminal and file log
+  const bLog = (line1: string, line2?: string) => {
+    board.log(line1, line2)
+    fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
+  }
+
+  // Connectivity events (tunnel/webhook) go into the live connectivity section
+  const cLog = (line: string) => {
+    board.logConnectivity(line)
+    fileLog({ level: 'info', event: 'message', message: line })
   }
 
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
   // SHAs pushed by the address step — skip synchronize events from our own commits
   const crosscheckShas = new Set<string>()
+
+  async function reviewPR(params: {
+    owner: string; repoName: string; prNumber: number; title: string;
+    body: string | null; author: string; headSha: string; headRef: string;
+    headRepo: string | null; baseRef: string; action: string;
+  }): Promise<void> {
+    const { owner, repoName, prNumber } = params
+    const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
+    if (inFlight.has(key)) return
+    inFlight.add(key)
+
+    // Outer try/finally ensures the inFlight key is always released, even if
+    // detectOriginFull / assignReviewer throw before the inner try block starts.
+    try {
+      if (!isAuthorAllowed(config.routing.allowed_authors, params.author)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
+        return
+      }
+
+      const { origin, method: originMethod } = await detectOriginFull(
+        params.body ?? '', params.headRef,
+        owner, repoName, prNumber,
+        config, token, params.author,
+      )
+      const reviewer = await assignReviewer(origin, config)
+
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author })
+
+      if (!reviewer) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
+        return
+      }
+
+      const ts = chalk.dim(new Date().toLocaleTimeString())
+      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+      bLog(
+        `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
+        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
+      )
+
+      const pr: PREvent['pull_request'] = {
+        title: params.title,
+        body: params.body ?? '',
+        head: { ref: params.headRef, sha: params.headSha, repo: params.headRepo ? { full_name: params.headRepo } : null },
+        base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
+        html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+        user: { login: params.author },
+      }
+
+      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef)
+      const reviewStart = Date.now()
+      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+
+      try {
+        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
+        execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Fetch the base branch after checking out the PR branch so we are never
+        // on the base branch during the fetch (git refuses to update a checked-out ref).
+        // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
+        // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
+        // shallow clones when the branch is absent from the default refspec mapping.
+        try {
+          execSync(`git fetch origin ${params.baseRef}:refs/remotes/origin/${params.baseRef}`, { cwd: tmpDir, stdio: 'pipe' })
+        } catch {
+          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef })
+        }
+
+        const prLoc = computePRLoc(tmpDir, params.baseRef)
+        board.updatePR(key, { prLoc })
+
+        const { verdict } = await runWorkflow({
+          owner, repoName, prNumber, pr,
+          tmpDir, token, config, origin,
+          reviewStart,
+          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+          onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
+          crosscheckShas,
+        })
+
+        void verdict
+        board.completePR(key, {
+          elapsedMs: Date.now() - reviewStart,
+          url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+        })
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        board.failPR(key, message)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true })
+      }
+    } catch (err: unknown) {
+      logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'setup' }, err)
+    } finally {
+      inFlight.delete(key)
+    }
+  }
 
   // Start local webhook server
   const server = createWebhookServer(
@@ -144,7 +295,7 @@ export async function runWatch(configPath?: string) {
       const key = `${owner}/${repoName}#${prNumber}@${pr.head.sha}`
 
       if (inFlight.has(key)) {
-        log(chalk.dim(`PR #${prNumber} already in review — skipping duplicate`))
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
         return
       }
 
@@ -154,65 +305,14 @@ export async function runWatch(configPath?: string) {
         return
       }
 
-      inFlight.add(key)
-
-      const author = pr.user.login
-
-      if (!isAuthorAllowed(config.routing.allowed_authors, author)) {
-        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author })
-        inFlight.delete(key)
-        return
-      }
-
-      log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
-      const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
-      const reviewer = assignReviewer(origin, config)
-
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
-
-      if (!reviewer) {
-        log(chalk.dim(`  origin=${origin} — skipping (no reviewer assigned)`))
-        inFlight.delete(key)
-        return
-      }
-
-      log(`  origin=${chalk.yellow(origin)}  reviewer=${chalk.cyan(reviewer)}`)
-
-      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
-      const spinner = ora({ indent: 2 })
-      const reviewStart = Date.now()
-      try {
-        spinner.start('cloning...')
-        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
-        execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-        execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-        // Fetch the base branch after checking out the PR branch so we are never
-        // on the base branch during the fetch (git refuses to update a checked-out ref).
-        try {
-          execSync(`git fetch origin ${pr.base.ref}:${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
-        } catch {
-          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
-        }
-        spinner.succeed('cloned')
-
-        await runWorkflow({
-          owner, repoName, prNumber, pr,
-          tmpDir, token, config, origin,
-          reviewStart,
-          log,
-          crosscheckShas,
-        })
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err)
-        if (spinner.isSpinning) spinner.fail(message)
-        else log(`  ✗ ${message}`)
-        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
-      } finally {
-        rmSync(tmpDir, { force: true, recursive: true })
-        inFlight.delete(key)
-      }
+      await reviewPR({
+        owner, repoName, prNumber,
+        title: pr.title, body: pr.body, author: pr.user.login,
+        headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref, action: event.action,
+      })
     },
-    log,
+    (msg: string) => bLog(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
     fileLog,
   )
 
@@ -234,20 +334,78 @@ export async function runWatch(configPath?: string) {
     process.exit(1)
   })
 
-  // Determine scopes once — these don't change between tunnel reconnects
+  // ── Deployment setup ─────────────────────────────────────────────────────
+  // Runs before scope building so detected users/orgs feed into webhook registration.
+  let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment
+  let sessionOnly = false
+  let selfLogin: string | null = null
+
+  if (opts.personal || opts.team) {
+    // One-time flag: auto-detect scopes for this session, no config write.
+    effectiveDeployment = opts.personal ? 'personal' : 'team'
+    sessionOnly = true
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    selfLogin = detected.login
+    config = { ...config, users: detected.users, orgs: detected.orgs, repos: [] }
+  } else if (opts.reconfigure || !config.deployment) {
+    // First run (no deployment in config) or explicit --reconfigure.
+    effectiveDeployment = await promptDeploymentMode(opts.reconfigure ? config.deployment : undefined)
+    const cfgPath = resolveConfigPath(configPath) ?? join(process.cwd(), 'crosscheck.config.yml')
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    selfLogin = detected.login
+    // force=true only for --reconfigure; first-run preserves any manually-configured orgs/authors
+    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
+    config = loadConfig(configPath)
+    console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
+  }
+
+  // ── Scope building ────────────────────────────────────────────────────────
+  // Determine scopes once — these don't change between tunnel reconnects.
+  // orgs, users, and repos are additive: all configured sources contribute scopes.
   type Scope = { org: string } | { owner: string; repo: string }
   const scopes: Scope[] = []
 
-  if (config.orgs.length > 0) {
-    for (const org of config.orgs) scopes.push({ org })
-  } else if (config.repos.length > 0) {
-    for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
-  } else if (config.tunnel.backend !== 'smee') {
+  for (const org of config.orgs) scopes.push({ org })
+
+  const userRepoResults: Array<{ user: string; count: number } | { user: string; error: string }> = []
+  if (config.users.length > 0) {
+    // selfLogin is known when we just ran detection; fall back to detectGitHubLogin() for
+    // existing configs so personal-mode users still get private repos enumerated.
+    if (!selfLogin) selfLogin = detectGitHubLogin()
+    for (const user of config.users) {
+      try {
+        const repos = await listUserRepos(user, token, user === selfLogin)
+        for (const { owner, name } of repos) scopes.push({ owner, repo: name })
+        userRepoResults.push({ user, count: repos.length })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        userRepoResults.push({ user, error: msg })
+      }
+    }
+  }
+
+  // Validate explicitly-configured repos and skip any that are inaccessible.
+  const repoChecks = await Promise.all(
+    config.repos.map(async ({ owner, name }) => ({
+      owner, name,
+      ok: await checkRepoAccessible(owner, name, token).catch(() => false),
+    }))
+  )
+  for (const { owner, name, ok } of repoChecks) {
+    if (ok) {
+      scopes.push({ owner, repo: name })
+    } else {
+      console.log(chalk.yellow(`  ✗ repo not accessible: ${owner}/${name} — skipped`))
+      fileLog({ level: 'warn', event: 'repo_inaccessible', repo: `${owner}/${name}` })
+    }
+  }
+
+  if (scopes.length === 0 && config.tunnel.backend !== 'smee') {
     // localhost.run needs a target repo to auto-register webhooks.
     // smee users register the webhook manually — no target required here.
     const detected = detectCurrentRepo()
     if (!detected) {
-      console.error(chalk.red('No repos or orgs configured. Run inside a git repo or set repos/orgs in config.'))
+      console.error(chalk.red('No repos, users, or orgs configured. Run inside a git repo or set repos/users/orgs in config.'))
       server.close(() => process.exit(1))
       return
     }
@@ -278,6 +436,7 @@ export async function runWatch(configPath?: string) {
 
   const cleanup = async () => {
     running = false
+    board.stop()
     console.log('\nCleaning up...')
     currentTunnelProc?.kill()
     await deleteCurrentWebhooks()
@@ -288,49 +447,112 @@ export async function runWatch(configPath?: string) {
   process.on('SIGINT', () => { void cleanup() })
   process.on('SIGTERM', () => { void cleanup() })
 
-  // Print banner once at startup
+  // ── Static startup banner ─────────────────────────────────────────────────
   console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
   console.log(chalk.bold('crosscheck watch\n'))
-  if (config.orgs.length > 0) {
-    console.log(`  orgs      ${chalk.cyan(config.orgs.join(', '))}`)
+  if (effectiveDeployment) {
+    const deployLabel = sessionOnly
+      ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
+      : chalk.cyan(effectiveDeployment)
+    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
   } else {
-    const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
-    console.log(`  repos     ${chalk.cyan(labels.join(', '))}`)
+    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
   }
-  console.log(`  mode      ${chalk.cyan(config.mode)}`)
-  console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  if (config.orgs.length > 0) {
+    console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)
+  }
+  if (config.users.length > 0) {
+    const userParts = userRepoResults.map(r => {
+      if ('error' in r) return chalk.yellow(`${r.user} (⚠ list failed)`)
+      return `${chalk.cyan(r.user)} ${chalk.dim(`(${r.count} repos)`)}`
+    })
+    console.log(`  users       ${userParts.join(', ')}`)
+  }
+  if (config.orgs.length === 0 && config.users.length === 0) {
+    const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
+    console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
+  }
   const cfgPath = resolveConfigPath(configPath)
-  console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
-  if (config.routing.allowed_authors.length === 0) {
-    const cfgPath = resolveConfigPath(configPath)
-    const login = detectGitHubLogin()
-    if (login && cfgPath && patchAllowedAuthors(cfgPath, login)) {
-      config = loadConfig(configPath)
-      console.log(`  ${chalk.green('✓')} allowed_authors set to ${chalk.cyan(login)} ${chalk.dim(`(auto-detected — edit ${cfgPath} to change)`)}`)
-    } else {
-      console.log()
-      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
-      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
-    }
+  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
+  if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {
+    console.log(`  authors     ${chalk.dim('all PRs (team mode)')}`)
+  } else if (config.routing.allowed_authors.length > 0) {
+    console.log(`  authors     ${chalk.cyan(config.routing.allowed_authors.join(', '))}`)
+  } else {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+    console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
   }
   console.log()
 
+  // Board starts after the banner — all output below is live-updated
+  board.start()
+
+  // ── Backtrace scan ────────────────────────────────────────────────────────
+  if (config.backtrace.enabled) {
+    void (async () => {
+      try {
+        cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)
+        const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(scopes, config, token)
+        cLog(`${chalk.dim('✦')} backtrace: ${queued.length} unreviewed, ${alreadyReviewed} already reviewed, ${skippedAuthor} skipped (author filter)`)
+        void Promise.all(queued.map(pr => reviewPR({
+          owner: pr.owner, repoName: pr.repo, prNumber: pr.number,
+          title: pr.title, body: pr.body, author: pr.author,
+          headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
+          baseRef: pr.baseRef, action: 'backtrace',
+        })))
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        cLog(`${chalk.yellow('⚠')} backtrace: scan failed — ${msg}`)
+      }
+    })()
+  }
+
   // ── Smee mode ─────────────────────────────────────────────────────────────
-  // No tunnel management or webhook auto-registration needed.
-  // The user points their GitHub webhook to the smee channel URL once.
+  // Smee channel URL is stable — webhooks are registered once and survive restarts.
   if (config.tunnel.backend === 'smee') {
     const channelUrl = config.tunnel.smee_channel
     if (!channelUrl) {
+      board.stop()
       console.error(chalk.red('✗ tunnel.smee_channel is required when tunnel.backend: smee'))
       console.error(chalk.dim('  Visit https://smee.io/new to get a free channel URL.'))
       server.close(() => process.exit(1))
       return
     }
-    console.log(`  tunnel    ${chalk.cyan(channelUrl)}  ${chalk.dim('(smee.io — events queued while offline)')}`)
-    console.log(chalk.dim(`  Register this as GitHub webhook Payload URL, then:`))
-    console.log(chalk.dim(`    webhook secret: cat ~/.crosscheck/webhook-secret`))
-    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    board.setTunnel('smee', channelUrl, true)
     fileLog({ level: 'info', event: 'tunnel_opened', url: channelUrl, backend: 'smee' })
+
+    // Register webhooks pointing at the smee channel URL (idempotent — skip if already set).
+    // The smee channel URL never changes, so this survives restarts without creating duplicates.
+    for (const scope of scopes) {
+      const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+      try {
+        let existing: number | null
+        if ('org' in scope) {
+          existing = await findOrgWebhook(scope.org, channelUrl, token)
+          if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+        } else {
+          existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
+          if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
+        }
+        cLog(`${chalk.green('✓')} webhook ${existing ? 'active' : 'registered'}: ${chalk.cyan(label)}`)
+        fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const isCreds = /bad credentials|\[401\]/i.test(msg)
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+          || ('org' in scope && /\[404\]/i.test(msg))
+        cLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
+        if (isCreds) {
+          cLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+        } else if (isScope) {
+          cLog(`  missing admin:org_hook scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+        } else {
+          cLog(`  ${msg}`)
+        }
+        fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
+      }
+    }
 
     let smeeRetryDelay = 5_000
     while (running) {
@@ -338,7 +560,7 @@ export async function runWatch(configPath?: string) {
         '--url', channelUrl,
         '--path', config.server.webhook_path,
         '--port', String(config.server.port),
-      ], { stdio: 'inherit' })
+      ], { stdio: 'pipe' })
       currentTunnelProc = smeeProc
 
       try {
@@ -353,6 +575,7 @@ export async function runWatch(configPath?: string) {
           smeeProc.on('exit', () => resolve())
         })
       } catch (err) {
+        board.stop()
         console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
         server.close(() => process.exit(1))
         return
@@ -360,10 +583,12 @@ export async function runWatch(configPath?: string) {
 
       if (!running) break
       currentTunnelProc = null
-      log(chalk.yellow(`  smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
+      board.setTunnel('smee', channelUrl, false)
+      cLog(chalk.yellow(`smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true, backend: 'smee' })
       await new Promise(r => setTimeout(r, smeeRetryDelay))
       smeeRetryDelay = Math.min(smeeRetryDelay * 2, 60_000)
+      board.setTunnel('smee', channelUrl, true)
     }
     return
   }
@@ -371,7 +596,7 @@ export async function runWatch(configPath?: string) {
   // ── localhost.run mode ────────────────────────────────────────────────────
   let reconnectDelay = 5_000
   while (running) {
-    log('Opening tunnel via localhost.run...')
+    board.setTunnel('localhost.run', null, false)
     let tunnelUrl: string
     let tunnelProc: ChildProcess
     try {
@@ -379,7 +604,7 @@ export async function runWatch(configPath?: string) {
     } catch (err: unknown) {
       if (!running) break
       const msg = err instanceof Error ? err.message : String(err)
-      log(chalk.yellow(`  ✗ tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
+      cLog(chalk.yellow(`tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_error', message: msg })
       await new Promise(r => setTimeout(r, reconnectDelay))
       reconnectDelay = Math.min(reconnectDelay * 2, 60_000)
@@ -388,60 +613,81 @@ export async function runWatch(configPath?: string) {
     reconnectDelay = 5_000  // reset backoff on success
 
     currentTunnelProc = tunnelProc
-    const webhookUrl = `${tunnelUrl}${webhookPath}`
-    log(chalk.green(`  ✓ tunnel ready: ${chalk.cyan(tunnelUrl)}`))
-    console.log(`  tunnel    ${chalk.cyan(tunnelUrl)}`)
-    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    board.setTunnel('localhost.run', tunnelUrl, true)
+    cLog(`${chalk.green('✓')} tunnel ready: ${chalk.cyan(tunnelUrl)}`)
     fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
 
-    // Register webhooks for this tunnel session
+    // Register webhooks in parallel: dedup check → register with backoff → aggregate summary
+    const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
-    for (const scope of scopes) {
+    let hookOk = 0, hookFail = 0
+
+    await Promise.all(scopes.map(async (scope) => {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+
+      // Dedup: skip if a hook for this exact URL already exists (e.g. previous session not cleaned up)
+      let existingId: number | null = null
       try {
-        if ('org' in scope) {
-          const hookId = await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
-          currentRegistered.push({ type: 'org', org: scope.org, hookId })
-        } else {
-          const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
-          currentRegistered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
-        }
-        log(chalk.green(`  ✓ webhook registered for ${label}`))
-        fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        const isCreds = /bad credentials|\[401\]/i.test(msg)
-        // 403 always means insufficient scope.
-        // 404 on an org webhook means the token lacks admin:org_hook scope (GitHub
-        // hides the endpoint rather than returning 403). For repo webhooks, 404
-        // means the repo itself is not found — show the raw error instead.
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-          || ('org' in scope && /\[404\]/i.test(msg))
-        log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
-        if (isCreds) {
-          log(chalk.dim(`    token invalid or expired`))
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh')}`)
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('(regenerate PAT)')}`)
-        } else if (isScope) {
-          log(chalk.dim(`    token missing admin:org_hook scope or org Owner role`))
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('new PAT → enable admin:org scope')}`)
-          log(`    ${chalk.dim('    or register the webhook manually:')}`)
-          log(`    ${chalk.dim('      Payload URL')}  ${chalk.cyan(webhookUrl)}`)
-          log(`    ${chalk.dim('      Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
-          log(`    ${chalk.dim('      Hooks page')}   ${chalk.cyan(`https://github.com/organizations/${label}/settings/hooks`)}`)
-        } else {
-          log(chalk.dim(`    ${msg}`))
-          log(`    ${chalk.dim('    Payload URL')}  ${chalk.cyan(webhookUrl)}`)
-          log(`    ${chalk.dim('    Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
-        }
-        const hooksUrl = 'org' in scope
-          ? `https://github.com/organizations/${scope.org}/settings/hooks`
-          : `https://github.com/${scope.owner}/${scope.repo}/settings/hooks`
-        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
-        log(chalk.dim(`    ${hooksUrl}`))
+        existingId = 'org' in scope
+          ? await findOrgWebhook(scope.org, webhookUrl, token)
+          : await findRepoWebhook(scope.owner, scope.repo, webhookUrl, token)
+      } catch { /* ignore — proceed to register */ }
+
+      if (existingId !== null) {
+        currentRegistered.push('org' in scope
+          ? { type: 'org' as const, org: scope.org, hookId: existingId }
+          : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId: existingId })
+        hookOk++
+        fileLog({ level: 'info', event: 'webhook_active', scope: label, url: webhookUrl })
+        return
       }
-    }
+
+      // Register with exponential back-off: delay 2s then 4s before giving up
+      let hookId: number | null = null
+      let lastErr = ''
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          const delay = 2 ** attempt * 1000
+          fileLog({ level: 'warn', event: 'webhook_register_retry', scope: label, attempt, message: lastErr })
+          await new Promise(r => setTimeout(r, delay))
+        }
+        try {
+          hookId = 'org' in scope
+            ? await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
+            : await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
+          break
+        } catch (err: unknown) {
+          lastErr = err instanceof Error ? err.message : String(err)
+        }
+      }
+
+      if (hookId !== null) {
+        currentRegistered.push('org' in scope
+          ? { type: 'org' as const, org: scope.org, hookId }
+          : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId })
+        hookOk++
+        fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
+      } else {
+        hookFail++
+        const isCreds = /bad credentials|\[401\]/i.test(lastErr)
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(lastErr)
+          || ('org' in scope && /\[404\]/i.test(lastErr))
+        if (isCreds) {
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+        } else if (isScope) {
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+        } else {
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): ${lastErr}`)
+        }
+        bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
+        fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
+      }
+    }))
+
+    // Single aggregated connectivity line instead of one per repo
+    const hookTotal = scopes.length
+    cLog(`${hookFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${hookOk}/${hookTotal}${hookFail > 0 ? ` (${hookFail} failed)` : ''}`)
+    fileLog({ level: 'info', event: 'webhooks_registered', count: hookOk, total: hookTotal, failed: hookFail, url: webhookUrl })
 
     // Wait for this tunnel session to end.
     // Health check kills the SSH proc if lhr.life goes dead without exiting.
@@ -451,7 +697,8 @@ export async function runWatch(configPath?: string) {
 
     // Clean up webhooks tied to the old URL before reconnecting
     await deleteCurrentWebhooks()
-    log(chalk.yellow('  tunnel disconnected — reconnecting in 5s...'))
+    board.setTunnel('localhost.run', tunnelUrl, false)
+    cLog(chalk.yellow('tunnel disconnected — reconnecting in 5s...'))
     fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true })
     await new Promise(r => setTimeout(r, reconnectDelay))
   }

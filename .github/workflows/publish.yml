@@ -1,16 +1,19 @@
 name: Publish
 
-# Handles only the @beta prerelease path (staging branch).
+# Prerelease channels:
+#   staging branch → @beta  (integration, post-review features)
+#   alpha branch   → @alpha (experimental, cutting-edge)
 # @latest releases are fully automated by release.yml on merges to main.
 
 on:
   push:
-    branches: [staging]     # → @beta publish
+    branches: [staging, alpha]
   workflow_dispatch:
 
 jobs:
   staging:
     name: Publish @beta
+    if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
     environment: staging
 
@@ -33,5 +36,33 @@ jobs:
 
       - name: Publish to npm @beta
         run: npm publish --tag beta --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  alpha:
+    name: Publish @alpha
+    if: github.ref == 'refs/heads/alpha'
+    runs-on: ubuntu-latest
+    environment: alpha
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Stamp prerelease version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          npm version prerelease --preid="alpha.${SHORT_SHA}" --no-git-tag-version
+
+      - name: Publish to npm @alpha
+        run: npm publish --tag alpha --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

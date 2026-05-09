@@ -2,7 +2,7 @@
 import { Command } from 'commander'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { runInit } from './commands/init.js'
 import { runServe } from './commands/serve.js'
 import { runWatch } from './commands/watch.js'
@@ -16,10 +16,13 @@ import { runIssue } from './commands/issue.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
 
+const invokedAs = basename(process.argv[1] ?? 'crosscheck').replace(/\.js$/, '')
+const programName = invokedAs === 'ck' ? 'ck' : 'crosscheck'
+
 const program = new Command()
 
 program
-  .name('crosscheck')
+  .name(programName)
   .description('Cross-vendor AI code review — Claude Code ↔ Codex')
   .version(`❤️  ${version}`)
 

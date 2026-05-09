@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import chalk from 'chalk'
@@ -426,11 +426,15 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
   console.log(chalk.green(`  ✓ config written to ${configPath}`))
 
-  // Write global workflow.yml for recheck preset
+  // Manage global workflow.yml — write for recheck preset, remove stale file otherwise
+  const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
   if (pipelinePreset === 'review-fix-recheck') {
-    const workflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
-    writeFileSync(workflowPath, WORKFLOW_RECHECK_YAML)
-    console.log(chalk.green(`  ✓ workflow written to ${workflowPath}`))
+    mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
+    writeFileSync(globalWorkflowPath, WORKFLOW_RECHECK_YAML)
+    console.log(chalk.green(`  ✓ workflow written to ${globalWorkflowPath}`))
+  } else if (existsSync(globalWorkflowPath)) {
+    unlinkSync(globalWorkflowPath)
+    console.log(chalk.dim(`  ✓ stale global workflow removed (pipeline changed to ${pipelinePreset})`))
   }
 
   console.log()

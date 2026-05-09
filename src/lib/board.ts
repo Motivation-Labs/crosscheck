@@ -142,13 +142,14 @@ function buildTheme(cfg: DisplayTheme): Theme {
 
 // ── PRBoard ───────────────────────────────────────────────────────────────────
 
-const CONN_LOG_MAX = 2  // lines kept in the live connectivity section
+const CONN_LOG_MAX = 6  // max connectivity log lines kept in memory
 
 export class PRBoard {
   private slots = new Map<string, PRSlot>()
   private frameIdx = 0
   private timer: ReturnType<typeof setInterval> | null = null
   private liveLines = 0
+  private liveContent = ''
   private readonly isTTY: boolean = Boolean(process.stdout.isTTY)
   private connLog: string[] = []
 
@@ -287,10 +288,20 @@ export class PRBoard {
     process.stdout.write(content + '\n')
   }
 
+  private countRenderedLines(content: string, columns: number): number {
+    const w = columns || 80
+    return content.split('\n').reduce((sum, line) => {
+      return sum + Math.max(1, Math.ceil(stripAnsi(line).length / w))
+    }, 0)
+  }
+
   private eraseLive(): void {
     if (this.liveLines > 0 && this.isTTY) {
-      process.stdout.write(`\x1B[${this.liveLines}A\x1B[0J`)
+      // Recompute against current width in case terminal was resized since last write
+      const lines = this.countRenderedLines(this.liveContent, process.stdout.columns || 80)
+      process.stdout.write(`\x1B[${lines}A\x1B[0J`)
       this.liveLines = 0
+      this.liveContent = ''
     }
   }
 
@@ -298,9 +309,8 @@ export class PRBoard {
     this.eraseLive()
     process.stdout.write(content + '\n')
     const w = process.stdout.columns || 80
-    this.liveLines = content.split('\n').reduce((sum, line) => {
-      return sum + Math.max(1, Math.ceil(stripAnsi(line).length / w))
-    }, 0)
+    this.liveContent = content
+    this.liveLines = this.countRenderedLines(content, w)
   }
 
   // ── Private: theme helpers ─────────────────────────────────────────────────
@@ -398,7 +408,9 @@ export class PRBoard {
     const cfg = this.config
     const t = this.theme
     const w = process.stdout.columns || 80
-    const sep = t.separator('─'.repeat(w))
+    // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
+    // causes the first char of the next line to appear at the end of the separator.
+    const sep = t.separator('─'.repeat(w - 1))
     const indent = ' '.repeat(14)
 
     // ── Section 1: status dashboard ──────────────────────────────────────────
@@ -415,11 +427,10 @@ export class PRBoard {
     const row2 = `${indent}workflow: ${stepFlow}  │  ${vendors.join(' · ')}`
     const row3 = `${indent}${this.statsRow()}`
 
-    // ── Section 1.5: connectivity log ────────────────────────────────────────
-    const connLines: string[] = []
-    for (let i = 0; i < CONN_LOG_MAX; i++) {
-      connLines.push(this.connLog[i] ?? '')
-    }
+    // ── Section 1.5: connectivity log — only rendered when there are active entries.
+    // Empty connLog lines are excluded so the idle state stays compact (no 3 blank rows).
+    const activeConn = this.connLog.filter(l => l.trim())
+    const connSection = activeConn.length > 0 ? [sep, ...activeConn] : []
 
     // ── Section 2: active PR slots ────────────────────────────────────────────
     const frame = FRAMES[this.frameIdx]
@@ -436,7 +447,7 @@ export class PRBoard {
       }
     }
 
-    return [row1, row2, row3, sep, ...connLines, sep, ...prContent, sep].join('\n')
+    return [row1, row2, row3, ...connSection, sep, ...prContent, sep].join('\n')
   }
 
   private redraw(): void {

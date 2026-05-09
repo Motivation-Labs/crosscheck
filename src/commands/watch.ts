@@ -28,6 +28,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
+import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { PRBoard } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'

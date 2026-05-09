@@ -21,7 +21,6 @@ export interface BacktraceResult {
   skippedAuthor: number
 }
 
-// Resolve org and user scopes to individual {owner, repo} pairs.
 async function expandToRepos(
   scopes: BacktraceScope[],
   token: string,

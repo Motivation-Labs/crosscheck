@@ -167,6 +167,13 @@ post_review:
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix         # GitHub label applied to the fix PR
 
+# ─── Backtrace ───────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that have
+# never received a [crosscheck] comment. Ensures coverage for PRs opened while
+# crosscheck was offline or before it was first set up.
+# backtrace:
+#   enabled: true   # set to false to disable the startup scan entirely
+
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson
 # Each line is a JSON object: { ts, level, event, ...context }

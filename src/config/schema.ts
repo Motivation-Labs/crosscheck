@@ -83,6 +83,11 @@ export const ImpactConfigSchema = z.object({
   defect_cost_usd: z.number().min(0).default(150),
 })
 
+export const BacktraceConfigSchema = z.object({
+  // Scan for open PRs without a [crosscheck] comment on startup.
+  enabled: z.boolean().default(true),
+})
+
 export const PostReviewDeliverySchema = z.object({
   // pull_request → opens a fix PR targeting the original branch (human approves before merge)
   // commit       → pushes fixes directly onto the original PR branch
@@ -142,6 +147,7 @@ export const ConfigSchema = z.object({
   tunnel: TunnelConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
+  backtrace: BacktraceConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
 })
@@ -157,3 +163,4 @@ export type PostReviewConfig = z.infer<typeof PostReviewConfigSchema>
 export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
+export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>

@@ -19,6 +19,7 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -223,6 +224,48 @@ export async function runServe(opts: ServeOpts = {}) {
       console.log(chalk.dim('Register this URL as a GitHub webhook (content-type: application/json).'))
     }
     console.log(chalk.dim('Listening for pull_request events...\n'))
+
+    // Backtrace: find open PRs that haven't been reviewed yet
+    if (config.backtrace.enabled) {
+      void (async () => {
+        try {
+          log('backtrace: scanning open PRs in monitored scope...')
+          fileLog({ level: 'info', event: 'backtrace_start' })
+          const backtraceScopes = await buildScopesFromConfig(config, token)
+          const { queued, alreadyReviewed, skippedAuthor } = await scanUnreviewedPRs(backtraceScopes, config, token)
+          if (queued.length === 0) {
+            log('backtrace: no unreviewed open PRs found')
+          } else {
+            const parts = [`${queued.length} PR${queued.length !== 1 ? 's' : ''} queued`]
+            if (alreadyReviewed > 0) parts.push(`${alreadyReviewed} already reviewed`)
+            if (skippedAuthor > 0) parts.push(`${skippedAuthor} skipped (author filter)`)
+            log(`backtrace: ${parts.join(', ')}`)
+          }
+          fileLog({ level: 'info', event: 'backtrace_complete', queued: queued.length, already_reviewed: alreadyReviewed, skipped_author: skippedAuthor })
+          void Promise.all(queued.map(pr => handlePR({
+            action: 'backtrace',
+            number: pr.number,
+            pull_request: {
+              title: pr.title,
+              body: pr.body ?? '',
+              head: { ref: pr.headRef, sha: pr.headSha, repo: { full_name: `${pr.owner}/${pr.repo}` } },
+              base: { ref: pr.baseRef, repo: { full_name: `${pr.owner}/${pr.repo}` } },
+              html_url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`,
+              user: { login: pr.author },
+            },
+            repository: {
+              name: pr.repo,
+              owner: { login: pr.owner },
+              clone_url: `https://github.com/${pr.owner}/${pr.repo}.git`,
+            },
+          }, config, token, log)))
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log(`backtrace: scan failed — ${msg}`)
+          fileLog({ level: 'warn', event: 'backtrace_error', message: msg })
+        }
+      })()
+    }
   })
 
   process.on('SIGINT', () => {

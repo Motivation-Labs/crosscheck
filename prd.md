@@ -198,6 +198,17 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
 - [x] **Auto-detect `allowed_authors` on first run** — `crosscheck init` and `crosscheck watch` detect the signed-in GitHub login via `gh api user` and write it to `routing.allowed_authors` in the config automatically. One-time: once written, subsequent runs skip detection. Prevents the footgun of reviewing all PRs in an org because the author filter was never set.
 
+- [x] **Fix `watch` banner display real-estate** — compress three banner rows (`deployment`, `mode`, `quality`) into a single `profile` row; show users repo-count inline on the `users` row instead of as an indented sub-row. Net: banner shrinks from 8 rows to 5 rows.
+  - **Why:** the `mode` and `quality` values already appear in the live status line, making their banner rows redundant. The users sub-row had inconsistent indentation and used a line for metadata (repo count) that belongs inline.
+  - **How:** `watch.ts` banner emits `  profile    <deployment> · <mode> · <quality>` and `  users  <login> (<n> repos)`. The `config ← edit to change above` hint stays on the config row.
+
+- [x] **Fix `watch` live board separator wrap glitch and idle height** — separator width changed from `w` to `w - 1` (prevents exact-terminal-width cursor ambiguity that causes the next line's `●` to appear at the end of the separator); `writeLive` now counts visual rows (accounts for wrapping) instead of logical newlines; connectivity section only rendered when it contains entries (removes 3 always-present empty rows in the idle state).
+  - **Why:** full-width separators trigger an ambiguous terminal cursor position that made consecutive render frames appear on the same line. Empty connectivity rows wasted vertical space and inflated the `liveLines` count, causing eraseLive to under-erase.
+
+- [x] **Fix `origin/<base>` ref missing in PR clone — reviews receiving 0loc** — `git fetch origin <base>:<base>` creates a local branch but not the `origin/<base>` remote-tracking ref that `codex review --base <branch>` and `computePRLoc` require. Changed to `git fetch origin <base>` (no refspec) which properly populates `origin/<base>`.
+  - **Why:** codex internally runs `git diff origin/<base>...HEAD`; without the remote-tracking ref the diff fails silently, the review runs against an empty diff, and the completion line shows `0loc` even though the PR has code changes.
+  - **How:** `watch.ts` clone setup replaces `execSync('git fetch origin ${ref}:${ref}', ...)` with `execSync('git fetch origin ${ref}', ...)`.
+
 - [ ] **Deployment Mode & Smart Scope Detection** — formalize the three monitoring scope levels (repo, org, user/personal) and introduce a `deployment: personal | team` config field. `crosscheck watch` and `crosscheck serve` each prompt the user to choose a mode on first run (when `deployment` is absent from config), then auto-detect scopes from GitHub credentials and write the result to config. Subsequent runs skip the prompt entirely. Closes the gap where AI agents opening PRs to personal repos go unwatched, and removes the footgun of serving an entire org with no author filter in team mode.
   - **User:** Personal developer running `crosscheck watch` (wants all of their own PRs reviewed across personal repos and orgs). Team operator running `crosscheck serve` (wants all org PRs reviewed, personal repos excluded).
   - **Acceptance Criteria:**

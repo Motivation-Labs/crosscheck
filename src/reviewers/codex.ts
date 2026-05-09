@@ -40,6 +40,7 @@ export async function runCodexReview(
   quality: QualityConfig,
   overrideModel?: string,
   authMode: 'subscription' | 'api-key' = 'subscription',
+  stepInstructions?: string,
   onLog?: (msg: string) => void,
 ): Promise<string> {
   // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
@@ -54,9 +55,9 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  // Adaptive instructions from ~/.crosscheck/instructions.md (managed by `crosscheck optimize`)
-  const adaptiveInstructions = readInstructions(repoDir)
-  const instructionsNote = [focusNote, customNote, adaptiveInstructions].filter(Boolean).join('\n\n')
+  // stepInstructions from workflow step takes precedence; fall back to ~/.crosscheck/instructions.md
+  const behaviorInstructions = stepInstructions !== undefined ? stepInstructions : readInstructions(repoDir)
+  const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
 

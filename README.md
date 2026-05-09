@@ -80,7 +80,7 @@ crosscheck watch
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Routing** reads PR body patterns. `Generated with [Claude Code]` → Codex reviews. `Generated with [OpenAI Codex]` → Claude reviews. `allowed_authors` restricts reviews to your agent accounts.
+**Routing** uses a four-signal chain: PR body patterns → commit `Co-Authored-By:` trailers → branch prefix (`claude/` or `codex/`) → `author_routes` config fallback. `Generated with [Claude Code]` → Codex reviews. `Generated with [OpenAI Codex]` → Claude reviews. `allowed_authors` restricts reviews to your agent accounts.
 
 **Post-review auto-fix** runs after the review when issues are found. The vendor that authored the PR (`fixer: same-as-author`) reads its own review comment and opens a new fix PR targeting the original branch. You review and merge the fix PR — the original PR then updates automatically. Controlled by `post_review.auto_fix` in your config.
 
@@ -113,7 +113,7 @@ PR #47 opened: add retry logic for flaky network calls
   review complete (12s)
   posted → github.com/your-org/your-repo/pull/47
   NEEDS WORK
-  auto-fix  claude addressing issues...
+  auto-fix  claude fixing...
   fix PR #48 opened → github.com/your-org/your-repo/pull/48
 
 PR #49 opened: implement caching layer
@@ -143,7 +143,7 @@ crosscheck impact [--money]         # time saved, issues caught, code quality tr
 
 ## Configuration
 
-`crosscheck.config.yml` lives in your project root. Coding agents can read and modify it directly.
+Config lives at `~/.crosscheck/config.yml` by default — persistent across all projects, no per-repo file needed. Run `crosscheck init` to generate it. Project-local `crosscheck.config.yml` overrides the global config when present.
 
 ```yaml
 # Which repos/orgs to watch (at least one required)
@@ -269,11 +269,13 @@ npm install -g smee-client
 ```
 
 ```yaml
-# crosscheck.config.yml
+# ~/.crosscheck/config.yml
 tunnel:
   backend: smee
   smee_channel: https://smee.io/your-channel-id
 ```
+
+crosscheck registers the webhook automatically on first `watch` start — no manual webhook setup needed.
 
 ---
 

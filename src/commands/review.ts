@@ -92,6 +92,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.quality,
           config.vendors.codex.model,
           config.vendors.codex.auth,
+          undefined,
           msg => { reviewSpinner.text = msg },
         )
       } else {
@@ -102,6 +103,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.quality,
           config.vendors.claude,
           config.budget.per_review_usd,
+          undefined,
           msg => { reviewSpinner.text = msg },
         )
       }

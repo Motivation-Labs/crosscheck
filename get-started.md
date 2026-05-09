@@ -599,13 +599,15 @@ The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caugh
 
 ## Configuration
 
-crosscheck looks for a config file in these locations (first found wins):
+crosscheck stores its config in `~/.crosscheck/config.yml` by default — persistent across projects, no per-repo file needed. It also looks in these locations (first found wins):
 
 1. `./crosscheck.config.yml`
 2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml`
+3. `~/.crosscheck/config.yml` ← **default location**
 
-Run `crosscheck init` to generate a starter file with all options commented.
+Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
+
+Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 days by default.
 
 ### Full reference
 
@@ -669,11 +671,23 @@ repos:
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 routing:
+  # Origin is detected via a four-signal chain:
+  #   1. PR body patterns below (fastest)
+  #   2. Commit message Co-Authored-By: trailers (API call, non-fatal if it fails)
+  #   3. Branch prefix (claude/ or codex/)
+  #   4. author_routes fallback (last resort)
   codex_reviews_patterns:
-    - "Generated with \\[Claude Code\\]"
+    - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
+    - "Co-Authored-By: Claude"              # commit trailer
   claude_reviews_patterns:
-    - "Generated with \\[OpenAI Codex\\]"
-    - "Co-Authored-By: codex"
+    - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
+    - "Co-Authored-By: codex"               # commit trailer
+
+  # Branch prefix detection (signal 3). Claude Code uses claude/, Codex uses codex/.
+  claude_branch_prefixes:
+    - "claude/"
+  codex_branch_prefixes:
+    - "codex/"
 
   # Restrict reviews to PRs opened by these GitHub logins.
   # Auto-filled with your GitHub login by `crosscheck init` or first `crosscheck watch`.
@@ -681,12 +695,11 @@ routing:
   allowed_authors:
     - your-github-login  # auto-detected from gh auth
 
-  # Author-based routing fallback — used when no body pattern matches.
+  # Author-based routing fallback (signal 4) — used when no pattern or prefix matches.
   # Maps GitHub login → vendor origin so crosscheck routes PRs even without
   # the attribution footer (e.g. when creating PRs via gh CLI directly).
   author_routes:
     your-github-login: claude   # your PRs → treated as Claude-authored → Codex reviews
-    - your-codex-bot-account
 
 # ── Tunnel (watch mode only) ──────────────────────────────────────────────────
 # localhost.run (default) — SSH tunnel, zero install, URL changes on reconnect.
@@ -795,17 +808,29 @@ clone PR branch into temp directory
     └─ codex ...           (Codex authored the PR)
             │
             ▼
-    opens fix PR → fix/cr-<pr-number>-address-issues → original branch
+    opens fix PR → fix/cr-<pr-number>-review-issues → original branch
     (you review and merge the fix PR; original PR updates automatically)
 ```
 
 ### PR origin detection
 
+crosscheck uses a four-signal chain to determine whether a PR was authored by Claude Code, Codex, or a human:
+
+1. **PR body** — looks for attribution footers (e.g. `Generated with [Claude Code]`)
+2. **Commit messages** — scans all commit messages for `Co-Authored-By:` trailers
+3. **Branch prefix** — `claude/` → Claude origin; `codex/` → Codex origin
+4. **`author_routes`** — per-login fallback in config
+
+If none match, origin is `human` and the PR is skipped in cross-vendor mode.
+
 | Default pattern | Matches |
 |---|---|
-| `Generated with \[Claude Code\]` | PRs opened by Claude Code |
-| `Generated with \[OpenAI Codex\]` | PRs opened by Codex CLI |
-| `Co-Authored-By: codex` | Commits co-authored by Codex |
+| `Generated with \[Claude Code\]` | Claude Code attribution footer in PR body |
+| `Generated with \[OpenAI Codex\]` | Codex attribution footer in PR body |
+| `Co-Authored-By: Claude` | Commit trailers from Claude Code |
+| `Co-Authored-By: codex` | Commit trailers from Codex |
+| branch prefix `claude/` | Branch naming convention for Claude-authored PRs |
+| branch prefix `codex/` | Branch naming convention for Codex-authored PRs |
 
 ### Reviewer assignment
 
@@ -887,7 +912,7 @@ agent opens PR #42  →  opposite vendor reviews  →  issues found?
 | `trigger: on_issues` | only fires when the reviewer found warnings or worse | Skips the fix step on clean PRs |
 | `min_severity: warning` | ignores info/cosmetic findings | Avoids noisy fix PRs for style-only comments |
 
-**Fix PR branch naming:** `fix/cr-<original-pr-number>-address-issues`
+**Fix PR branch naming:** `fix/cr-<original-pr-number>-review-issues`
 
 **Original PR number:** never changes. The fix PR targets the original branch; once merged, its commits appear in the original PR automatically.
 
@@ -911,19 +936,38 @@ It picks automatically:
 
 The agent used for `optimize` is independent of which agent reviews your PRs — `optimize` is about improving the instructions, not reviewing code.
 
-### What is `~/.crosscheck/instructions.md` and can I edit it?
+### How do I customize reviewer behavior?
 
-Yes — it is a plain Markdown file that both `codex` and `claude` read before every review. On first use, crosscheck seeds it with safe defaults (no build-tool constraints, a focused review prompt, and the VERDICT format). You can edit it manually at any time. `crosscheck optimize --apply` rewrites it, so keep a backup or use version control if you've made custom edits you want to preserve.
+The primary place is the workflow file. Each step has an `instructions` field that is passed verbatim to the reviewer or fixer agent:
 
-To reset to defaults, delete the file:
+```yaml
+# .crosscheck/workflow.yml
+steps:
+  - name: review
+    type: review
+    reviewer: auto
+    instructions: |
+      Do not suggest TypeScript patterns — this is a Rust project.
+      Focus on memory safety and error handling.
+      ## Verdict
+      End with: VERDICT: APPROVE | NEEDS_WORK | BLOCK
+  - name: fix
+    type: fix
+    reviewer: origin
+    when: "review.verdict != 'APPROVE'"
+    instructions: "Only fix issues explicitly called out. Do not refactor unrelated code."
+```
+
+`~/.crosscheck/instructions.md` serves as a fallback when a workflow step has no `instructions:` field. `crosscheck optimize --apply` writes to that file to persist learned improvements across sessions.
+
+To reset instructions.md to defaults, delete the file:
 ```bash
 rm ~/.crosscheck/instructions.md
 ```
-The next review will re-seed it from the built-in defaults.
 
-### Can I have per-project instructions?
+### Can I have per-project workflow?
 
-Yes. Create `.crosscheck/instructions.md` in your repo root. crosscheck checks for a project-level file first and uses it instead of the user-level one. This lets you enforce project-specific constraints (e.g. "this is a Rust project — do not suggest TypeScript patterns") without affecting other repos.
+Yes. Create `.crosscheck/workflow.yml` in your repo root. crosscheck loads it automatically and uses it instead of the built-in default pipeline. This is the recommended way to customize reviewer behavior — it keeps all per-project settings in one file under version control.
 
 ### What is `AGENT.md`?
 
@@ -950,7 +994,7 @@ crosscheck fetches the PR base branch (e.g. `staging`) into the temp clone befor
 npm install -g smee-client
 ```
 
-Visit [smee.io/new](https://smee.io/new) and copy the channel URL. Then in `crosscheck.config.yml`:
+Visit [smee.io/new](https://smee.io/new) and copy the channel URL. Then in `~/.crosscheck/config.yml`:
 
 ```yaml
 tunnel:
@@ -958,7 +1002,7 @@ tunnel:
   smee_channel: https://smee.io/your-channel-id
 ```
 
-Register the smee channel URL as your GitHub webhook Payload URL once. crosscheck will forward events from the channel to the local server automatically. Unlike `localhost.run`, no re-registration is needed on restart.
+crosscheck registers the smee channel URL as your GitHub webhook automatically on first `watch` start. The channel URL never changes, so no re-registration is needed on restart. Unlike `localhost.run`, events are queued while you're offline and replayed when you reconnect.
 
 
 ### Can I disable the auto-fix step?

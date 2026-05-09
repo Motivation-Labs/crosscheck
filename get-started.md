@@ -143,35 +143,23 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 
 ---
 
-## Step 1 — Check your environment
+## Step 1 — Set up crosscheck
 
 ```bash
-crosscheck init
+crosscheck onboard
 ```
 
-This scans your machine, reports the status of every dependency, writes a starter `crosscheck.config.yml`, and auto-fills `routing.allowed_authors` with your GitHub login.
+`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full six-step walkthrough.
 
-```
-crosscheck — environment check
+Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
 
-  ✓ codex CLI            codex-cli 0.128.0 — authenticated
-  ✓ claude CLI           2.1.x (Claude Code)
-  ✓ gh CLI               gh version 2.65.0
-  ✓ GITHUB_TOKEN         set (gh auth login)
-  ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
-
-  ✓ allowed_authors set to beingzy (github)
-```
-
-`allowed_authors` is detected from `gh auth login` — crosscheck will only review PRs you open, which is the right default when you're the one running the AI agents. If you run `crosscheck watch` before running `init`, the same detection runs automatically on first launch.
-
-Fix any failures before continuing.
+> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
 
 ---
 
 ## Step 2 — Test with a single PR
 
-The fastest way to verify everything is working end-to-end:
+Before running continuously, verify end-to-end with one PR:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
@@ -366,22 +354,89 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ### `crosscheck onboard`
 
-Guided first-time setup. Walks you through selecting a deployment mode (personal or team), detects your GitHub login and org memberships, lets you pick which repos to monitor, and writes the result to `crosscheck.config.yml`. Run this instead of manually editing the config.
+The recommended first-time setup command. Walks through six steps interactively and writes a ready-to-use config.
 
 ```bash
 crosscheck onboard
-crosscheck onboard --yes          # accept defaults without prompts
+crosscheck onboard --yes          # accept all defaults non-interactively
 crosscheck onboard --personal     # force personal mode for this session
 crosscheck onboard --team         # force team mode for this session
 crosscheck onboard --reconfigure  # re-run setup even if config already exists
 ```
 
-`onboard` is the recommended starting point for new installs. `crosscheck init` remains a pure environment check (CLIs, auth, secrets) — `onboard` is the repo-selection and deployment-mode wizard that follows it.
+**The six steps:**
+
+**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
+
+**Step 2 — Deployment mode.** Choose how crosscheck scopes itself:
+- `personal` — monitors your personal repos + all orgs you belong to; reviews only PRs you author
+- `team` — monitors org repos only; reviews all PRs from any author
+
+**Step 3 — Repo selection.** Lists accessible repos and orgs; you pick which ones to watch. Org-level selection covers all repos in the org with one webhook.
+
+**Step 4 — Review mode.** If both CLIs are available, choose:
+- `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
+- `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
+
+**Step 5 — Workflow pipeline.** Choose what happens after a review:
+
+```
+  [1] review only              — AI posts a comment; you handle fixes
+  [2] review → fix             — AI reviews, then auto-applies fixes  (recommended)
+  [3] review → fix → re-check  — full loop: review, fix, re-review to confirm
+```
+
+The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
+
+**Step 6 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+
+```
+crosscheck onboard
+
+  Step 1 — environment check
+  ✓ codex CLI            codex-cli 0.128.0 — authenticated
+  ✓ claude CLI           2.1.x (Claude Code)
+  ✓ gh CLI               gh version 2.65.0
+  ✓ GITHUB_TOKEN         set (gh auth login)
+
+  Step 2 — deployment mode
+  [1] personal  [2] team
+  Choice [1]: 1
+
+  Step 3 — select repos to monitor
+  [1] motivation-labs (org · 12 repos)
+  [2] codatta (org · 5 repos)
+  [3] your-github-login (personal · 8 repos)
+  Select [all]: 1,3
+
+  Step 4 — review mode
+  [1] cross-vendor  [2] single-vendor
+  Choice [1]: 1
+
+  Step 5 — workflow pipeline
+  [1] review only  [2] review → fix  [3] review → fix → re-check
+  Choice [2]: 3
+
+  Step 6 — review and write config
+  deployment   personal
+  orgs         motivation-labs
+  users        your-github-login (8 repos)
+  mode         cross-vendor
+  pipeline     review-fix-recheck
+  config       ~/.crosscheck/config.yml
+
+  ✓ config written to ~/.crosscheck/config.yml
+  ✓ workflow written to ~/.crosscheck/workflow.yml
+
+  Next: run  crosscheck watch  to start reviewing PRs.
+```
+
+> **`crosscheck init` vs `crosscheck onboard`** — `init` is a lightweight environment check only (no repo selection, no pipeline prompt). Use it for a quick health check or in CI. `onboard` is the full first-time setup wizard.
 
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Write the config to a specific path |
-| `-y, --yes` | Accept defaults without interactive prompts |
+| `-y, --yes` | Accept all defaults without interactive prompts |
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |

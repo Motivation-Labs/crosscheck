@@ -93,7 +93,22 @@ export const PostReviewConfigSchema = z.object({
   auto_fix: PostReviewFixSchema.default({}),
 })
 
+export const DisplayThemeSchema = z.object({
+  bar_fill: z.string().default('blue'),
+  bar_empty: z.string().default('dim'),
+  cr_approve: z.string().default('green'),
+  cr_needs_work: z.string().default('yellow'),
+  cr_block: z.string().default('red'),
+  fix_fill: z.string().default('cyan'),
+})
+
+export const DisplayConfigSchema = z.object({
+  theme: DisplayThemeSchema.default({}),
+})
+
 export const ConfigSchema = z.object({
+  // Absent = not yet configured; watch/serve will prompt on first run.
+  deployment: z.enum(['personal', 'team']).optional(),
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
     codex: VendorConfigSchema.default({}),
@@ -102,6 +117,7 @@ export const ConfigSchema = z.object({
   quality: QualityConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   orgs: z.array(z.string()).default([]),
+  users: z.array(z.string()).default([]),
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),
@@ -109,6 +125,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
+  display: DisplayConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -119,3 +136,5 @@ export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>
 export type PostReviewConfig = z.infer<typeof PostReviewConfigSchema>
 export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
+export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
+export type DisplayTheme = z.infer<typeof DisplayThemeSchema>

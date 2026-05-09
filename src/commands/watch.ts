@@ -1,13 +1,13 @@
 import { execSync, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
-import ora from 'ora'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
+  listUserRepos,
 } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath, detectGitHubLogin, patchAllowedAuthors } from '../config/loader.js'
@@ -15,9 +15,30 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
+import { loadWorkflow } from '../lib/workflow.js'
+import { PRBoard } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+
+// Compute PR diff size in lines, excluding noise (lockfiles, binaries, data files)
+const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
+
+function computePRLoc(tmpDir: string, baseBranch: string): number {
+  try {
+    const stat = execSync(`git diff --stat origin/${baseBranch}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+    let total = 0
+    for (const line of stat.split('\n')) {
+      const m = line.match(/^\s+(.+?)\s+\|\s+(\d+)/)
+      if (!m) continue
+      const file = m[1].trim().replace(/\{.*?=> /, '').replace('}', '')  // handle rename notation
+      if (!NOISE_EXT.test(file)) total += parseInt(m[2], 10)
+    }
+    return total
+  } catch {
+    return 0
+  }
+}
 
 function detectCurrentRepo(): { owner: string; repo: string } | null {
   try {
@@ -122,9 +143,14 @@ export async function runWatch(configPath?: string) {
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
 
-  const log = (msg: string) => {
-    console.log(`${chalk.dim(new Date().toLocaleTimeString())} ${msg}`)
-    fileLog({ level: 'info', event: 'message', message: msg })
+  // Board manages all terminal output after startup
+  const board = new PRBoard()
+  board.setConfig(config, loadWorkflow(process.cwd()))
+
+  // Thin wrapper: routes important messages to both terminal and file log
+  const bLog = (line1: string, line2?: string) => {
+    board.log(line1, line2)
+    fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
   }
 
   // PR deduplication — skip if already reviewing this PR+SHA
@@ -144,7 +170,7 @@ export async function runWatch(configPath?: string) {
       const key = `${owner}/${repoName}#${prNumber}@${pr.head.sha}`
 
       if (inFlight.has(key)) {
-        log(chalk.dim(`PR #${prNumber} already in review — skipping duplicate`))
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
         return
       }
 
@@ -164,25 +190,29 @@ export async function runWatch(configPath?: string) {
         return
       }
 
-      log(`${chalk.bold(`PR #${prNumber}`)} ${event.action}: ${chalk.dim(pr.title)}`)
       const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
       const reviewer = assignReviewer(origin, config)
 
       fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
 
       if (!reviewer) {
-        log(chalk.dim(`  origin=${origin} — skipping (no reviewer assigned)`))
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
         inFlight.delete(key)
         return
       }
 
-      log(`  origin=${chalk.yellow(origin)}  reviewer=${chalk.cyan(reviewer)}`)
+      const ts = chalk.dim(new Date().toLocaleTimeString())
+      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+      bLog(
+        `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
+        `${tsIndent}origin=${chalk.yellow(origin)}  reviewer=${chalk.cyan(reviewer)}`
+      )
 
-      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
-      const spinner = ora({ indent: 2 })
+      board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
       const reviewStart = Date.now()
+      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+
       try {
-        spinner.start('cloning...')
         execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
         execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
         execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
@@ -193,26 +223,36 @@ export async function runWatch(configPath?: string) {
         } catch {
           fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
         }
-        spinner.succeed('cloned')
 
-        await runWorkflow({
+        // Measure PR size (excluding noise files) and push to the board slot
+        const prLoc = computePRLoc(tmpDir, pr.base.ref)
+        board.updatePR(key, { prLoc })
+
+        const { verdict } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config, origin,
           reviewStart,
-          log,
+          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+          onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
         })
+
+        void verdict  // verdict already flowed into the board slot via onPhaseChange
+        board.completePR(key, {
+          elapsedMs: Date.now() - reviewStart,
+          url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+        })
+
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err)
-        if (spinner.isSpinning) spinner.fail(message)
-        else log(`  ✗ ${message}`)
+        board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
         inFlight.delete(key)
       }
     },
-    log,
+    (msg: string) => bLog(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
     fileLog,
   )
 
@@ -234,20 +274,35 @@ export async function runWatch(configPath?: string) {
     process.exit(1)
   })
 
-  // Determine scopes once — these don't change between tunnel reconnects
+  // Determine scopes once — these don't change between tunnel reconnects.
+  // orgs, users, and repos are additive: all configured sources contribute scopes.
   type Scope = { org: string } | { owner: string; repo: string }
   const scopes: Scope[] = []
 
-  if (config.orgs.length > 0) {
-    for (const org of config.orgs) scopes.push({ org })
-  } else if (config.repos.length > 0) {
-    for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
-  } else if (config.tunnel.backend !== 'smee') {
+  for (const org of config.orgs) scopes.push({ org })
+
+  const userRepoResults: Array<{ user: string; count: number } | { user: string; error: string }> = []
+  if (config.users.length > 0) {
+    for (const user of config.users) {
+      try {
+        const repos = await listUserRepos(user, token)
+        for (const { owner, name } of repos) scopes.push({ owner, repo: name })
+        userRepoResults.push({ user, count: repos.length })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        userRepoResults.push({ user, error: msg })
+      }
+    }
+  }
+
+  for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
+
+  if (scopes.length === 0 && config.tunnel.backend !== 'smee') {
     // localhost.run needs a target repo to auto-register webhooks.
     // smee users register the webhook manually — no target required here.
     const detected = detectCurrentRepo()
     if (!detected) {
-      console.error(chalk.red('No repos or orgs configured. Run inside a git repo or set repos/orgs in config.'))
+      console.error(chalk.red('No repos, users, or orgs configured. Run inside a git repo or set repos/users/orgs in config.'))
       server.close(() => process.exit(1))
       return
     }
@@ -278,6 +333,7 @@ export async function runWatch(configPath?: string) {
 
   const cleanup = async () => {
     running = false
+    board.stop()
     console.log('\nCleaning up...')
     currentTunnelProc?.kill()
     await deleteCurrentWebhooks()
@@ -288,12 +344,23 @@ export async function runWatch(configPath?: string) {
   process.on('SIGINT', () => { void cleanup() })
   process.on('SIGTERM', () => { void cleanup() })
 
-  // Print banner once at startup
+  // ── Static startup banner ─────────────────────────────────────────────────
   console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
   console.log(chalk.bold('crosscheck watch\n'))
   if (config.orgs.length > 0) {
     console.log(`  orgs      ${chalk.cyan(config.orgs.join(', '))}`)
-  } else {
+  }
+  if (config.users.length > 0) {
+    console.log(`  users     ${chalk.cyan(config.users.join(', '))}`)
+    for (const r of userRepoResults) {
+      if ('error' in r) {
+        console.log(`            ${chalk.yellow(`⚠ ${r.user}: could not list repos — ${r.error}`)}`)
+      } else {
+        console.log(`            ${chalk.dim(`${r.user}: ${r.count} repo(s) registered`)}`)
+      }
+    }
+  }
+  if (config.orgs.length === 0 && config.users.length === 0) {
     const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
     console.log(`  repos     ${chalk.cyan(labels.join(', '))}`)
   }
@@ -302,7 +369,6 @@ export async function runWatch(configPath?: string) {
   const cfgPath = resolveConfigPath(configPath)
   console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
   if (config.routing.allowed_authors.length === 0) {
-    const cfgPath = resolveConfigPath(configPath)
     const login = detectGitHubLogin()
     if (login && cfgPath && patchAllowedAuthors(cfgPath, login)) {
       config = loadConfig(configPath)
@@ -315,21 +381,22 @@ export async function runWatch(configPath?: string) {
   }
   console.log()
 
+  // Board starts after the banner — all output below is live-updated
+  board.start()
+
   // ── Smee mode ─────────────────────────────────────────────────────────────
   // No tunnel management or webhook auto-registration needed.
   // The user points their GitHub webhook to the smee channel URL once.
   if (config.tunnel.backend === 'smee') {
     const channelUrl = config.tunnel.smee_channel
     if (!channelUrl) {
+      board.stop()
       console.error(chalk.red('✗ tunnel.smee_channel is required when tunnel.backend: smee'))
       console.error(chalk.dim('  Visit https://smee.io/new to get a free channel URL.'))
       server.close(() => process.exit(1))
       return
     }
-    console.log(`  tunnel    ${chalk.cyan(channelUrl)}  ${chalk.dim('(smee.io — events queued while offline)')}`)
-    console.log(chalk.dim(`  Register this as GitHub webhook Payload URL, then:`))
-    console.log(chalk.dim(`    webhook secret: cat ~/.crosscheck/webhook-secret`))
-    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    board.setTunnel('smee', channelUrl, true)
     fileLog({ level: 'info', event: 'tunnel_opened', url: channelUrl, backend: 'smee' })
 
     let smeeRetryDelay = 5_000
@@ -338,7 +405,7 @@ export async function runWatch(configPath?: string) {
         '--url', channelUrl,
         '--path', config.server.webhook_path,
         '--port', String(config.server.port),
-      ], { stdio: 'inherit' })
+      ], { stdio: 'pipe' })
       currentTunnelProc = smeeProc
 
       try {
@@ -353,6 +420,7 @@ export async function runWatch(configPath?: string) {
           smeeProc.on('exit', () => resolve())
         })
       } catch (err) {
+        board.stop()
         console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
         server.close(() => process.exit(1))
         return
@@ -360,10 +428,12 @@ export async function runWatch(configPath?: string) {
 
       if (!running) break
       currentTunnelProc = null
-      log(chalk.yellow(`  smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
+      board.setTunnel('smee', channelUrl, false)
+      bLog(chalk.yellow(`smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true, backend: 'smee' })
       await new Promise(r => setTimeout(r, smeeRetryDelay))
       smeeRetryDelay = Math.min(smeeRetryDelay * 2, 60_000)
+      board.setTunnel('smee', channelUrl, true)
     }
     return
   }
@@ -371,7 +441,7 @@ export async function runWatch(configPath?: string) {
   // ── localhost.run mode ────────────────────────────────────────────────────
   let reconnectDelay = 5_000
   while (running) {
-    log('Opening tunnel via localhost.run...')
+    board.setTunnel('localhost.run', null, false)
     let tunnelUrl: string
     let tunnelProc: ChildProcess
     try {
@@ -379,7 +449,7 @@ export async function runWatch(configPath?: string) {
     } catch (err: unknown) {
       if (!running) break
       const msg = err instanceof Error ? err.message : String(err)
-      log(chalk.yellow(`  ✗ tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
+      bLog(chalk.yellow(`tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_error', message: msg })
       await new Promise(r => setTimeout(r, reconnectDelay))
       reconnectDelay = Math.min(reconnectDelay * 2, 60_000)
@@ -388,13 +458,11 @@ export async function runWatch(configPath?: string) {
     reconnectDelay = 5_000  // reset backoff on success
 
     currentTunnelProc = tunnelProc
-    const webhookUrl = `${tunnelUrl}${webhookPath}`
-    log(chalk.green(`  ✓ tunnel ready: ${chalk.cyan(tunnelUrl)}`))
-    console.log(`  tunnel    ${chalk.cyan(tunnelUrl)}`)
-    console.log(chalk.dim('Waiting for PR events — Ctrl+C to stop.\n'))
+    board.setTunnel('localhost.run', tunnelUrl, true)
     fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
 
     // Register webhooks for this tunnel session
+    const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
     for (const scope of scopes) {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
@@ -406,40 +474,22 @@ export async function runWatch(configPath?: string) {
           const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
           currentRegistered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
         }
-        log(chalk.green(`  ✓ webhook registered for ${label}`))
+        bLog(`${chalk.green('✓')} webhook registered: ${chalk.cyan(label)}`)
         fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         const isCreds = /bad credentials|\[401\]/i.test(msg)
-        // 403 always means insufficient scope.
-        // 404 on an org webhook means the token lacks admin:org_hook scope (GitHub
-        // hides the endpoint rather than returning 403). For repo webhooks, 404
-        // means the repo itself is not found — show the raw error instead.
         const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
           || ('org' in scope && /\[404\]/i.test(msg))
-        log(chalk.yellow(`  ⚠ could not register webhook for ${label}`))
+        bLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
         if (isCreds) {
-          log(chalk.dim(`    token invalid or expired`))
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh')}`)
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('(regenerate PAT)')}`)
+          bLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
         } else if (isScope) {
-          log(chalk.dim(`    token missing admin:org_hook scope or org Owner role`))
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-          log(`    ${chalk.yellow('→')} ${chalk.cyan('https://github.com/settings/tokens')}  ${chalk.dim('new PAT → enable admin:org scope')}`)
-          log(`    ${chalk.dim('    or register the webhook manually:')}`)
-          log(`    ${chalk.dim('      Payload URL')}  ${chalk.cyan(webhookUrl)}`)
-          log(`    ${chalk.dim('      Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
-          log(`    ${chalk.dim('      Hooks page')}   ${chalk.cyan(`https://github.com/organizations/${label}/settings/hooks`)}`)
+          bLog(`  missing admin:org_hook scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
         } else {
-          log(chalk.dim(`    ${msg}`))
-          log(`    ${chalk.dim('    Payload URL')}  ${chalk.cyan(webhookUrl)}`)
-          log(`    ${chalk.dim('    Secret')}       ${chalk.cyan('cat ~/.crosscheck/webhook-secret')}`)
+          bLog(`  ${msg}`)
         }
-        const hooksUrl = 'org' in scope
-          ? `https://github.com/organizations/${scope.org}/settings/hooks`
-          : `https://github.com/${scope.owner}/${scope.repo}/settings/hooks`
-        log(chalk.dim(`    to register manually: Payload URL = ${webhookUrl}  Secret = (see ~/.crosscheck/webhook-secret)`))
-        log(chalk.dim(`    ${hooksUrl}`))
+        bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
       }
     }
 
@@ -451,7 +501,8 @@ export async function runWatch(configPath?: string) {
 
     // Clean up webhooks tied to the old URL before reconnecting
     await deleteCurrentWebhooks()
-    log(chalk.yellow('  tunnel disconnected — reconnecting in 5s...'))
+    board.setTunnel('localhost.run', tunnelUrl, false)
+    bLog(chalk.yellow('tunnel disconnected — reconnecting in 5s...'))
     fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true })
     await new Promise(r => setTimeout(r, reconnectDelay))
   }

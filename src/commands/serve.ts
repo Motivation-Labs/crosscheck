@@ -77,6 +77,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       tmpDir, token, config, origin,
       reviewStart,
       log,
+      onPhaseChange: (label: string) => log(`  → ${label}`),
       crosscheckShas,
     })
   } catch (err: unknown) {

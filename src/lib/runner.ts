@@ -1,18 +1,23 @@
 import { execSync } from 'child_process'
 import chalk from 'chalk'
-import ora from 'ora'
 import type { Config } from '../config/schema.js'
 import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runAddressStep } from '../reviewers/address.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
+
+export interface PRPhaseData {
+  verdict?: string | null
+  commentCount?: number
+  fixCount?: number
+}
 
 export interface WorkflowContext {
   owner: string
@@ -25,8 +30,19 @@ export interface WorkflowContext {
   origin: PROrigin
   reviewStart: number
   log: (msg: string) => void
+  onPhaseChange: (label: string, data?: PRPhaseData) => void
   // SHAs crosscheck pushed — used to skip self-triggered synchronize events
   crosscheckShas: Set<string>
+}
+
+export interface WorkflowResult {
+  verdict: string | null
+}
+
+function countComments(reviewText: string): number {
+  const bullets = (reviewText.match(/^[-*•]\s/gm) ?? []).length
+  const numbered = (reviewText.match(/^\d+\.\s/gm) ?? []).length
+  return bullets + numbered
 }
 
 function resolveReviewer(
@@ -51,16 +67,15 @@ function resolveReviewer(
   return null
 }
 
-export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
-  const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log } = ctx
+export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
+  const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
   const steps = loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
-  const spinner = ora({ indent: 2 })
 
   for (const step of steps) {
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {
-      log(chalk.dim(`  [${step.name}] skipped — ${step.when}`))
+      fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
       results[step.name] = { skipped: true }
       continue
     }
@@ -68,48 +83,39 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
     if (step.type === 'review' || step.type === 'recheck') {
       const reviewer = resolveReviewer(step.reviewer, origin, config)
       if (!reviewer) {
-        log(chalk.dim(`  [${step.name}] no reviewer available — skipping`))
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true }
         continue
       }
 
       fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
 
-      let elapsed = 0
-      const timer = setInterval(() => { elapsed++; spinner.text = `${reviewer} reviewing... (${elapsed}s)` }, 1000)
-      spinner.start(`${reviewer} reviewing...`)
-
+      onPhaseChange(`${reviewer} reviewing...`)
       let rawReview: string
-      try {
-        if (reviewer === 'codex') {
-          rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
-        } else {
-          rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
-        }
-      } finally {
-        clearInterval(timer)
+      if (reviewer === 'codex') {
+        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
+      } else {
+        rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
       const commentBody = prependVerdictToComment(clean, verdict)
-      spinner.succeed(`${step.type} complete (${elapsed}s)`)
+      const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
 
-      spinner.start('posting comment...')
+      onPhaseChange('posting comment...', { verdict: verdict ?? undefined, commentCount })
       const octokit = createGithubClient(token)
       await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
       const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
-      spinner.succeed(`posted → ${commentUrl}`)
       fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
 
-      log(formatVerdict(verdict))
       results[step.name] = { verdict, commentBody, commentUrl }
 
     } else if (step.type === 'address') {
       // Respect post_review.auto_fix config
       const autoFix = config.post_review.auto_fix
       if (!autoFix.enabled || autoFix.trigger === 'never') {
-        log(chalk.dim(`  [${step.name}] auto-fix disabled — skipping`))
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'auto_fix_disabled' })
         results[step.name] = { skipped: true }
         continue
       }
@@ -117,7 +123,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
       if (!reviewResult?.commentBody) {
-        log(chalk.dim(`  [${step.name}] no review comment available — skipping`))
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_review_comment' })
         results[step.name] = { skipped: true }
         continue
       }
@@ -129,7 +135,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
         const minRank = severityRank[autoFix.min_severity] ?? 1
         const actualRank = verdictRank[reviewResult.verdict ?? ''] ?? 0
         if (actualRank < minRank) {
-          log(chalk.dim(`  [${step.name}] verdict ${reviewResult.verdict} below min_severity ${autoFix.min_severity} — skipping`))
+          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'below_min_severity', verdict: reviewResult.verdict })
           results[step.name] = { skipped: true }
           continue
         }
@@ -146,14 +152,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       }
 
       if (!vendor) {
-        log(chalk.dim(`  [${step.name}] fixer vendor not available — skipping`))
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_vendor' })
         results[step.name] = { skipped: true }
         continue
       }
 
       // Codex address not yet implemented — skip gracefully
       if (vendor === 'codex') {
-        log(chalk.dim(`  [${step.name}] codex address not yet supported — skipping`))
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'codex_address_unsupported' })
         results[step.name] = { skipped: true }
         continue
       }
@@ -166,12 +172,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
       } catch { /* ignore */ }
 
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
-        log(chalk.yellow(`  [${step.name}] ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already on this PR — stopping`))
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
         results[step.name] = { skipped: true }
         continue
       }
 
-      spinner.start(`${vendor} addressing review...`)
+      onPhaseChange(`${vendor} addressing...`)
       let appliedCount = 0
       try {
         ;({ appliedCount } = await runAddressStep(
@@ -183,28 +189,26 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
           config,
         ))
       } catch (err) {
-        spinner.fail(`address failed: ${err instanceof Error ? err.message : String(err)}`)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'address' }, err)
         results[step.name] = { skipped: true }
         continue
       }
 
       if (appliedCount === 0) {
-        spinner.succeed('nothing to address')
         results[step.name] = { applied_count: 0 }
         continue
       }
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
+      if (isFork) {
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'fork_pr' })
+        results[step.name] = { skipped: true }
+        continue
+      }
+
       const deliveryMode = autoFix.delivery.mode
 
       if (deliveryMode === 'commit') {
-        // Fork PRs: cannot push to contributor's fork
-        if (isFork) {
-          log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
-          results[step.name] = { skipped: true }
-          continue
-        }
         execSync('git add -A', { cwd: tmpDir })
         execSync(
           `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
@@ -216,17 +220,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        spinner.succeed(`addressed ${appliedCount} issue${appliedCount !== 1 ? 's' : ''} → pushed to ${pr.head.ref}`)
+        onPhaseChange('addressed ✓', { fixCount: appliedCount })
         fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
-        // Fork PRs: cannot push to contributor's fork
-        if (isFork) {
-          log(chalk.dim(`  [${step.name}] fork PR — skipping push (cannot push to contributor's fork)`))
-          results[step.name] = { skipped: true }
-          continue
-        }
         // Create a fix branch and open a PR targeting the original branch
         const fixBranch = `fix/cr-${prNumber}-address-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
@@ -259,7 +257,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
             })
           } catch { /* label may not exist in this repo — skip */ }
         }
-        spinner.succeed(`fix PR #${fixPr.number} opened → ${fixPr.html_url}`)
+        onPhaseChange('addressed ✓', { fixCount: appliedCount })
         fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
         results[step.name] = { applied_count: appliedCount }
 
@@ -272,10 +270,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<void> {
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
-        spinner.succeed(`fix suggestions posted as review comment`)
+        onPhaseChange('addressed ✓', { fixCount: appliedCount })
         fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
         results[step.name] = { applied_count: appliedCount }
       }
     }
   }
+
+  const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
+  return { verdict: verdict ?? null }
 }

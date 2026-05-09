@@ -49,6 +49,15 @@ orgs:
   - motivation-labs
   - codatta
 
+# ─── Users ───────────────────────────────────────────────────────────────────
+# Monitor all repos owned by personal GitHub accounts (non-org).
+# At startup, crosscheck enumerates each user's repos and registers webhooks.
+# Useful when your AI agents open PRs across many personal repos.
+# Combines with `orgs` and `repos` — all configured sources are additive.
+# users:
+#   - beingzy          # your personal account
+#   - my-agent-login   # a bot account that pushes to its own repos
+
 # ─── Repos ───────────────────────────────────────────────────────────────────
 # Omit entirely to auto-detect from `git remote` (useful in watch mode)
 # repos: still works for monitoring specific repos only
@@ -141,3 +150,16 @@ post_review:
 logs:
   enabled: true
   retention_days: 7   # delete files older than N days (min: 1, max: 30)
+
+# ─── Display ─────────────────────────────────────────────────────────────────
+# Terminal output theme for crosscheck watch.
+# Override individual colors using chalk color names (red, green, blue, cyan,
+# yellow, magenta, white, gray, dim, bold) or hex values (#rrggbb).
+# display:
+#   theme:
+#     bar_fill: blue         # filled █ segments on the PR size bar
+#     bar_empty: dim         # empty  ░ segments (all bars)
+#     cr_approve: green      # CR bar + verdict label when APPROVE
+#     cr_needs_work: yellow  # CR bar + verdict label when NEEDS WORK
+#     cr_block: red          # CR bar + verdict label when BLOCK
+#     fix_fill: cyan         # filled segments on the FIX bar

@@ -109,6 +109,28 @@ export async function deleteOrgWebhook(
   })
 }
 
+export async function listUserRepos(
+  user: string,
+  token: string,
+): Promise<Array<{ owner: string; name: string }>> {
+  const results: Array<{ owner: string; name: string }> = []
+  let page = 1
+  while (true) {
+    const res = await fetch(`https://api.github.com/users/${user}/repos?per_page=100&page=${page}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+    })
+    if (!res.ok) {
+      const err = await res.json() as { message?: string }
+      throw new Error(`Failed to list repos for ${user} [${res.status}]: ${err.message ?? res.statusText}`)
+    }
+    const data = await res.json() as Array<{ owner: { login: string }; name: string }>
+    for (const repo of data) results.push({ owner: repo.owner.login, name: repo.name })
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,

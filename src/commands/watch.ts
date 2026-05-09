@@ -427,9 +427,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     const deployLabel = sessionOnly
       ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
       : chalk.cyan(effectiveDeployment)
-    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
+    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)} · ${chalk.dim('codex:')}${chalk.cyan(config.vendors.codex.quality)}`)
   } else {
-    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
+    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)} · ${chalk.dim('codex:')}${chalk.cyan(config.vendors.codex.quality)}`)
   }
   if (config.orgs.length > 0) {
     console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)
@@ -570,37 +570,77 @@ export async function runWatch(opts: WatchOpts = {}) {
     cLog(`${chalk.green('✓')} tunnel ready: ${chalk.cyan(tunnelUrl)}`)
     fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
 
-    // Register webhooks for this tunnel session
+    // Register webhooks in parallel: dedup check → register with backoff → aggregate summary
     const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
-    for (const scope of scopes) {
+    let hookOk = 0, hookFail = 0
+
+    await Promise.all(scopes.map(async (scope) => {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+
+      // Dedup: skip if a hook for this exact URL already exists (e.g. previous session not cleaned up)
+      let existingId: number | null = null
       try {
-        if ('org' in scope) {
-          const hookId = await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
-          currentRegistered.push({ type: 'org', org: scope.org, hookId })
-        } else {
-          const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
-          currentRegistered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
+        existingId = 'org' in scope
+          ? await findOrgWebhook(scope.org, webhookUrl, token)
+          : await findRepoWebhook(scope.owner, scope.repo, webhookUrl, token)
+      } catch { /* ignore — proceed to register */ }
+
+      if (existingId !== null) {
+        currentRegistered.push('org' in scope
+          ? { type: 'org' as const, org: scope.org, hookId: existingId }
+          : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId: existingId })
+        hookOk++
+        fileLog({ level: 'info', event: 'webhook_active', scope: label, url: webhookUrl })
+        return
+      }
+
+      // Register with exponential back-off: delay 2s then 4s before giving up
+      let hookId: number | null = null
+      let lastErr = ''
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          const delay = 2 ** attempt * 1000
+          fileLog({ level: 'warn', event: 'webhook_register_retry', scope: label, attempt, message: lastErr })
+          await new Promise(r => setTimeout(r, delay))
         }
-        cLog(`${chalk.green('✓')} webhook registered for ${chalk.cyan(label)}`)
+        try {
+          hookId = 'org' in scope
+            ? await registerOrgWebhook(scope.org, webhookUrl, webhookSecret, token)
+            : await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
+          break
+        } catch (err: unknown) {
+          lastErr = err instanceof Error ? err.message : String(err)
+        }
+      }
+
+      if (hookId !== null) {
+        currentRegistered.push('org' in scope
+          ? { type: 'org' as const, org: scope.org, hookId }
+          : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId })
+        hookOk++
         fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        const isCreds = /bad credentials|\[401\]/i.test(msg)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-          || ('org' in scope && /\[404\]/i.test(msg))
-        cLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
+      } else {
+        hookFail++
+        const isCreds = /bad credentials|\[401\]/i.test(lastErr)
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(lastErr)
+          || ('org' in scope && /\[404\]/i.test(lastErr))
         if (isCreds) {
-          bLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): token invalid — run: ${chalk.cyan('gh auth refresh')}`)
         } else if (isScope) {
-          bLog(`  missing admin:org_hook scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
         } else {
-          bLog(`  ${msg}`)
+          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): ${lastErr}`)
         }
         bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
+        fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
       }
-    }
+    }))
+
+    // Single aggregated connectivity line instead of one per repo
+    const hookTotal = scopes.length
+    cLog(`${hookFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${hookOk}/${hookTotal}${hookFail > 0 ? ` (${hookFail} failed)` : ''}`)
+    fileLog({ level: 'info', event: 'webhooks_registered', count: hookOk, total: hookTotal, failed: hookFail, url: webhookUrl })
 
     // Wait for this tunnel session to end.
     // Health check kills the SSH proc if lhr.life goes dead without exiting.

@@ -33,6 +33,7 @@ export interface DiagnoseReport {
   summary: { total_reviews: number; successful: number; failed: number; failure_rate: number }
   errors: ErrorEntry[]
   verdict_distribution: { APPROVE: number; NEEDS_WORK: number; BLOCK: number }
+  verdict_parse_failures: number
   repos_seen: string[]
   languages_detected: string[]
   reviewer_performance: Record<string, ReviewerPerf>
@@ -171,6 +172,7 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
 
   const errorPatterns = new Map<string, ErrorEntry>()
   const verdicts = { APPROVE: 0, NEEDS_WORK: 0, BLOCK: 0 }
+  let verdictParseFailures = 0
   const reposSeen = new Set<string>()
   const languagesSeen = new Set<string>()   // from review_started log events
   const reviewerStats = new Map<string, { attempts: number; successes: number }>()
@@ -202,6 +204,10 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
       }
     }
 
+    if (e.event === 'verdict_parse_failed') {
+      verdictParseFailures++
+    }
+
     if (e.event === 'error' && e.level === 'error') {
       const msg = e.message ?? ''
       const { pattern, command, branch } = classifyError(msg)
@@ -225,6 +231,13 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
   const languagesFromErrors = detectLanguagesFromCommands(errors)
   const languages = [...new Set([...languagesSeen, ...languagesFromErrors])]
   const suggestions = buildSuggestions(errors, languages)
+
+  if (verdictParseFailures > 0) {
+    suggestions.push({
+      type: 'investigate',
+      reason: `Codex returned no verdict line ×${verdictParseFailures} — check your .codex/instructions file or lower vendors.codex.quality to "low"`,
+    })
+  }
 
   const fromDate = files[0]?.split('/').at(-1)?.replace('.ndjson', '') ?? 'N/A'
   const toDate = files.at(-1)?.split('/').at(-1)?.replace('.ndjson', '') ?? 'N/A'
@@ -254,6 +267,7 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
     },
     errors,
     verdict_distribution: verdicts,
+    verdict_parse_failures: verdictParseFailures,
     repos_seen: [...reposSeen],
     languages_detected: languages,
     reviewer_performance,
@@ -277,6 +291,9 @@ function printReport(report: DiagnoseReport): void {
   console.log(`    total       ${summary.total_reviews}`)
   console.log(`    successful  ${chalk.green(summary.successful)}`)
   console.log(`    failed      ${summary.failed > 0 ? chalk.red(summary.failed) : chalk.green(summary.failed)}  ${summary.failed > 0 ? chalk.dim(`(${pct(summary.failed, summary.total_reviews)} failure rate)`) : ''}`)
+  if (report.verdict_parse_failures > 0) {
+    console.log(`    no verdict  ${chalk.yellow(report.verdict_parse_failures)}  ${chalk.dim('(review completed but no VERDICT line found)')}`)
+  }
   console.log()
 
   if (Object.keys(rp).length > 0) {

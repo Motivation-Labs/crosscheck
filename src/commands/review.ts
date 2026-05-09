@@ -10,7 +10,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment } from '../lib/verdict.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -90,8 +90,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           pr.base.ref,
           pr.title,
           config.quality,
-          config.vendors.codex.model,
-          config.vendors.codex.auth,
+          config.vendors.codex,
           undefined,
           msg => { reviewSpinner.text = msg },
         )
@@ -113,9 +112,15 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
     const { verdict, clean } = parseVerdict(reviewText)
+    if (verdict === null) {
+      fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
+    }
     fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart })
     console.log(`  ${formatVerdict(verdict)}`)
-    await postReviewComment(octokit, owner, repo, number, prependVerdictToComment(clean, verdict), reviewer)
+    const commentBody = verdict === null
+      ? `${NULL_VERDICT_WARNING}\n\n${clean}`
+      : prependVerdictToComment(clean, verdict)
+    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

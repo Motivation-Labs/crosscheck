@@ -2,9 +2,15 @@ import { z } from 'zod'
 
 export const VendorConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  model: z.string().optional(),
+  model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
   effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+})
+
+// Codex-specific vendor config: extends VendorConfigSchema with the
+// codex review `--quality` flag (low=fast/shallow, high=slow/thorough).
+export const CodexVendorConfigSchema = VendorConfigSchema.extend({
+  quality: z.enum(['low', 'medium', 'high']).default('medium'),
 })
 
 export const QualityConfigSchema = z.object({
@@ -118,7 +124,7 @@ export const ConfigSchema = z.object({
   deployment: z.enum(['personal', 'team']).optional(),
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
-    codex: VendorConfigSchema.default({}),
+    codex: CodexVendorConfigSchema.default({}),
     claude: VendorConfigSchema.default({}),
   }).default({}),
   quality: QualityConfigSchema.default({}),
@@ -137,6 +143,7 @@ export const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
+export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>
 export type LogsConfig = z.infer<typeof LogsConfigSchema>
 export type TunnelConfig = z.infer<typeof TunnelConfigSchema>

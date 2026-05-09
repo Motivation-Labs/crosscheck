@@ -6,7 +6,7 @@ import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
-import { parseVerdict, prependVerdictToComment } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -93,13 +93,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       onPhaseChange(`${reviewer} reviewing...`)
       let rawReview: string
       if (reviewer === 'codex') {
-        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, step.instructions)
+        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions)
       } else {
         rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions)
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
-      const commentBody = prependVerdictToComment(clean, verdict)
+      if (verdict === null) {
+        fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, output_length: rawReview.length })
+      }
+      const commentBody = verdict === null
+        ? `${NULL_VERDICT_WARNING}\n\n${clean}`
+        : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
 

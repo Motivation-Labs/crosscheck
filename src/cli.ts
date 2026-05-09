@@ -13,6 +13,7 @@ import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
+import { runRun } from './commands/run.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -66,6 +67,15 @@ program
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
   .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
+
+program
+  .command('run <pr-url>')
+  .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
+  .option('-c, --config <path>', 'config file path')
+  .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
+  .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
+  .option('--dry-run', 'run the review but do not post a comment or apply fixes')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, opts))
 
 program
   .command('status')

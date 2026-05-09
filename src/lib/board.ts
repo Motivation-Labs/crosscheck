@@ -429,11 +429,12 @@ export class PRBoard {
     const indent = ' '.repeat(14)
 
     // ── Section 1: status dashboard ──────────────────────────────────────────
-    const { url, alive } = this.tunnel
+    const { type: tunnelType, url, alive } = this.tunnel
+    const tunnelLabel = tunnelType === 'serve' ? 'endpoint' : 'tunnel'
     const tunnelDisplay = url
       ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
       : t.dim('connecting...')
-    const row1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  tunnel: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}  │  ${t.dim('↑')} ${this.uptime()}`
+    const row1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}  │  ${t.dim('↑')} ${this.uptime()}`
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
     const vendors: string[] = []

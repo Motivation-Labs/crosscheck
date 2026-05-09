@@ -248,7 +248,7 @@ export async function runServe(opts: ServeOpts = {}) {
             pull_request: {
               title: pr.title,
               body: pr.body ?? '',
-              head: { ref: pr.headRef, sha: pr.headSha, repo: { full_name: `${pr.owner}/${pr.repo}` } },
+              head: { ref: pr.headRef, sha: pr.headSha, repo: pr.headRepo ? { full_name: pr.headRepo } : null },
               base: { ref: pr.baseRef, repo: { full_name: `${pr.owner}/${pr.repo}` } },
               html_url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`,
               user: { login: pr.author },

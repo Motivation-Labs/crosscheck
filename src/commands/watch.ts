@@ -188,92 +188,97 @@ export async function runWatch(opts: WatchOpts = {}) {
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
     body: string | null; author: string; headSha: string; headRef: string;
-    baseRef: string; action: string;
+    headRepo: string | null; baseRef: string; action: string;
   }): Promise<void> {
     const { owner, repoName, prNumber } = params
     const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
     if (inFlight.has(key)) return
     inFlight.add(key)
 
-    if (!isAuthorAllowed(config.routing.allowed_authors, params.author)) {
-      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
-      inFlight.delete(key)
-      return
-    }
-
-    const { origin, method: originMethod } = await detectOriginFull(
-      params.body ?? '', params.headRef,
-      owner, repoName, prNumber,
-      config, token, params.author,
-    )
-    const reviewer = await assignReviewer(origin, config)
-
-    fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author })
-
-    if (!reviewer) {
-      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
-      inFlight.delete(key)
-      return
-    }
-
-    const ts = chalk.dim(new Date().toLocaleTimeString())
-    const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
-    bLog(
-      `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
-      `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
-    )
-
-    const pr: PREvent['pull_request'] = {
-      title: params.title,
-      body: params.body ?? '',
-      head: { ref: params.headRef, sha: params.headSha, repo: { full_name: `${owner}/${repoName}` } },
-      base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
-      html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
-      user: { login: params.author },
-    }
-
-    board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef)
-    const reviewStart = Date.now()
-    const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
-
+    // Outer try/finally ensures the inFlight key is always released, even if
+    // detectOriginFull / assignReviewer throw before the inner try block starts.
     try {
-      execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
-      execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-      execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-      // Fetch the base branch after checking out the PR branch so we are never
-      // on the base branch during the fetch (git refuses to update a checked-out ref).
-      // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
-      // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
-      // shallow clones when the branch is absent from the default refspec mapping.
-      try {
-        execSync(`git fetch origin ${params.baseRef}:refs/remotes/origin/${params.baseRef}`, { cwd: tmpDir, stdio: 'pipe' })
-      } catch {
-        fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef })
+      if (!isAuthorAllowed(config.routing.allowed_authors, params.author)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'author_not_allowed', author: params.author })
+        return
       }
 
-      const prLoc = computePRLoc(tmpDir, params.baseRef)
-      board.updatePR(key, { prLoc })
+      const { origin, method: originMethod } = await detectOriginFull(
+        params.body ?? '', params.headRef,
+        owner, repoName, prNumber,
+        config, token, params.author,
+      )
+      const reviewer = await assignReviewer(origin, config)
 
-      const { verdict } = await runWorkflow({
-        owner, repoName, prNumber, pr,
-        tmpDir, token, config, origin,
-        reviewStart,
-        log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
-        onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
-        crosscheckShas,
-      })
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author })
 
-      void verdict
-      board.completePR(key, {
-        elapsedMs: Date.now() - reviewStart,
-        url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
-      })
+      if (!reviewer) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
+        return
+      }
+
+      const ts = chalk.dim(new Date().toLocaleTimeString())
+      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+      bLog(
+        `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
+        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
+      )
+
+      const pr: PREvent['pull_request'] = {
+        title: params.title,
+        body: params.body ?? '',
+        head: { ref: params.headRef, sha: params.headSha, repo: params.headRepo ? { full_name: params.headRepo } : null },
+        base: { ref: params.baseRef, repo: { full_name: `${owner}/${repoName}` } },
+        html_url: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+        user: { login: params.author },
+      }
+
+      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef)
+      const reviewStart = Date.now()
+      const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+
+      try {
+        execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
+        execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Fetch the base branch after checking out the PR branch so we are never
+        // on the base branch during the fetch (git refuses to update a checked-out ref).
+        // Use explicit refs/remotes/origin/<base> target so the remote-tracking ref is
+        // always created — `git fetch origin <branch>` alone only writes FETCH_HEAD in
+        // shallow clones when the branch is absent from the default refspec mapping.
+        try {
+          execSync(`git fetch origin ${params.baseRef}:refs/remotes/origin/${params.baseRef}`, { cwd: tmpDir, stdio: 'pipe' })
+        } catch {
+          fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef })
+        }
+
+        const prLoc = computePRLoc(tmpDir, params.baseRef)
+        board.updatePR(key, { prLoc })
+
+        const { verdict } = await runWorkflow({
+          owner, repoName, prNumber, pr,
+          tmpDir, token, config, origin,
+          reviewStart,
+          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+          onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
+          crosscheckShas,
+        })
+
+        void verdict
+        board.completePR(key, {
+          elapsedMs: Date.now() - reviewStart,
+          url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
+        })
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        board.failPR(key, message)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true })
+      }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      board.failPR(key, message)
-      logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+      logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'setup' }, err)
     } finally {
-      rmSync(tmpDir, { force: true, recursive: true })
       inFlight.delete(key)
     }
   }
@@ -303,8 +308,8 @@ export async function runWatch(opts: WatchOpts = {}) {
       await reviewPR({
         owner, repoName, prNumber,
         title: pr.title, body: pr.body, author: pr.user.login,
-        headSha: pr.head.sha, headRef: pr.head.ref, baseRef: pr.base.ref,
-        action: event.action,
+        headSha: pr.head.sha, headRef: pr.head.ref, headRepo: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref, action: event.action,
       })
     },
     (msg: string) => bLog(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
@@ -493,8 +498,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         void Promise.all(queued.map(pr => reviewPR({
           owner: pr.owner, repoName: pr.repo, prNumber: pr.number,
           title: pr.title, body: pr.body, author: pr.author,
-          headSha: pr.headSha, headRef: pr.headRef, baseRef: pr.baseRef,
-          action: 'backtrace',
+          headSha: pr.headSha, headRef: pr.headRef, headRepo: pr.headRepo,
+          baseRef: pr.baseRef, action: 'backtrace',
         })))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)

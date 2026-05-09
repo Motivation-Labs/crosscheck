@@ -30,6 +30,7 @@ function makePR(overrides: Partial<{
     author: overrides.author ?? 'alice',
     headSha: 'abc123',
     headRef: 'feat/thing',
+    headRepo: 'acme/api',
     baseRef: 'main',
     body: null,
     createdAt: overrides.createdAt ?? '2025-01-01T00:00:00Z',

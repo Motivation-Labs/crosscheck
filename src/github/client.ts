@@ -187,6 +187,7 @@ export interface OpenPR {
   author: string
   headSha: string
   headRef: string
+  headRepo: string | null   // null for deleted-fork PRs; use as head.repo.full_name
   baseRef: string
   body: string | null
   createdAt: string
@@ -209,7 +210,7 @@ export async function listOpenPRs(
       number: number
       title: string
       user: { login: string }
-      head: { sha: string; ref: string }
+      head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
       created_at: string
@@ -222,6 +223,7 @@ export async function listOpenPRs(
         author: pr.user.login,
         headSha: pr.head.sha,
         headRef: pr.head.ref,
+        headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
         body: pr.body,
         createdAt: pr.created_at,

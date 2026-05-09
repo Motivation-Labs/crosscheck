@@ -144,6 +144,7 @@ export interface ServeOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  backtrace?: boolean
 }
 
 export async function runServe(opts: ServeOpts = {}) {
@@ -257,7 +258,9 @@ export async function runServe(opts: ServeOpts = {}) {
     console.log(chalk.dim('Listening for pull_request events...\n'))
 
     // Backtrace: find open PRs that haven't been reviewed yet
-    if (config.backtrace.enabled) {
+    if (opts.backtrace === false) {
+      board.log('backtrace skipped (--no-backtrace flag)')
+    } else if (config.backtrace.enabled) {
       void (async () => {
         try {
           board.log('backtrace: scanning open PRs in monitored scope...')

@@ -25,19 +25,26 @@ export const RepoConfigSchema = z.object({
 
 export const RoutingConfigSchema = z.object({
   codex_reviews_patterns: z.array(z.string()).default([
-    'Generated with \\[Claude Code\\]',
+    'Generated with \\[Claude Code\\]',  // PR body attribution footer
+    'Co-Authored-By: Claude',            // commit trailer added by Claude Code
   ]),
   claude_reviews_patterns: z.array(z.string()).default([
-    'Generated with \\[OpenAI Codex\\]',
-    'Co-Authored-By: codex',
+    'Generated with \\[OpenAI Codex\\]', // PR body attribution footer
+    'Co-Authored-By: codex',             // commit trailer added by Codex
   ]),
+  // Branch prefix routing — checked when body and commit patterns don't match.
+  // Agents should branch with these prefixes so crosscheck can identify origin
+  // even without attribution text in the PR body.
+  claude_branch_prefixes: z.array(z.string()).default(['claude/']),
+  codex_branch_prefixes: z.array(z.string()).default(['codex/']),
   // Only review PRs opened by these GitHub logins.
   // Empty list = no restriction (reviews all AI-authored PRs in cross-vendor mode,
   // or all PRs in single-vendor mode). Recommended: set to the logins of your AI agents.
   allowed_authors: z.array(z.string()).default([]),
-  // Fallback origin when no body pattern matches. Maps GitHub login → vendor origin.
+  // Last-resort fallback when body, commit, and branch checks all fail.
+  // Maps GitHub login → vendor origin.
   // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
-  // and will be reviewed by Codex, even without the attribution footer in the PR body.
+  // and will be reviewed by Codex, even without any other attribution signal.
   author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
 })
 
@@ -75,7 +82,7 @@ export const PostReviewDeliverySchema = z.object({
 })
 
 export const PostReviewFixSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   // on_issues → only run when the reviewer found actionable issues
   // always    → always run after every review
   // never     → disable (same as enabled: false)

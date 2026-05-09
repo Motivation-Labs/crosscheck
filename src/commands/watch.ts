@@ -7,10 +7,12 @@ import {
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
+  findOrgWebhook,
+  findRepoWebhook,
   listUserRepos,
   checkRepoAccessible,
 } from '../github/client.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
   loadConfig,
   getGithubToken,
@@ -19,6 +21,7 @@ import {
   promptDeploymentMode,
   detectScopesForDeployment,
   patchDeploymentConfig,
+  detectGitHubLogin,
 } from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
@@ -213,10 +216,14 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
+      const { origin, method: originMethod } = await detectOriginFull(
+        pr.body ?? '', pr.head.ref,
+        owner, repoName, prNumber,
+        config, token, pr.user.login,
+      )
       const reviewer = assignReviewer(origin, config)
 
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 
       if (!reviewer) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
@@ -228,7 +235,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
       bLog(
         `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
-        `${tsIndent}origin=${chalk.yellow(origin)}  reviewer=${chalk.cyan(reviewer)}`
+        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
       )
 
       board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
@@ -301,19 +308,23 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Runs before scope building so detected users/orgs feed into webhook registration.
   let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment
   let sessionOnly = false
+  let selfLogin: string | null = null
 
   if (opts.personal || opts.team) {
     // One-time flag: auto-detect scopes for this session, no config write.
     effectiveDeployment = opts.personal ? 'personal' : 'team'
     sessionOnly = true
     const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    selfLogin = detected.login
     config = { ...config, users: detected.users, orgs: detected.orgs, repos: [] }
   } else if (opts.reconfigure || !config.deployment) {
     // First run (no deployment in config) or explicit --reconfigure.
     effectiveDeployment = await promptDeploymentMode(opts.reconfigure ? config.deployment : undefined)
     const cfgPath = resolveConfigPath(configPath) ?? join(process.cwd(), 'crosscheck.config.yml')
     const detected = await detectScopesForDeployment(effectiveDeployment, token)
-    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, true)
+    selfLogin = detected.login
+    // force=true only for --reconfigure; first-run preserves any manually-configured orgs/authors
+    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
     console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
   }
@@ -328,9 +339,12 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   const userRepoResults: Array<{ user: string; count: number } | { user: string; error: string }> = []
   if (config.users.length > 0) {
+    // selfLogin is known when we just ran detection; fall back to detectGitHubLogin() for
+    // existing configs so personal-mode users still get private repos enumerated.
+    if (!selfLogin) selfLogin = detectGitHubLogin()
     for (const user of config.users) {
       try {
-        const repos = await listUserRepos(user, token)
+        const repos = await listUserRepos(user, token, user === selfLogin)
         for (const { owner, name } of repos) scopes.push({ owner, repo: name })
         userRepoResults.push({ user, count: repos.length })
       } catch (err: unknown) {
@@ -448,8 +462,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   board.start()
 
   // ── Smee mode ─────────────────────────────────────────────────────────────
-  // No tunnel management or webhook auto-registration needed.
-  // The user points their GitHub webhook to the smee channel URL once.
+  // Smee channel URL is stable — webhooks are registered once and survive restarts.
   if (config.tunnel.backend === 'smee') {
     const channelUrl = config.tunnel.smee_channel
     if (!channelUrl) {
@@ -461,6 +474,38 @@ export async function runWatch(opts: WatchOpts = {}) {
     }
     board.setTunnel('smee', channelUrl, true)
     fileLog({ level: 'info', event: 'tunnel_opened', url: channelUrl, backend: 'smee' })
+
+    // Register webhooks pointing at the smee channel URL (idempotent — skip if already set).
+    // The smee channel URL never changes, so this survives restarts without creating duplicates.
+    for (const scope of scopes) {
+      const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
+      try {
+        let existing: number | null
+        if ('org' in scope) {
+          existing = await findOrgWebhook(scope.org, channelUrl, token)
+          if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+        } else {
+          existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
+          if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
+        }
+        cLog(`${chalk.green('✓')} webhook ${existing ? 'active' : 'registered'}: ${chalk.cyan(label)}`)
+        fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const isCreds = /bad credentials|\[401\]/i.test(msg)
+        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+          || ('org' in scope && /\[404\]/i.test(msg))
+        cLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
+        if (isCreds) {
+          cLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+        } else if (isScope) {
+          cLog(`  missing admin:org_hook scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+        } else {
+          cLog(`  ${msg}`)
+        }
+        fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
+      }
+    }
 
     let smeeRetryDelay = 5_000
     while (running) {

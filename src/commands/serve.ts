@@ -5,7 +5,7 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import { checkRepoAccessible } from '../github/client.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
   loadConfig,
   getGithubToken,
@@ -55,18 +55,22 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
   log(`PR #${prNumber} ${event.action}: ${pr.title}`)
 
-  const origin = detectPROrigin(pr.body ?? '', config, pr.user.login)
+  const { origin, method: originMethod } = await detectOriginFull(
+    pr.body ?? '', pr.head.ref,
+    owner, repoName, prNumber,
+    config, token, pr.user.login,
+  )
   const reviewer = assignReviewer(origin, config)
 
-  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, author })
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 
   if (!reviewer) {
-    log(`  → origin=${origin}, no reviewer — skipping`)
+    log(`  → origin=${origin} (via ${originMethod}), no reviewer — skipping`)
     inFlight.delete(key)
     return
   }
 
-  log(`  → origin=${origin}, reviewer=${reviewer}`)
+  log(`  → origin=${origin} (via ${originMethod}), reviewer=${reviewer}`)
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   const reviewStart = Date.now()
@@ -146,7 +150,7 @@ export async function runServe(opts: ServeOpts = {}) {
     effectiveDeployment = await promptDeploymentMode(opts.reconfigure ? config.deployment : undefined)
     const cfgPath = resolveConfigPath(configPath) ?? join(process.cwd(), 'crosscheck.config.yml')
     const detected = await detectScopesForDeployment(effectiveDeployment, token)
-    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, true)
+    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, !!opts.reconfigure)
     config = loadConfig(configPath)
     console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
   }

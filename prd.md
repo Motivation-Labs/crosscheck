@@ -75,6 +75,11 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ### 🔜 Next Up
 
+- [x] **Fix `watch` event log timestamp misalignment** — zero-pad single-digit hours so all timestamps are the same width (`01:08:08 PM` not `1:08:08 PM`). `fmtTime()` helper added to `board.ts`; all `toLocaleTimeString()` calls replaced.
+- [x] **Fix `watch` status bar embedded in scrolling log** — confirmed already anchored via `writeLive()`; no structural change needed.
+- [x] **Fix `watch` event log — show failure state in counters** — `errorsOccurred` stat counter added; shown in red in the status bar when > 0, omitted when 0.
+- [x] **Fix `watch` event log — improve two-line event readability** — `board.log()` prepends a blank line for 2-line events so consecutive PR entries are visually separated in the scrollback.
+
 - [x] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
   - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.
   - **Acceptance Criteria:**

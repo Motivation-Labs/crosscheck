@@ -820,6 +820,266 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/status.ts`: show active webhook count.
   - **Tests Required:** `getExistingWebhook` returns hook ID when matching URL exists; returns null when no match; registration skipped when hook already exists; old hook deleted before new registration on reconnect; retry fires on 422 response with correct delays; aggregated log line shows correct count; status shows hook count.
 
+- [ ] **`crosscheck onboard` — Guided Persona Setup and Smart Scope Configuration** — an interactive wizard that runs all `init` environment checks and then guides the user through persona selection, repo/org scope picking, author filtering, workflow depth, and (for service operators) comment branding. Produces a complete, working `crosscheck.config.yml` without manual YAML editing. Supersedes the minimal first-run prompts in `watch`/`serve` as the recommended entry point for new users.
+
+  **The four deployment personas this command covers:**
+
+  | ID | Name | Core need |
+  |---|---|---|
+  | UC-01 | Personal — curated repos | Personal + org accounts; building personal projects; wants to limit monitoring to a hand-picked set of active repos (backtracing feature requires tight scope) |
+  | UC-02 | Personal — cross-scope, author-filtered | Monitors both personal and org repos but only wants their own PRs reviewed |
+  | UC-03 | Team shared CR | Each member uses local Claude Code to author PRs; team shares a Codex account for review; configurable depth: CR-only vs CR + auto-fix |
+  | UC-04 | CRaaS provider | Runs crosscheck as a review service for end-users; needs branded annotations and custom signatures on every posted comment |
+
+  **Command:** `crosscheck onboard [--reconfigure]`
+
+  ---
+
+  **Step 0 — Environment checks (same as `crosscheck init`, compact output):**
+
+  Re-use `runChecks()` from `init.ts`. Print a compact one-line-per-tool summary. Non-fatal failures (e.g., codex CLI not installed) show the fix hint and continue — `onboard` never aborts because a reviewer CLI is missing. Print `  ✓ environment ready — proceeding to setup` or `  ⚠ 1 issue to address — see above; continuing setup` before advancing to Step 1.
+
+  ---
+
+  **Step 1 — Persona selection:**
+
+  ```
+  How will you use crosscheck?
+
+    [1] personal  — review my own PRs across my repos and orgs
+    [2] team      — shared CR workflow for a team or org
+    [3] service   — Code Review as a Service with custom branding
+
+  Choice [1]:
+  ```
+
+  ---
+
+  **Personal path (UC-01 and UC-02):**
+
+  Step 2 — Monitoring scope (auto-detect org memberships before showing):
+  ```
+  What should crosscheck monitor?  (detected: member of my-company, another-org)
+
+    [1] My personal repos only
+    [2] My org repos only
+    [3] Both personal repos and orgs  ← recommended for solo developers
+
+  Choice [3]:
+  ```
+
+  Step 3 — Repo picker (shown only when personal repos are in scope):
+
+  Fetch `GET /users/{login}/repos?type=owner&sort=pushed&per_page=100`. Count PRs per repo in the last 90 days via `GET /repos/{owner}/{repo}/pulls?state=all&per_page=1` (read `X-Total-Count`). Sort descending by PR count; filter to repos with ≥ 1 PR in the last 180 days for the primary list. Show the top 5. A `[ ] Show more` row expands inline to all repos with any activity in 180 days, then finally any with none.
+
+  ```
+  Which personal repos should crosscheck monitor?
+
+    [x] beingzy/api-service        18 PRs (last 90 days)
+    [x] beingzy/cool-project       12 PRs
+    [ ] beingzy/dashboard           3 PRs
+    [ ] beingzy/old-tool            1 PR
+        ──────────────────────────────────────────
+    [ ] Show more  (4 repos inactive or very new — or add to config.yml manually)
+
+  Space to toggle · Enter to confirm
+  ```
+
+  Repos with zero PRs in 180 days are excluded from the primary list and named only in the "Show more" footnote. Repos created within the last 7 days with zero PRs are also excluded — they appear after their first PR lands. Users can always add any repo to `config.repos` by hand.
+
+  Step 4 — Author filter:
+  ```
+  Whose PRs should be reviewed?
+
+    [1] Only mine  (author = beingzy)    ← recommended for UC-02
+    [2] Everyone in the monitored scope
+
+  Choice [1]:
+  ```
+
+  Config written by personal path:
+  - UC-01 (curated personal repos): `deployment: personal`, `repos: [selected]`, `users: []`, `orgs: []`, `allowed_authors: [login]`
+  - UC-02 (both scopes, author-filtered): `deployment: personal`, `users: [login]`, `orgs: [detected]`, `allowed_authors: [login]`
+  - Personal + everyone: `deployment: personal`, `users: [login]`, `orgs: [detected]`, `allowed_authors: []`
+
+  ---
+
+  **Team path (UC-03):**
+
+  Step 2 — Org selection (auto-detect memberships via `GET /user/memberships/orgs?state=active`):
+  ```
+  Which orgs should crosscheck monitor?
+
+    [x] my-company           (member · 42 repos)
+    [ ] open-source-project  (member ·  7 repos)
+
+  Space to toggle · Enter to confirm
+  ```
+
+  Step 3 — Author filter:
+  ```
+  Whose PRs should be reviewed?
+
+    [1] All authors (no filter) — review every PR in the org
+    [2] Specific GitHub logins  — restrict to listed team members
+
+  Choice [1]:
+  ```
+  If [2]: `  Enter logins (comma-separated): john, jane, alice`
+
+  Step 4 — Review depth:
+  ```
+  How deep should the CR workflow go?
+
+    [1] CR only       — post review comments; humans apply fixes
+    [2] CR + Auto-fix — crosscheck also proposes and commits fixes
+
+  Choice [1]:
+  ```
+  If [2]:
+  ```
+  How should auto-fixes be delivered?
+
+    [1] Open a fix PR  (human reviews and merges)   ← recommended
+    [2] Push directly onto the PR branch
+    [3] Post as inline review suggestions only
+
+  Choice [1]:
+  ```
+
+  Config written by team path (CR + fix PR example):
+  `deployment: team`, `orgs: [selected]`, `users: []`, `allowed_authors: [logins or []]`, `post_review.auto_fix.enabled: true`, `post_review.auto_fix.delivery.mode: pull_request`
+
+  ---
+
+  **CRaaS path (UC-04):**
+
+  Step 2 — Service identity:
+  ```
+  Service name (shown in every review comment):
+  > MyCodeReview.ai
+  ```
+
+  Step 3 — Comment branding (each field is optional — press Enter to skip):
+  ```
+  Comment header (prepended to every review, Enter to skip):
+  > [Enter]
+
+  Comment footer (appended to every review):
+  > Reviewed by MyCodeReview.ai — request a review at mycodereview.ai
+
+  Reviewer attribution line (replaces the default "Reviewed by {vendor}" line):
+  > AI-powered review by MyCodeReview.ai
+  ```
+
+  Step 4 — Scope restriction:
+  ```
+  Which PRs should this service review?
+
+    [1] Any PR URL passed to  crosscheck review <url>  (no restriction)
+    [2] Restrict to specific orgs or repos
+
+  Choice [1]:
+  ```
+  If [2]: same org/repo picker as the personal path's Step 3.
+
+  Config written by service path:
+  `deployment: personal`, `brand.service_name: "MyCodeReview.ai"`, `brand.comment_footer: "..."`, `brand.reviewer_attribution: "..."`, plus scope fields.
+
+  ---
+
+  **Confirmation preview and write:**
+
+  After all steps, show a compact summary and prompt before writing:
+  ```
+    Your crosscheck config:
+
+      persona      personal
+      scope        repos (beingzy/api-service, beingzy/cool-project) + orgs (my-company)
+      filter       author = beingzy
+      reviewer     cross-vendor (claude ↔ codex)
+      config       ~/.crosscheck/config.yml
+
+  Write config? [Y/n]:
+  ```
+  On confirm: write config, print `  ✓ config written — run  crosscheck watch  to start`.
+  On decline: print `  Cancelled. No files written.` and exit 0.
+
+  **`--reconfigure` flag:** Re-runs all steps even if config already exists. Shows the current saved value as the default at each prompt. Useful when joining a new org, switching personas, or correcting a first-run mistake.
+
+  ---
+
+  **New config schema — `brand` section (for UC-04):**
+
+  ```typescript
+  export const BrandConfigSchema = z.object({
+    service_name: z.string().default('crosscheck'),
+    comment_header: z.string().default(''),
+    comment_footer: z.string().default(''),
+    reviewer_attribution: z.string().default(''),
+  })
+  ```
+  Added to `ConfigSchema` as `brand: BrandConfigSchema.default({})`.
+
+  Both `claude.ts` and `codex.ts` apply `config.brand` when composing the GitHub comment:
+  - Non-empty `brand.comment_header` → prepend to comment (followed by a blank line).
+  - Non-empty `brand.comment_footer` → append to comment (preceded by a blank line).
+  - Non-empty `brand.reviewer_attribution` → replace the default `> Reviewed by {vendor}` attribution line.
+  - When all `brand` fields are empty (the default), comment format is unchanged.
+
+  ---
+
+  **Relationship to existing commands:**
+
+  - `crosscheck init` remains unchanged — environment check only. `onboard` calls `runChecks()` internally as Step 0. `init` is for diagnosing environment issues; `onboard` is for first-time configuration.
+  - The minimal first-run prompts in `watch`/`serve` (from the Deployment Mode spec) remain as a lightweight fallback for users who skip `onboard`. They show a binary `personal`/`team` choice without repo picking or brand customization.
+  - `crosscheck init` output adds a one-line hint: `Run  crosscheck onboard  to configure scope and persona.`
+  - `crosscheck status` shows a `persona` row with the deployment value (or `service` when `brand.service_name` is non-default) and `brand.service_name` when set.
+
+  ---
+
+  - **User:** New crosscheck users of any persona — solo developers building side projects, teams running shared CR pipelines, and SaaS operators offering code review as a product.
+  - **Acceptance Criteria:**
+    - `crosscheck onboard` runs environment checks first and prints a compact one-line-per-tool summary.
+    - Persona question is always shown; branch into the correct question flow based on answer.
+    - Personal path: scope → repo picker (when personal repos in scope) → author filter → correct config for UC-01, UC-02, and the unrestricted variant.
+    - Team path: org picker → author filter → review depth → (if auto-fix chosen) delivery mode → correct config for UC-03.
+    - CRaaS path: service name → 3 branding fields (each skippable) → scope restriction → correct `brand` config for UC-04.
+    - Repo picker shows top 5 active repos by default; "Show more" expands inline; repos with zero PRs in 180 days omitted from primary list with a footnote; repos < 7 days old with zero PRs also omitted.
+    - Confirmation preview accurately reflects all choices before writing.
+    - `--reconfigure` re-runs all steps with current config values pre-filled as defaults; overwrites on confirm; exits without writing on decline.
+    - `brand` fields injected into GitHub comments by both `claude.ts` and `codex.ts` when non-empty; comment format unchanged when all `brand` fields are empty.
+    - `crosscheck status` shows `persona` row and `brand.service_name` when non-default.
+    - `crosscheck init` output includes the onboard hint line.
+    - Running `onboard` twice produces identical config (no duplicate entries).
+    - `onboard` with environment check failures still completes the persona questions and writes config; it does not abort.
+  - **Technical Notes:**
+    - New file: `src/commands/onboard.ts`. Imports `runChecks` from `init.ts`. Drives persona branching. At the end, calls `patchDeploymentConfig` (extended to accept brand fields) + `patchBrandConfig` to write all config values atomically.
+    - New file: `src/lib/repo-picker.ts`: `fetchActiveRepos(login: string, token: string, windowDays?: number): Promise<RepoActivity[]>` — GitHub API calls, PR count sort, 180-day filter; `promptRepoPicker(repos: RepoActivity[], defaults?: string[]): Promise<string[]>` — readline-based two-stage checkbox UI (no new prompt library dependency).
+    - `src/config/schema.ts`: add `BrandConfigSchema` and `brand: BrandConfigSchema.default({})` to `ConfigSchema`.
+    - `src/config/loader.ts`: add `patchBrandConfig(configPath: string, brand: Partial<BrandConfig>): boolean`.
+    - `src/reviewers/claude.ts`: inject `brand.comment_header` / `comment_footer` / `reviewer_attribution` when composing the final comment string; no-op when all empty.
+    - `src/reviewers/codex.ts`: same injection logic.
+    - `src/commands/status.ts`: add `persona` row showing deployment + `brand.service_name` when non-default.
+    - `src/commands/init.ts`: append hint line at the end of output.
+    - Wire into `cli.ts` as `crosscheck onboard [--reconfigure]`.
+    - `crosscheck.config.example.yml`: add commented `brand:` block with all four fields.
+    - `get-started.md`: add **First-time setup** section explaining `crosscheck onboard` as the recommended entry point, with each persona described in 2–3 sentences.
+  - **Tests Required:**
+    - `fetchActiveRepos`: repos sorted by PR count descending; repos with zero PRs in 180 days excluded from primary list; repos < 7 days old with zero PRs excluded; returns `[]` gracefully when GitHub returns no repos.
+    - `promptRepoPicker`: shows top 5 by default; "Show more" expands to full list; returns correct selection array; pre-selected defaults shown with `[x]`.
+    - Personal + both scopes + author-mine → `{ deployment: 'personal', users: [login], orgs: [...], allowed_authors: [login] }`.
+    - Personal + personal-only + 2 repos selected → `{ deployment: 'personal', repos: [r1, r2], users: [], orgs: [], allowed_authors: [login] }`.
+    - Team + all-authors + CR-only → `{ deployment: 'team', allowed_authors: [], post_review: { auto_fix: { enabled: false } } }`.
+    - Team + specific logins + CR + fix-PR → `{ deployment: 'team', allowed_authors: ['john', 'jane'], post_review: { auto_fix: { enabled: true, delivery: { mode: 'pull_request' } } } }`.
+    - CRaaS + branding → `brand.service_name`, `brand.comment_footer`, `brand.reviewer_attribution` written; skipped (blank) fields remain empty string in config.
+    - `claude.ts` with non-empty `brand.comment_header` → header prepended to posted comment.
+    - `claude.ts` with empty `brand` fields → comment format unchanged.
+    - `patchBrandConfig` writes correctly; idempotent on second run.
+    - `--reconfigure` re-prompts with current values as defaults; overwrites on confirm; no-ops on decline.
+    - `crosscheck status` shows `persona` row.
+    - `crosscheck init` output includes hint line.
+
 ---
 
 ### Feature designs

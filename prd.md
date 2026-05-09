@@ -135,6 +135,27 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ## Build Queue
 
+### 🚨 P0 — Structural correctness (fix before next routing/detection work)
+
+These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
+
+- [ ] **Consolidate skip decision: delete `shouldReview()`, rely solely on `assignReviewer`** — `shouldReview` (detector.ts:82) and `assignReviewer` both independently gate on `origin === 'human'` in cross-vendor mode. Adding `fallback_reviewer` to only one of them creates a silent divergence. Full spec below.
+  - **Acceptance Criteria:**
+    - `shouldReview` is deleted from `detector.ts` and from all exports.
+    - Call sites in `serve.ts`, `watch.ts`, and `review.ts` that check `shouldReview(...)` are replaced with `assignReviewer(...) !== null`.
+    - Behavior for all existing origin values is unchanged.
+    - No type error or lint warning from the removed export.
+  - **Technical Notes:** call sites pass `origin` and `config` to `shouldReview`; the equivalent is `assignReviewer(origin, config) !== null`. Both code paths already have `reviewer` from `assignReviewer` in scope — no new variable needed.
+  - **Tests Required:** `shouldReview` not exported; serve/watch/review behavior unchanged for `origin: 'claude'`, `'codex'`, `'human'`.
+
+- [ ] **`routing.fallback_reviewer` config field (P2 assignment)** — full spec in Next Up.
+
+- [ ] **Comment-based attribution detection (P2 step 4)** — full spec in Next Up.
+
+- [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
+
+---
+
 ### 🔜 Next Up
 
 - [x] **Fix `watch` event log timestamp misalignment** — zero-pad single-digit hours so all timestamps are the same width (`01:08:08 PM` not `1:08:08 PM`). `fmtTime()` helper added to `board.ts`; all `toLocaleTimeString()` calls replaced.

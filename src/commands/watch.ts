@@ -133,6 +133,7 @@ export interface WatchOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  backtrace?: boolean
 }
 
 export async function runWatch(opts: WatchOpts = {}) {
@@ -489,7 +490,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   board.start()
 
   // ── Backtrace scan ────────────────────────────────────────────────────────
-  if (config.backtrace.enabled) {
+  if (opts.backtrace === false) {
+    cLog(`${chalk.dim('✦')} backtrace skipped (--no-backtrace flag)`)
+  } else if (config.backtrace.enabled) {
     void (async () => {
       try {
         cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)

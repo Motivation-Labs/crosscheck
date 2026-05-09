@@ -36,12 +36,13 @@ program
 
 program
   .command('onboard')
-  .description('Interactive setup — configure deployment persona, scope, and routing')
-  .option('-c, --config <path>', 'config file path')
-  .option('--personal', 'skip questionnaire and write personal-mode config')
-  .option('--team', 'skip questionnaire and write team-mode config')
-  .option('--reconfigure', 're-run setup even if config already exists')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
+  .description('Guided setup — select repos to monitor and write config')
+  .option('-c, --config <path>', 'config file path to write')
+  .option('-y, --yes', 'skip confirmation prompts, accept defaults')
+  .option('--personal', 'pre-select personal deployment mode, skip persona prompt')
+  .option('--team', 'pre-select team deployment mode, skip persona prompt')
+  .option('--reconfigure', 're-run setup (accepted for compatibility; onboard always reconfigures)')
+  .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
   .command('serve')
@@ -50,7 +51,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runServe(opts))
+  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
 
 program
   .command('watch')
@@ -59,7 +61,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runWatch(opts))
+  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-url>')

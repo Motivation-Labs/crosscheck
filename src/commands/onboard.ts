@@ -1,341 +1,261 @@
-import { existsSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { join, dirname } from 'path'
 import { homedir } from 'os'
-import { createInterface } from 'readline'
 import chalk from 'chalk'
+import { createInterface } from 'readline'
+import yaml from 'js-yaml'
 import {
-  loadConfig, resolveConfigPath, getGithubToken, detectGitHubLogin,
-  writeOnboardConfig, type OnboardAnswers,
+  getGithubToken,
+  loadConfig,
+  resolveConfigPath,
+  detectGitHubLogin,
+  promptDeploymentMode,
+  patchDeploymentConfig,
 } from '../config/loader.js'
-import { listUserOrgs, fetchActiveRepos } from '../github/client.js'
-import { promptRepoPicker, promptOrgPicker } from '../lib/repo-picker.js'
-import { runChecks } from './init.js'
+import { listUserRepos, listUserOrgs, listOrgRepos } from '../github/client.js'
+import { checkCodexAuth } from '../reviewers/codex.js'
+import { checkClaudeAuth } from '../reviewers/claude.js'
+import { execSync } from 'child_process'
+import { promptRepoPicker } from '../lib/repo-picker.js'
 
 export interface OnboardOpts {
+  config?: string
+  yes?: boolean
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
-  config?: string
 }
 
-// ── Prompt helpers ────────────────────────────────────────────────────────────
-
-async function ask(question: string): Promise<string> {
-  if (!process.stdin.isTTY) return ''
+function ask(question: string): Promise<string> {
   return new Promise(resolve => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     rl.question(question, answer => { rl.close(); resolve(answer.trim()) })
   })
 }
 
-// Print numbered choices and return the chosen 1-based index (defaultIdx if user presses Enter).
-async function pickOne(prompt: string, options: string[], defaultIdx: number): Promise<number> {
-  console.log(`\n${prompt}\n`)
-  options.forEach(o => console.log(o))
-  console.log()
-  const answer = await ask(chalk.dim(`  Choice [${defaultIdx}]: `))
-  const n = parseInt(answer, 10)
-  return Number.isInteger(n) && n >= 1 && n <= options.length ? n : defaultIdx
-}
-
-async function confirmWrite(): Promise<boolean> {
-  const answer = await ask('  Write config? [Y/n]: ')
-  return answer === '' || /^y/i.test(answer)
-}
-
-async function confirmOptIn(question: string): Promise<boolean> {
-  const answer = await ask(`${question} [y/N]: `)
-  return /^y/i.test(answer)
-}
-
-// ── Fast-mode: skip all questions ────────────────────────────────────────────
-
-async function runFastMode(
-  deployment: 'personal' | 'team',
-  configPath: string,
-  login: string,
-  orgs: string[],
-): Promise<void> {
-  const users = deployment === 'personal' && login ? [login] : []
-  const allowedAuthors = deployment === 'personal' && login ? [login] : []
-  const authorRoutes: Record<string, 'claude' | 'codex'> =
-    deployment === 'personal' && login ? { [login]: 'claude' } : {}
-
-  writeOnboardConfig(configPath, {
-    deployment, login, orgs, users, repos: [],
-    allowedAuthors, authorRoutes,
-    autoFix: false, deliveryMode: 'pull_request',
-    brand: { service_name: 'crosscheck', comment_header: '', comment_footer: '', reviewer_attribution: '' },
-  })
-
-  console.log(chalk.green(`\n  ✓ config written  (${deployment} mode, auto-detected scopes)\n`))
-  if (orgs.length) console.log(`  ${'orgs'.padEnd(12)}${orgs.join(', ')}`)
-  if (users.length) console.log(`  ${'users'.padEnd(12)}${users.join(', ')}`)
-  console.log(chalk.dim(`\n  config  ${configPath}`))
-  console.log(chalk.dim('  Run  crosscheck watch  to start.\n'))
-}
-
-// ── Branding step (shared by all personas) ────────────────────────────────────
-
-async function askBranding(existingBrand?: {
-  service_name?: string; comment_header?: string; comment_footer?: string; reviewer_attribution?: string
-}): Promise<OnboardAnswers['brand']> {
-  const brand = {
-    service_name: existingBrand?.service_name ?? 'crosscheck',
-    comment_header: existingBrand?.comment_header ?? '',
-    comment_footer: existingBrand?.comment_footer ?? '',
-    reviewer_attribution: existingBrand?.reviewer_attribution ?? '',
-  }
-
-  const wantBranding = await confirmOptIn(
-    '\nAdd custom branding to review comments? (for teams, services, or personal flair)',
-  )
-  if (!wantBranding) return brand
-
-  const name = await ask(`  Name or label shown in comments (${brand.service_name}): `)
-  if (name) brand.service_name = name
-
-  const header = await ask('  Comment header (prepended to every review, Enter to skip): ')
-  brand.comment_header = header
-
-  const footer = await ask('  Comment footer (appended to every review, Enter to skip): ')
-  brand.comment_footer = footer
-
-  const attr = await ask('  Reviewer attribution line (replaces "Reviewed by {vendor}", Enter to skip): ')
-  brand.reviewer_attribution = attr
-
-  return brand
-}
-
-// ── Main ──────────────────────────────────────────────────────────────────────
-
-export async function runOnboard(opts: OnboardOpts): Promise<void> {
-  console.log(chalk.bold('\ncrosscheck onboard\n'))
-
-  // Resolve config path — prefer explicit, then project-local, then global default
-  const configPath = resolveConfigPath(opts.config) ?? join(homedir(), '.crosscheck', 'config.yml')
-  const hasFile = existsSync(configPath)
-  const existing = hasFile ? loadConfig(configPath) : null
-
-  // If already fully configured and user didn't request reconfigure or fast-mode, show summary
-  if (hasFile && existing?.deployment && !opts.reconfigure && !opts.personal && !opts.team) {
-    console.log(chalk.dim(`  Found existing config at ${configPath}\n`))
-    console.log(`  ${'deployment'.padEnd(14)}${existing.deployment}`)
-    if (existing.orgs.length) console.log(`  ${'orgs'.padEnd(14)}${existing.orgs.join(', ')}`)
-    if (existing.users.length) console.log(`  ${'users'.padEnd(14)}${existing.users.join(', ')}`)
-    if (existing.repos.length) console.log(`  ${'repos'.padEnd(14)}${existing.repos.length} configured`)
-    console.log()
-    console.log(chalk.dim('  Already configured. Run  crosscheck watch  to start.'))
-    console.log(chalk.dim('  Use --reconfigure to change settings.\n'))
-    return
-  }
-
-  // ── Step 0: Environment checks (compact) ──────────────────────────────────
-
-  console.log(chalk.dim('Checking environment...\n'))
-  const { results: checks } = await runChecks()
-  for (const c of checks) {
-    const icon = c.ok ? chalk.green('✓') : chalk.red('✗')
-    const detail = c.ok ? chalk.dim(c.detail) : chalk.yellow(c.detail)
-    console.log(`  ${icon} ${c.label.padEnd(22)} ${detail}`)
-    if (!c.ok && c.fix) console.log(`      ${chalk.dim('→')} ${chalk.dim(c.fix)}`)
-  }
-  const failures = checks.filter(c => !c.ok && c.fix)
-  console.log(
-    failures.length === 0
-      ? chalk.green('\n  ✓ environment ready — proceeding to setup\n')
-      : chalk.yellow(`\n  ⚠ ${failures.length} issue(s) to address — see above; continuing setup\n`),
-  )
-
-  // ── Resolve GitHub identity ──────────────────────────────────────────────
-
-  let token = ''
-  let login = ''
-  let detectedOrgs: string[] = []
+async function checkEnv(): Promise<boolean> {
+  let aiCliCount = 0
 
   try {
-    token = getGithubToken()
-    login = detectGitHubLogin() ?? ''
-    detectedOrgs = await listUserOrgs(token)
+    execSync('codex --version 2>&1', { encoding: 'utf8' })
+    const auth = await checkCodexAuth()
+    if (auth.ok) aiCliCount++
+    const icon = auth.ok ? chalk.green('✓') : chalk.red('✗')
+    console.log(`  ${icon} ${'codex CLI'.padEnd(20)} ${auth.detail}`)
+    if (!auth.ok) console.log(`      ${chalk.dim('→')} ${chalk.yellow('Run: codex login --device-auth')}`)
   } catch {
-    console.log(chalk.dim('  (GitHub not authenticated — scope detection skipped)\n'))
+    console.log(`  ${chalk.red('✗')} ${'codex CLI'.padEnd(20)} not found`)
+    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g @openai/codex')}`)
   }
 
-  // ── Fast mode: skip questionnaire, write immediately ─────────────────────
-
-  if (opts.personal || opts.team) {
-    const deployment = opts.personal ? 'personal' : 'team'
-    mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
-    await runFastMode(deployment, configPath, login, detectedOrgs)
-    return
+  try {
+    const auth = await checkClaudeAuth()
+    if (auth.ok) aiCliCount++
+    const icon = auth.ok ? chalk.green('✓') : chalk.red('✗')
+    console.log(`  ${icon} ${'claude CLI'.padEnd(20)} ${auth.detail}`)
+    if (!auth.ok) console.log(`      ${chalk.dim('→')} ${chalk.yellow('Run: claude auth login')}`)
+  } catch {
+    console.log(`  ${chalk.red('✗')} ${'claude CLI'.padEnd(20)} not found`)
+    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: npm install -g @anthropic-ai/claude-code')}`)
   }
 
-  // ── Step 1: Persona ───────────────────────────────────────────────────────
-
-  const currentPersonaDefault = existing?.deployment === 'team' ? 2 : 1
-  const personaIdx = await pickOne('How will you use crosscheck?', [
-    `  ${chalk.bold('[1] personal')}  — I author PRs; review only my own work across my repos and orgs`,
-    `  ${chalk.bold('[2] team')}      — shared CR workflow; review PRs from multiple authors in org repos`,
-  ], currentPersonaDefault)
-  const deployment: 'personal' | 'team' = personaIdx === 2 ? 'team' : 'personal'
-
-  let orgs: string[] = []
-  let users: string[] = []
-  let repos: Array<{ owner: string; name: string }> = []
-  let allowedAuthors: string[] = []
-  let authorRoutes: Record<string, 'claude' | 'codex'> = {}
-  let autoFix = false
-  let deliveryMode: 'pull_request' | 'commit' = 'pull_request'
-
-  // ── Personal path ─────────────────────────────────────────────────────────
-
-  if (deployment === 'personal') {
-
-    // Step 2: Scope
-    const orgPreview = detectedOrgs.slice(0, 2).map(o => `github.com/${o}/*`).join(', ') || 'your org repos'
-    const orgSuffix = detectedOrgs.length ? `  (detected: ${detectedOrgs.join(', ')})` : ''
-    const existingScope = existing
-      ? (existing.users.length > 0 && existing.orgs.length > 0 ? 3
-        : existing.users.length > 0 ? 1
-        : existing.orgs.length > 0 ? 2
-        : existing.repos.length > 0 ? 1  // curated repos-only = personal scope
-        : 3)
-      : 3
-
-    const scopeIdx = await pickOne(`What should crosscheck monitor?${orgSuffix}`, [
-      `  ${chalk.bold('[1] My personal repos only')}     — github.com/${login || 'you'}/* — side projects you own directly`,
-      `  ${chalk.bold('[2] My org repos only')}          — ${orgPreview}`,
-      `  ${chalk.bold('[3] Both personal repos + orgs')} — everything across your GitHub account  ← recommended`,
-    ], existingScope)
-
-    const includePersonal = scopeIdx !== 2
-    const includeOrgs = scopeIdx !== 1
-
-    if (includeOrgs && detectedOrgs.length > 0) {
-      orgs = await promptOrgPicker(detectedOrgs, existing?.orgs.length ? existing.orgs : undefined)
-    }
-
-    if (includePersonal && token && login) {
-      if (scopeIdx === 1) {
-        // Curated mode (UC-01): pick specific repos
-        console.log(chalk.dim('\n  Fetching your repos...'))
-        try {
-          const repoList = await fetchActiveRepos(login, token)
-          const existingNames = existing?.repos.map(r => `${r.owner}/${r.name}`) ?? []
-          const picked = await promptRepoPicker(repoList, existingNames.length ? existingNames : undefined)
-          repos = picked.map(full => {
-            const [owner, name] = full.split('/')
-            return { owner: owner ?? login, name: name ?? full }
-          })
-        } catch {
-          console.log(chalk.dim('  (Could not fetch repos — add them manually to config.repos)\n'))
-        }
-      } else {
-        // "Both" mode (UC-02): monitor all personal repos via users field
-        users = [login]
-      }
-    } else if (includePersonal) {
-      users = login ? [login] : []
-    }
-
-    // Step 3: Author filter
-    const currentFilterDefault = existing?.routing?.allowed_authors?.length === 0 ? 2 : 1
-    const filterIdx = await pickOne('Whose PRs should be reviewed?', [
-      `  ${chalk.bold('[1] Only mine')}   (author = ${login || 'you'})    ← recommended`,
-      `  ${chalk.bold('[2] Everyone')} in the monitored scope`,
-    ], currentFilterDefault)
-
-    if (filterIdx === 1) {
-      if (login) {
-        allowedAuthors = [login]
-        authorRoutes = { [login]: 'claude' }
-      } else {
-        // Login undetectable — writing an empty allowed_authors would disable filtering entirely.
-        // Prompt so the user can provide their handle manually.
-        const manual = await ask('  GitHub login (needed for author filter, Enter to skip): ')
-        if (manual) {
-          allowedAuthors = [manual]
-          authorRoutes = { [manual]: 'claude' }
-        } else {
-          console.log(chalk.yellow('  ⚠ allowed_authors left empty — all authors in scope will be reviewed.'))
-          console.log(chalk.dim('    Add routing.allowed_authors to your config to restrict later.\n'))
-        }
-      }
-    }
-
-  // ── Team path ─────────────────────────────────────────────────────────────
-
-  } else {
-
-    // Step 2: Org picker
-    if (detectedOrgs.length > 0) {
-      orgs = await promptOrgPicker(detectedOrgs, existing?.orgs.length ? existing.orgs : undefined)
-    } else {
-      const manual = await ask('  Enter org names (comma-separated, or Enter to skip): ')
-      orgs = manual ? manual.split(',').map(s => s.trim()).filter(Boolean) : []
-    }
-
-    // Step 3: Author filter
-    const authorIdx = await pickOne('Whose PRs should be reviewed?', [
-      `  ${chalk.bold('[1] All authors')} (no filter) — review every PR in the org`,
-      `  ${chalk.bold('[2] Specific logins')}  — restrict to listed team members`,
-    ], 1)
-
-    if (authorIdx === 2) {
-      const raw = await ask('  Enter logins (comma-separated): ')
-      allowedAuthors = raw.split(',').map(s => s.trim()).filter(Boolean)
-    }
-
-    // Step 4: Review depth
-    const depthIdx = await pickOne('How deep should the CR workflow go?', [
-      `  ${chalk.bold('[1] CR only')}       — post review comments; humans apply fixes`,
-      `  ${chalk.bold('[2] CR + Auto-fix')} — crosscheck also proposes and commits fixes`,
-    ], 1)
-
-    if (depthIdx === 2) {
-      autoFix = true
-      const deliveryIdx = await pickOne('How should auto-fixes be delivered?', [
-        `  ${chalk.bold('[1] Open a fix PR')}   (human reviews and merges before merge)   ← recommended`,
-        `  ${chalk.bold('[2] Push directly')} onto the PR branch`,
-      ], 1)
-      deliveryMode = deliveryIdx === 2 ? 'commit' : 'pull_request'
-    }
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  let ghAuthed = false
+  try {
+    execSync('gh --version 2>&1', { encoding: 'utf8' })
+    let authOutput = ''
+    try { authOutput = execSync('gh auth status 2>&1', { encoding: 'utf8' }) } catch { /* GITHUB_TOKEN in use */ }
+    ghAuthed = authOutput.includes('Logged in') || !!envToken
+    const icon = ghAuthed ? chalk.green('✓') : chalk.red('✗')
+    console.log(`  ${icon} ${'gh CLI'.padEnd(20)} ${ghAuthed ? 'authenticated' : 'not authenticated'}`)
+    if (!ghAuthed) console.log(`      ${chalk.dim('→')} ${chalk.yellow('Run: gh auth login')}`)
+  } catch {
+    console.log(`  ${chalk.red('✗')} ${'gh CLI'.padEnd(20)} not found`)
+    console.log(`      ${chalk.dim('→')} ${chalk.yellow('Install: brew install gh && gh auth login')}`)
   }
 
-  // ── Optional branding (all paths) ─────────────────────────────────────────
+  if (aiCliCount === 0) {
+    console.log(chalk.red('\nAt least one AI CLI (codex or claude) must be authenticated.\n'))
+    return false
+  }
+  if (!ghAuthed) {
+    console.log(chalk.red('\nGitHub auth is required to fetch repos and register webhooks.\n'))
+    return false
+  }
+  return true
+}
 
-  const brand = await askBranding(existing?.brand)
+export async function runOnboard(opts: OnboardOpts = {}) {
+  if (!process.stdin.isTTY) {
+    console.error(chalk.red('onboard requires an interactive terminal.'))
+    console.error(chalk.dim('Run crosscheck init and edit crosscheck.config.yml manually.'))
+    process.exit(1)
+  }
 
-  // ── Confirmation preview ──────────────────────────────────────────────────
+  console.log(chalk.bold('\ncrosscheck onboard\n'))
 
-  const COL = 14
-  console.log(chalk.bold('\n  Your crosscheck config:\n'))
-  console.log(`    ${'persona'.padEnd(COL)}${deployment}`)
-  if (orgs.length) console.log(`    ${'orgs'.padEnd(COL)}${orgs.join(', ')}`)
-  if (users.length) console.log(`    ${'users'.padEnd(COL)}${users.join(', ')}`)
-  if (repos.length) console.log(`    ${'repos'.padEnd(COL)}${repos.map(r => `${r.owner}/${r.name}`).join(', ')}`)
-  console.log(
-    `    ${'filter'.padEnd(COL)}${allowedAuthors.length ? `author = ${allowedAuthors.join(', ')}` : 'all authors'}`,
-  )
-  if (autoFix) console.log(`    ${'auto-fix'.padEnd(COL)}${deliveryMode}`)
-  if (brand.service_name !== 'crosscheck') console.log(`    ${'brand'.padEnd(COL)}${brand.service_name}`)
-  console.log(`    ${'config'.padEnd(COL)}${configPath}`)
+  // ── Step 1: Auth check ─────────────────────────────────────────────────────
+  console.log(chalk.bold('Step 1 — environment check'))
+  const ok = await checkEnv()
+  if (!ok) process.exit(1)
   console.log()
 
-  const ok = await confirmWrite()
-  if (!ok) {
-    console.log(chalk.dim('  Cancelled. No files written.\n'))
-    return
+  // ── Step 2: Deployment mode ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 2 — deployment mode'))
+  const configPath = opts.config ?? resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
+  const existingConfig = existsSync(configPath) ? loadConfig(configPath) : null
+  const currentDeployment = existingConfig?.deployment
+
+  let deployment: 'personal' | 'team'
+  if (opts.personal) {
+    deployment = 'personal'
+    console.log(`  Mode: ${chalk.cyan('personal')} (--personal flag)`)
+  } else if (opts.team) {
+    deployment = 'team'
+    console.log(`  Mode: ${chalk.cyan('team')} (--team flag)`)
+  } else if (currentDeployment && !opts.yes) {
+    const keep = await ask(`  Current mode: ${chalk.cyan(currentDeployment)}. Keep this? [Y/n]: `)
+    deployment = keep.toLowerCase() === 'n' ? await promptDeploymentMode() : currentDeployment
+  } else if (currentDeployment && opts.yes) {
+    deployment = currentDeployment
+    console.log(`  Using existing mode: ${chalk.cyan(deployment)}`)
+  } else {
+    deployment = await promptDeploymentMode()
+  }
+  console.log()
+
+  // ── Step 3: Repo selection ─────────────────────────────────────────────────
+  console.log(chalk.bold('Step 3 — select repos to monitor'))
+
+  let token: string
+  try {
+    token = getGithubToken()
+  } catch (err: unknown) {
+    console.error(chalk.red(err instanceof Error ? err.message : String(err)))
+    process.exit(1)
   }
 
-  // ── Write ─────────────────────────────────────────────────────────────────
+  const login = detectGitHubLogin() ?? ''
+  console.log(chalk.dim(`  Fetching repos for ${login || 'your account'}...`))
 
-  writeOnboardConfig(configPath, {
-    deployment, login, orgs, users, repos,
-    allowedAuthors, authorRoutes,
-    autoFix, deliveryMode, brand,
+  // Fetch personal repos and org repos in parallel
+  const [personalRepos, orgs] = await Promise.all([
+    login ? listUserRepos(login, token, true).catch(() => []) : Promise.resolve([]),
+    listUserOrgs(token).catch(() => []),
+  ])
+
+  const orgRepoLists = await Promise.all(
+    orgs.map(org => listOrgRepos(org, token).catch(() => []))
+  )
+
+  // Build flat list of "owner/repo" strings for the picker
+  const allRepos: string[] = []
+  for (const r of personalRepos) allRepos.push(`${r.owner}/${r.name}`)
+  for (let i = 0; i < orgs.length; i++) {
+    for (const r of orgRepoLists[i]) allRepos.push(`${r.owner}/${r.name}`)
+  }
+
+  // Pre-select repos already in config
+  const currentRepoKeys = new Set(
+    (existingConfig?.repos ?? []).map(r => `${r.owner}/${r.name}`)
+  )
+  const currentOrgs = new Set(existingConfig?.orgs ?? [])
+
+  // If running with --yes, keep existing selection
+  let selectedRepos: string[]
+  let selectedOrgs: string[]
+
+  if (opts.yes && existingConfig) {
+    selectedRepos = [...currentRepoKeys]
+    selectedOrgs = [...currentOrgs]
+    console.log(`  Using existing repo selection (${selectedRepos.length} repos, ${selectedOrgs.length} orgs)`)
+  } else {
+    if (allRepos.length === 0) {
+      console.log(chalk.yellow('  No repos found. You can add repos manually in your config file.'))
+      selectedRepos = []
+      selectedOrgs = []
+    } else {
+      // Pre-mark already-configured repos as selected via a sorted list
+      // where configured repos appear first
+      const sorted = [
+        ...allRepos.filter(r => currentRepoKeys.has(r)),
+        ...allRepos.filter(r => !currentRepoKeys.has(r)),
+      ]
+
+      console.log(chalk.dim(`  Found ${sorted.length} repos. Use arrows + space to select, enter to confirm.\n`))
+      const picked = await promptRepoPicker(sorted, {
+        title: 'Select repos to monitor:',
+        initialSelected: [...currentRepoKeys],
+      })
+      console.log()
+
+      // Check org offer: if ≥3 repos from the same real org, offer to monitor the entire org.
+      // Only count owners that appear in the fetched org list — excludes the personal login.
+      const orgSet = new Set(orgs)
+      const orgCounts: Record<string, number> = {}
+      for (const r of picked) {
+        const owner = r.split('/')[0]
+        if (orgSet.has(owner)) orgCounts[owner] = (orgCounts[owner] ?? 0) + 1
+      }
+      const orgOffers = Object.entries(orgCounts).filter(([, count]) => count >= 3).map(([org]) => org)
+
+      selectedOrgs = [...currentOrgs]
+      selectedRepos = picked
+
+      for (const org of orgOffers) {
+        if (currentOrgs.has(org)) continue
+        const answer = opts.yes ? 'n' : await ask(`  Monitor all of ${chalk.cyan(org)} instead of individual repos? [y/N]: `)
+        if (answer.toLowerCase() === 'y') {
+          selectedOrgs.push(org)
+          selectedRepos = selectedRepos.filter(r => !r.startsWith(`${org}/`))
+        }
+      }
+    }
+  }
+
+  // ── Step 4: Confirm and write ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 4 — review and write config'))
+  console.log()
+  console.log(`  deployment   ${chalk.cyan(deployment)}`)
+  if (selectedOrgs.length > 0) {
+    console.log(`  orgs         ${selectedOrgs.map(o => chalk.cyan(o)).join(', ')}`)
+  }
+  if (selectedRepos.length > 0) {
+    console.log(`  repos        ${selectedRepos.slice(0, 5).map(r => chalk.cyan(r)).join(', ')}${selectedRepos.length > 5 ? chalk.dim(` +${selectedRepos.length - 5} more`) : ''}`)
+  }
+  if (selectedOrgs.length === 0 && selectedRepos.length === 0) {
+    console.log(`  ${chalk.yellow('No repos or orgs selected. Config will have empty scope.')}`)
+  }
+  console.log(`  config       ${chalk.dim(configPath)}`)
+  console.log()
+
+  if (!opts.yes) {
+    const confirm = await ask(`  Write to config? [Y/n]: `)
+    if (confirm.toLowerCase() === 'n') {
+      console.log(chalk.dim('  Aborted — no changes written.'))
+      return
+    }
+  }
+
+  mkdirSync(dirname(configPath), { recursive: true })
+  // patchDeploymentConfig handles deployment, orgs, users, allowed_authors, author_routes
+  patchDeploymentConfig(configPath, deployment, login, selectedOrgs, true)
+
+  // Patch repos after — load the file written by patchDeploymentConfig and add repos
+  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  raw.repos = selectedRepos.map(r => {
+    const [owner, name] = r.split('/')
+    return { owner, name }
   })
+  // Explicit repo/org selections take precedence over the `users` expansion in watch/serve.
+  // Clear `users` whenever the user has set any explicit scope — repos OR orgs.
+  // Without this, org-only selections still trigger the personal-user expansion in watch/serve.
+  if (selectedRepos.length > 0 || selectedOrgs.length > 0) delete raw.users
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
-  console.log(chalk.green(`\n  ✓ config written → ${configPath}`))
-  console.log(chalk.dim('  Run  crosscheck watch  to start.\n'))
+  console.log(chalk.green(`  ✓ config written to ${configPath}`))
+  console.log()
+
+  // ── Step 5: Next step hint ────────────────────────────────────────────────
+  console.log(chalk.dim('  Run crosscheck watch to start monitoring.\n'))
 }

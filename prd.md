@@ -1074,6 +1074,39 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `crosscheck status` shows `persona` row.
     - `crosscheck init` output includes hint line.
 
+- [ ] **Arrow-key + space interactive picker — replace number-toggle UI in `onboard`** — the org and repo selection steps in `crosscheck onboard` use a raw-mode TTY picker with arrow-key navigation and space-to-toggle, matching the UX of standard CLI tools (`inquirer`, `fzf`). Closes [issue #58](https://github.com/Motivation-Labs/crosscheck/issues/58).
+  - **User:** Anyone running `crosscheck onboard` who needs to select repos without memorizing item numbers.
+  - **Acceptance Criteria:**
+    - **↑ / ↓ arrows** — move the highlight cursor between items; wraps at top and bottom.
+    - **Space** — toggle the focused item on/off (`[x]` / `[ ]`).
+    - **Enter** — confirm the current selection and return.
+    - **a** — select all / deselect all (toggles entire visible set).
+    - Items are rendered as `  [x] owner/repo-name` with the focused row highlighted (bold or reverse-video ANSI).
+    - 3-tier overflow: show at most 15 items at a time; pressing `m` (or the overflow hint key) expands to show all. Cursor wraps within the visible set.
+    - A status line below the list shows `  ↑↓ move · space select · a all · enter confirm · m more`.
+    - Rendering uses ANSI escape codes to re-render only changed lines (no full-screen flicker, no `readline` loop).
+    - Degrades gracefully when `process.stdin.isTTY` is false: skip picker, return an empty selection (caller prints a manual-edit hint).
+  - **Technical Notes:**
+    - New file: `src/lib/repo-picker.ts` — exports `promptRepoPicker(items: string[], opts?: { title?: string }): Promise<string[]>`. Internally calls `process.stdin.setRawMode(true)`, intercepts raw key bytes, re-renders on each keypress, restores stdin on return/exit.
+    - Key byte detection: `\x1b[A` = up arrow, `\x1b[B` = down arrow, `\x20` = space, `\x0d` = enter, `\x61` = `a`, `\x6d` = `m`.
+    - On SIGINT while picker is active: restore raw mode and re-throw so the process exits cleanly.
+    - No new runtime dependencies — raw-mode TTY and ANSI escapes are stdlib-level on Node.js.
+  - **Tests Required:** `promptRepoPicker` with non-TTY stdin returns empty array; up/down moves cursor correctly; space toggles item; enter returns selected items; `a` selects all when none selected, deselects all when all selected; overflow hint shown when items > 15; cursor wraps at list boundaries; SIGINT restores raw mode.
+
+- [ ] **`--no-backtrace` flag for `watch` and `serve`** — add a session-only CLI flag that skips the initial scan for unreviewed open PRs, without requiring a config edit. Useful when restarting `watch` frequently (e.g., during config iteration) where the startup scan adds latency.
+  - **User:** Any developer who restarts `crosscheck watch` repeatedly and finds the backtrace scan slow or redundant.
+  - **Acceptance Criteria:**
+    - `crosscheck watch --no-backtrace` and `crosscheck serve --no-backtrace` skip the `scanUnreviewedPRs` call entirely for that session.
+    - Config is not read or written — `backtrace.enabled` in `crosscheck.config.yml` is unaffected.
+    - The connectivity log shows `  backtrace skipped (--no-backtrace flag)` in place of the scan summary when the flag is passed.
+    - `crosscheck watch --no-backtrace` is equivalent to `crosscheck watch` when `backtrace.enabled: false` is in config — same code path, different trigger.
+    - `--no-backtrace` is independent of `--personal`, `--team`, and `--reconfigure` (all flags can be combined).
+  - **Technical Notes:**
+    - `src/cli.ts`: add `.option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')` to both `watch` and `serve` command definitions. Commander maps `--no-backtrace` to `opts.backtrace === false`.
+    - `src/commands/watch.ts` / `serve.ts`: in the backtrace block, change the condition from `if (config.backtrace.enabled)` to `if (config.backtrace.enabled && opts.backtrace !== false)`. Pass `opts` through the existing opts parameter.
+    - Log the skip message via `cLog` (watch) / `board.log` (serve) so it's visible in the connectivity section.
+  - **Tests Required:** `--no-backtrace` flag parsed correctly; backtrace block skipped when flag is true; `config.backtrace.enabled: false` still skips regardless of flag; `config.backtrace.enabled: true` without flag runs scan normally; log message emitted when flag skips the scan.
+
 ---
 
 ### Feature designs

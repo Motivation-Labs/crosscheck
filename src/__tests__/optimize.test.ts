@@ -31,6 +31,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
         delivery: { mode: 'pull_request', pr_title: 'fix: address CR issues in #{original_pr_title}', label: 'cr-autofix' },
       },
     },
+    brand: { service_name: 'crosscheck', comment_header: '', comment_footer: '', reviewer_attribution: '' },
   }
 }
 

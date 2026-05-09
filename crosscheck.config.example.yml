@@ -194,8 +194,12 @@ logs:
 #     cr_block: red          # CR bar + verdict label when BLOCK
 #     fix_fill: cyan         # filled segments on the FIX bar
 
-# ─── Backtrace ───────────────────────────────────────────────────────────────
-# On startup, scan all open PRs in the monitored scope and review any that have
-# never received a [crosscheck] comment.
-# backtrace:
-#   enabled: true   # set to false to disable the startup scan entirely
+
+# ─── Branding ────────────────────────────────────────────────────────────────
+# Customize how crosscheck identifies itself in review comments.
+# Useful for teams, shared services, or personal branding.
+# brand:
+#   service_name: crosscheck              # shown in comment headers (default: crosscheck)
+#   comment_header: ""                    # text prepended to every review comment
+#   comment_footer: ""                    # text appended to every review comment
+#   reviewer_attribution: ""             # replaces "Reviewed by {vendor}" attribution line

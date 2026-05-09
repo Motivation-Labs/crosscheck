@@ -129,6 +129,13 @@ export const DisplayConfigSchema = z.object({
   theme: DisplayThemeSchema.default({}),
 })
 
+export const BrandConfigSchema = z.object({
+  service_name: z.string().default('crosscheck'),
+  comment_header: z.string().default(''),
+  comment_footer: z.string().default(''),
+  reviewer_attribution: z.string().default(''),
+})
+
 export const ConfigSchema = z.object({
   // Absent = not yet configured; watch/serve will prompt on first run.
   deployment: z.enum(['personal', 'team']).optional(),
@@ -150,9 +157,11 @@ export const ConfigSchema = z.object({
   backtrace: BacktraceConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
+  brand: BrandConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
+export type BrandConfig = z.infer<typeof BrandConfigSchema>
 export type VendorConfig = z.infer<typeof VendorConfigSchema>
 export type CodexVendorConfig = z.infer<typeof CodexVendorConfigSchema>
 export type QualityConfig = z.infer<typeof QualityConfigSchema>

@@ -110,7 +110,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       onPhaseChange('posting comment...', { verdict: verdict ?? undefined, commentCount })
       const octokit = createGithubClient(token)
-      await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer)
+      await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
       const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
       fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
 

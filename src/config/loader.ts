@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { execSync } from 'child_process'
 import { createInterface } from 'readline'
-import { resolve, join } from 'path'
+import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
@@ -306,6 +306,78 @@ export function patchDeploymentConfig(
     routing.fallback_reviewer = 'auto'
   }
 
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+  return true
+}
+
+// ── Onboarding ───────────────────────────────────────────────────────────────
+
+export interface OnboardAnswers {
+  deployment: 'personal' | 'team'
+  login: string
+  orgs: string[]
+  users: string[]
+  repos: Array<{ owner: string; name: string }>
+  allowedAuthors: string[]
+  authorRoutes: Record<string, 'claude' | 'codex'>
+  autoFix: boolean
+  deliveryMode: 'pull_request' | 'commit'
+  brand: { service_name: string; comment_header: string; comment_footer: string; reviewer_attribution: string }
+}
+
+// Applies all onboard answers to the config file, preserving unrelated fields.
+export function writeOnboardConfig(configPath: string, answers: OnboardAnswers): void {
+  let raw: Record<string, unknown> = {}
+  if (existsSync(configPath)) {
+    try { raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown> }
+    catch { /* start fresh if file is unparseable */ }
+  }
+
+  raw.deployment = answers.deployment
+  raw.orgs = answers.orgs
+
+  if (answers.users.length > 0) raw.users = answers.users
+  else delete raw.users
+
+  if (answers.repos.length > 0) raw.repos = answers.repos
+  else delete raw.repos
+
+  if (typeof raw.routing !== 'object' || raw.routing === null) raw.routing = {}
+  const routing = raw.routing as Record<string, unknown>
+  routing.allowed_authors = answers.allowedAuthors
+  if (Object.keys(answers.authorRoutes).length > 0) routing.author_routes = answers.authorRoutes
+  else delete routing.author_routes
+  if (!routing.fallback_reviewer) routing.fallback_reviewer = 'auto'
+
+  if (typeof raw.post_review !== 'object' || raw.post_review === null) raw.post_review = {}
+  const postReview = raw.post_review as Record<string, unknown>
+  if (typeof postReview.auto_fix !== 'object' || postReview.auto_fix === null) postReview.auto_fix = {}
+  const af = postReview.auto_fix as Record<string, unknown>
+  af.enabled = answers.autoFix
+  if (answers.autoFix) {
+    if (!af.trigger) af.trigger = 'on_issues'
+    if (!af.fixer) af.fixer = 'same-as-author'
+    if (typeof af.delivery !== 'object' || af.delivery === null) af.delivery = {}
+    ;(af.delivery as Record<string, unknown>).mode = answers.deliveryMode
+  }
+
+  const { service_name, comment_header, comment_footer, reviewer_attribution } = answers.brand
+  const hasBrand = service_name !== 'crosscheck' || comment_header !== '' || comment_footer !== '' || reviewer_attribution !== ''
+  if (hasBrand) raw.brand = answers.brand
+  else delete raw.brand
+
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+}
+
+export function patchBrandConfig(
+  configPath: string,
+  brand: Partial<{ service_name: string; comment_header: string; comment_footer: string; reviewer_attribution: string }>,
+): boolean {
+  if (!existsSync(configPath)) return false
+  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  if (typeof raw.brand !== 'object' || raw.brand === null) raw.brand = {}
+  Object.assign(raw.brand as Record<string, unknown>, brand)
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
   return true
 }

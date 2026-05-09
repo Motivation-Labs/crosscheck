@@ -51,6 +51,7 @@ interface Stats {
   prsReceived: number
   crsCompleted: number
   fixesApplied: number
+  errorsOccurred: number
   crTotalMs: number
   sessionStart: number
 }
@@ -62,6 +63,14 @@ const BAR_FILLED = '█'
 const BAR_EMPTY = '░'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Fixed-width timestamp: always "HH:MM:SS AM/PM" (zero-padded hour) so columns stay aligned
+export function fmtTime(d = new Date()): string {
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+}
+
+// Width of a fmtTime() result — constant regardless of time of day ("01:00:00 AM".length = 11)
+export const FMT_TIME_WIDTH = 11
 
 // Strip ANSI escape codes for visible-width calculations
 function stripAnsi(s: string): string {
@@ -157,6 +166,7 @@ export class PRBoard {
     prsReceived: 0,
     crsCompleted: 0,
     fixesApplied: 0,
+    errorsOccurred: 0,
     crTotalMs: 0,
     sessionStart: Date.now(),
   }
@@ -230,8 +240,8 @@ export class PRBoard {
 
     if (slot) {
       const t = this.theme
-      const ts = new Date().toLocaleTimeString()
-      const indent = ' '.repeat(ts.length + 2)
+      const ts = fmtTime()
+      const indent = ' '.repeat(FMT_TIME_WIDTH + 2)
       const elapsed = `(${Math.round(data.elapsedMs / 1000)}s)`
 
       // line 1
@@ -256,27 +266,29 @@ export class PRBoard {
       }
 
       const line2 = parts.length > 0 ? indent + parts.join('   ') : ''
-      this.printStatic(line2 ? `${line1}\n${line2}` : line1)
+      this.printStatic(line2 ? `\n${line1}\n${line2}` : line1)
     }
   }
 
   failPR(key: string, error: string): void {
     const slot = this.slots.get(key)
     this.slots.delete(key)
+    this.stats.errorsOccurred++
     if (slot) {
-      const ts = new Date().toLocaleTimeString()
+      const ts = fmtTime()
       this.printStatic(`${chalk.dim(ts)}  PR #${slot.prNumber}  ${chalk.red('✗')} ${error}`)
     }
   }
 
   /** Print 1–2 static lines to scrollback (above the live block). */
   log(line1: string, line2?: string): void {
-    this.printStatic(line2 ? `${line1}\n${line2}` : line1)
+    // Prepend a blank line for 2-line events so consecutive entries don't blur together
+    this.printStatic(line2 ? `\n${line1}\n${line2}` : line1)
   }
 
   /** Record a connectivity event in the live section (tunnel/webhook events). */
   logConnectivity(line: string): void {
-    const ts = chalk.dim(new Date().toLocaleTimeString())
+    const ts = chalk.dim(fmtTime())
     this.connLog.push(`  ${ts}  ${line}`)
     if (this.connLog.length > CONN_LOG_MAX) this.connLog.shift()
   }
@@ -349,11 +361,14 @@ export class PRBoard {
   }
 
   private statsRow(): string {
-    const { prsReceived, crsCompleted, fixesApplied, crTotalMs } = this.stats
+    const { prsReceived, crsCompleted, fixesApplied, errorsOccurred, crTotalMs } = this.stats
     const avgCr = crsCompleted > 0
       ? `  │  avg CR: ${Math.round(crTotalMs / crsCompleted / 1000)}s`
       : ''
-    return `PRs: ${prsReceived} · CRs: ${crsCompleted} · fixes: ${fixesApplied}${avgCr}`
+    const errorPart = errorsOccurred > 0
+      ? ` · ${chalk.red(`errors: ${errorsOccurred}`)}`
+      : ''
+    return `PRs: ${prsReceived} · CRs: ${crsCompleted}${errorPart} · fixes: ${fixesApplied}${avgCr}`
   }
 
   private renderPRSlot(slot: PRSlot, frame: string): string {
@@ -414,12 +429,11 @@ export class PRBoard {
     const indent = ' '.repeat(14)
 
     // ── Section 1: status dashboard ──────────────────────────────────────────
-    const { type: tunnelType, url, alive } = this.tunnel
-    const tunnelLabel = tunnelType === 'serve' ? 'endpoint' : 'tunnel'
+    const { url, alive } = this.tunnel
     const tunnelDisplay = url
       ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
       : t.dim('connecting...')
-    const row1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}  │  ${t.dim('↑')} ${this.uptime()}`
+    const row1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  tunnel: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}  │  ${t.dim('↑')} ${this.uptime()}`
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
     const vendors: string[] = []

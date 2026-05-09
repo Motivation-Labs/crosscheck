@@ -29,7 +29,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
-import { PRBoard } from '../lib/board.js'
+import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -217,8 +217,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      const ts = chalk.dim(new Date().toLocaleTimeString())
-      const tsIndent = ' '.repeat(new Date().toLocaleTimeString().length + 2)
+      const ts = chalk.dim(fmtTime())
+      const tsIndent = ' '.repeat(FMT_TIME_WIDTH + 2)
       bLog(
         `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
         `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
@@ -259,7 +259,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           owner, repoName, prNumber, pr,
           tmpDir, token, config, origin,
           reviewStart,
-          log: (msg: string) => bLog(`${chalk.dim(new Date().toLocaleTimeString())}  ${msg}`),
+          log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
         })
@@ -312,7 +312,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         baseRef: pr.base.ref, action: event.action,
       })
     },
-    (msg: string) => bLog(chalk.dim(new Date().toLocaleTimeString()) + '  ' + msg),
+    (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
     fileLog,
   )
 

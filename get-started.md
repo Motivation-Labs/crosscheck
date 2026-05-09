@@ -354,7 +354,7 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ### `crosscheck onboard`
 
-The recommended first-time setup command. Walks through six steps interactively and writes a ready-to-use config.
+The recommended first-time setup command. Walks through seven steps interactively and writes a ready-to-use config.
 
 ```bash
 crosscheck onboard
@@ -364,7 +364,7 @@ crosscheck onboard --team         # force team mode for this session
 crosscheck onboard --reconfigure  # re-run setup even if config already exists
 ```
 
-**The six steps:**
+**The seven steps:**
 
 **Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
 
@@ -388,7 +388,11 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 6 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+**Step 6 — Connection type.** Choose how GitHub webhooks reach your local server:
+- `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
+- `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
+
+**Step 7 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
 
 ```
 crosscheck onboard
@@ -417,8 +421,13 @@ crosscheck onboard
   [1] review only  [2] review → fix  [3] review → fix → re-check
   Choice [2]: 3
 
-  Step 6 — review and write config
+  Step 6 — connection type
+  [1] localhost.run  [2] smee.io
+  Choice [1]: 1
+
+  Step 7 — review and write config
   deployment   personal
+  connection   localhost.run
   orgs         motivation-labs
   users        your-github-login (8 repos)
   mode         cross-vendor

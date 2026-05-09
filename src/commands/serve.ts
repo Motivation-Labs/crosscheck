@@ -5,6 +5,7 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import { checkRepoAccessible } from '../github/client.js'
+import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
   loadConfig,
@@ -19,7 +20,6 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()

@@ -54,7 +54,7 @@ const QUALITY_TIERS = {
   },
   thorough: {
     description: 'deep multi-pass, security + architecture  (~60s+, higher cost)',
-    claude: { model: 'sonnet', effort: 'max' as const },
+    claude: { model: 'opus', effort: 'max' as const },
     codex:  { model: 'o3', effort: 'high' as const },
   },
 } as const
@@ -228,7 +228,10 @@ async function promptWorkflowPipeline(
   opts: OnboardOpts,
 ): Promise<WorkflowPreset> {
   if (opts.yes) {
-    const preset: WorkflowPreset = currentAutoFixEnabled === true ? 'review-fix' : 'review-only'
+    const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+    const preset: WorkflowPreset = existsSync(globalWorkflowPath)
+      ? 'review-fix-recheck'
+      : currentAutoFixEnabled === true ? 'review-fix' : 'review-only'
     console.log(`  Pipeline: ${chalk.cyan(preset)}`)
     return preset
   }
@@ -490,7 +493,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
       for (const org of orgOffers) {
         if (currentOrgs.has(org)) continue
-        const answer = await ask(`  Monitor all of ${chalk.cyan(org)} instead of individual repos? [y/N]: `)
+        const answer = opts.yes ? 'n' : await ask(`  Monitor all of ${chalk.cyan(org)} instead of individual repos? [y/N]: `)
         if (answer.toLowerCase() === 'y') {
           selectedOrgs.push(org)
           selectedRepos = selectedRepos.filter(r => !r.startsWith(`${org}/`))
@@ -620,11 +623,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   vendors.claude.enabled = vendorConfig.claudeEnabled
   vendors.codex.enabled = vendorConfig.codexEnabled
 
-  // Quality tier + per-vendor model and effort
+  // Quality tier + per-vendor effort
+  // Note: claude.ts ignores vendor.model and derives the model from quality.tier at runtime.
+  // We write only effort for claude. For codex, vendor.model is used by api-key auth.
   if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
   ;(raw.quality as Record<string, unknown>).tier = qualityTier
   const tierCfg = QUALITY_TIERS[qualityTier]
-  vendors.claude.model = tierCfg.claude.model
   vendors.claude.effort = tierCfg.claude.effort
   vendors.codex.model = tierCfg.codex.model
   vendors.codex.effort = tierCfg.codex.effort

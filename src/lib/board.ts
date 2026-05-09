@@ -423,16 +423,18 @@ export class PRBoard {
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
     const sep = t.separator('─'.repeat(w - 1))
-    const indent = ' '.repeat(14)
 
     // ── Section 1 (top): session summary ─────────────────────────────────────
     const summaryRow = `${this.statsRow()}  │  ${t.dim('↑')} ${this.uptime()}`
 
     // ── Section 2 (middle): connectivity / status ─────────────────────────────
-    // Fixed-width grid: each block has an explicit width and is left-aligned
-    // within it, so columns are independent of content length.
-    const B1 = 46  // connectivity block (tunnel / workflow)
-    const B2 = 28  // config block (mode+tier / vendors)
+    // Two-column fixed-width grid. B1 covers "  ● crosscheck  <label>: <value>"
+    // so the right column always starts at the same position on both rows.
+    // The row-2 indent (16 chars) aligns "workflow:" under "tunnel:" on row 1:
+    //   "  ● crosscheck  " = 2 + 1 + 1 + 10 + 2 = 16 visible chars
+    const CONN_INDENT = ' '.repeat(16)  // aligns row-2 labels under row-1 labels
+    const B1 = 52  // connectivity block width (covers typical tunnel URLs)
+    const B2 = 28  // config block width
 
     const lb = (styled: string, width: number): string =>
       styled + ' '.repeat(Math.max(2, width - stripAnsi(styled).length))
@@ -443,7 +445,7 @@ export class PRBoard {
       ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
       : t.dim('connecting...')
 
-    const connRow1 = lb(`${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}`, B1) +
+    const connRow1 = lb(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}`, B1) +
       lb(`${cfg.mode} · ${cfg.quality.tier}`, B2)
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
@@ -451,7 +453,7 @@ export class PRBoard {
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
 
-    const connRow2 = lb(`${indent}workflow: ${stepFlow}`, B1) +
+    const connRow2 = lb(`${CONN_INDENT}workflow: ${stepFlow}`, B1) +
       lb(vendors.join(' · '), B2)
 
     const activeConn = this.connLog.filter(l => l.trim())

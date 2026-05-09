@@ -4,7 +4,7 @@
   "description": "Cross-vendor AI code review orchestrator — Claude Code ↔ Codex",
   "bin": {
     "crosscheck": "dist/cli.js",
-    "ck": "dist/cli.js"
+    "ck": "dist/ck.js"
   },
   "type": "module",
   "files": [
@@ -21,7 +21,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "tsc && chmod +x dist/cli.js dist/ck.js",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

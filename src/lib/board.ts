@@ -429,18 +429,26 @@ export class PRBoard {
     const summaryRow = `${this.statsRow()}  │  ${t.dim('↑')} ${this.uptime()}`
 
     // ── Section 2 (middle): connectivity / status ─────────────────────────────
+    // Two-column layout: left block is fixed-width so the right block always
+    // starts at the same horizontal position regardless of URL length.
+    const COL1 = 52  // visible chars for left column
+
     const { type: tunnelType, url, alive } = this.tunnel
     const tunnelLabel = tunnelType === 'serve' ? 'endpoint' : 'tunnel'
     const tunnelDisplay = url
       ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
       : t.dim('connecting...')
-    const connRow1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}`
+
+    const connLeft1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}`
+    const connRow1 = connLeft1 + ' '.repeat(Math.max(2, COL1 - stripAnsi(connLeft1).length)) + `${cfg.mode} · ${cfg.quality.tier}`
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
     const vendors: string[] = []
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
-    const connRow2 = `${indent}workflow: ${stepFlow}  │  ${vendors.join(' · ')}`
+
+    const connLeft2 = `${indent}workflow: ${stepFlow}`
+    const connRow2 = connLeft2 + ' '.repeat(Math.max(2, COL1 - stripAnsi(connLeft2).length)) + vendors.join(' · ')
 
     const activeConn = this.connLog.filter(l => l.trim())
 

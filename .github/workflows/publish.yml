@@ -13,7 +13,7 @@ on:
 jobs:
   staging:
     name: Publish @beta
-    if: github.ref == 'refs/heads/staging' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
     environment: staging
 

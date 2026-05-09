@@ -113,7 +113,7 @@ jobs:
         run: |
           git fetch origin staging
           git checkout staging
-          git checkout origin/main -- package.json package-lock.json
+          git checkout main -- package.json package-lock.json
           if git diff --cached --quiet; then
             echo "staging already at ${{ steps.semver.outputs.new_tag }} — nothing to sync"
           else

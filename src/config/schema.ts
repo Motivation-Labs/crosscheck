@@ -52,6 +52,11 @@ export const RoutingConfigSchema = z.object({
   // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
   // and will be reviewed by Codex, even without any other attribution signal.
   author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
+  // When origin detection cannot determine a vendor (origin: human), use this reviewer
+  // instead of skipping the PR.
+  // 'auto' = pick whichever vendor is currently enabled (codex first, then claude).
+  // null   = skip the PR (legacy behaviour, cross-vendor mode only).
+  fallback_reviewer: z.enum(['auto', 'codex', 'claude']).nullable().default('auto'),
 })
 
 export const ServerConfigSchema = z.object({
@@ -76,6 +81,11 @@ export const ImpactConfigSchema = z.object({
   assumed_human_review_minutes: z.number().int().min(1).default(60),
   hourly_rate_usd: z.number().min(0).default(150),
   defect_cost_usd: z.number().min(0).default(150),
+})
+
+export const BacktraceConfigSchema = z.object({
+  // Scan for open PRs without a [crosscheck] comment on startup.
+  enabled: z.boolean().default(true),
 })
 
 export const PostReviewDeliverySchema = z.object({
@@ -137,6 +147,7 @@ export const ConfigSchema = z.object({
   tunnel: TunnelConfigSchema.default({}),
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
+  backtrace: BacktraceConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
 })
@@ -152,3 +163,4 @@ export type PostReviewConfig = z.infer<typeof PostReviewConfigSchema>
 export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
+export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>

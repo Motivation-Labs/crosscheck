@@ -1,5 +1,7 @@
 import type { Config } from '../config/schema.js'
 import { getPRCommits } from './client.js'
+import { checkCodexAuth } from '../reviewers/codex.js'
+import { checkClaudeAuth } from '../reviewers/claude.js'
 
 export type PROrigin = 'claude' | 'codex' | 'human'
 
@@ -81,10 +83,25 @@ export function detectPROrigin(prBody: string, config: Config, author?: string):
 
 export function shouldReview(origin: PROrigin, config: Config): boolean {
   if (config.mode === 'single-vendor') return true
-  return origin === 'claude' || origin === 'codex'
+  if (origin === 'claude' || origin === 'codex') return true
+  // human origin: reviewable when fallback_reviewer is configured
+  return config.routing.fallback_reviewer !== null
 }
 
-export function assignReviewer(origin: PROrigin, config: Config): 'claude' | 'codex' | null {
+async function resolveFallback(config: Config): Promise<'claude' | 'codex' | null> {
+  const fb = config.routing.fallback_reviewer
+  if (fb === null) return null
+  if (fb === 'codex') return config.vendors.codex.enabled ? 'codex' : null
+  if (fb === 'claude') return config.vendors.claude.enabled ? 'claude' : null
+  // 'auto': use runtime capability checks so a Claude-only install doesn't
+  // attempt Codex just because both vendors are enabled in config by default.
+  const [codexAuth, claudeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth()])
+  if (codexAuth.ok) return 'codex'
+  if (claudeAuth.ok) return 'claude'
+  return null
+}
+
+export async function assignReviewer(origin: PROrigin, config: Config): Promise<'claude' | 'codex' | null> {
   if (config.mode === 'single-vendor') {
     if (config.vendors.codex.enabled) return 'codex'
     if (config.vendors.claude.enabled) return 'claude'
@@ -92,5 +109,6 @@ export function assignReviewer(origin: PROrigin, config: Config): 'claude' | 'co
   }
   if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
   if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'human') return resolveFallback(config)
   return null
 }

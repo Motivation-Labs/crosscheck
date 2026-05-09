@@ -91,6 +91,12 @@ routing:
   # author_routes:
   #   beingzy: claude
 
+  # Fallback reviewer when origin cannot be determined (no pattern/branch/route matched).
+  # 'auto'  = pick whichever vendor is currently authenticated (codex first, then claude).
+  # 'codex' / 'claude' = always use that vendor.
+  # null    = skip the PR (legacy cross-vendor behaviour).
+  fallback_reviewer: auto
+
   # Branch-prefix routing — checked when body and commit patterns don't match.
   # Agents should branch with these prefixes (claude/* and codex/*) so origin is
   # always detectable even without attribution text in the PR body.
@@ -160,6 +166,13 @@ post_review:
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix         # GitHub label applied to the fix PR
+
+# ─── Backtrace ───────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that have
+# never received a [crosscheck] comment. Ensures coverage for PRs opened while
+# crosscheck was offline or before it was first set up.
+# backtrace:
+#   enabled: true   # set to false to disable the startup scan entirely
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson

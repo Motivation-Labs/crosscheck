@@ -249,7 +249,13 @@ export function patchDeploymentConfig(
     const obj: Record<string, unknown> = { deployment, orgs }
     if (deployment === 'personal' && login) {
       obj.users = [login]
-      obj.routing = { allowed_authors: [login], author_routes: { [login]: 'claude' } }
+      obj.routing = {
+        allowed_authors: [login],
+        author_routes: { [login]: 'claude' },
+        fallback_reviewer: 'auto',
+      }
+    } else {
+      obj.routing = { fallback_reviewer: 'auto' }
     }
     writeFileSync(configPath, yaml.dump(obj, { lineWidth: -1, noRefs: true }))
     return true
@@ -274,7 +280,7 @@ export function patchDeploymentConfig(
     delete raw.users
   }
 
-  // Update routing.allowed_authors and author_routes
+  // Update routing.allowed_authors, author_routes, fallback_reviewer
   if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
   const routing = raw.routing as Record<string, unknown>
   const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
@@ -293,6 +299,11 @@ export function patchDeploymentConfig(
     routing.author_routes = { [login]: 'claude' }
   } else if (deployment === 'team' && force) {
     delete routing.author_routes
+  }
+
+  // fallback_reviewer: default to 'auto' unless already set
+  if (routing.fallback_reviewer === undefined || force) {
+    routing.fallback_reviewer = 'auto'
   }
 
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))

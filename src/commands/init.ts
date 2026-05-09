@@ -14,13 +14,15 @@ interface CheckResult {
   fix?: string
 }
 
-async function runChecks(): Promise<CheckResult[]> {
+async function runChecks(): Promise<{ results: CheckResult[]; aiCliCount: number }> {
   const results: CheckResult[] = []
+  let aiCliCount = 0
 
   // Check codex CLI
   try {
     const version = execSync('codex --version 2>&1', { encoding: 'utf8' }).trim()
     const auth = await checkCodexAuth()
+    if (auth.ok) aiCliCount++
     results.push({ label: 'codex CLI', ok: auth.ok, detail: `${version} — ${auth.detail}`, fix: auth.ok ? undefined : 'Run: codex login --device-auth' })
   } catch {
     results.push({ label: 'codex CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @openai/codex' })
@@ -29,6 +31,7 @@ async function runChecks(): Promise<CheckResult[]> {
   // Check claude CLI
   try {
     const auth = await checkClaudeAuth()
+    if (auth.ok) aiCliCount++
     results.push({ label: 'claude CLI', ok: auth.ok, detail: auth.detail, fix: auth.ok ? undefined : 'Run: claude auth login' })
   } catch {
     results.push({ label: 'claude CLI', ok: false, detail: 'not found', fix: 'Install: npm install -g @anthropic-ai/claude-code' })
@@ -85,7 +88,7 @@ async function runChecks(): Promise<CheckResult[]> {
   getWebhookSecret() // ensure it's generated/persisted
   results.push({ label: 'WEBHOOK_SECRET', ok: true, detail: secretDetail })
 
-  return results
+  return { results, aiCliCount }
 }
 
 function printCheck({ label, ok, detail, fix }: CheckResult) {
@@ -98,14 +101,33 @@ function printCheck({ label, ok, detail, fix }: CheckResult) {
 export async function runInit(configPath?: string) {
   console.log(chalk.bold('\ncrosscheck — environment check\n'))
 
-  const checks = await runChecks()
+  const { results: checks, aiCliCount } = await runChecks()
   for (const check of checks) printCheck(check)
 
-  const failures = checks.filter(c => !c.ok && c.fix)
-  if (failures.length > 0) {
-    console.log(chalk.yellow(`\n${failures.length} issue(s) need attention before crosscheck can run fully.\n`))
+  // AI CLI checks: only BOTH missing is a hard blocker. One CLI = single-vendor mode (still usable).
+  const aiChecks = checks.filter(c => c.label === 'codex CLI' || c.label === 'claude CLI')
+  const nonAiFailures = checks.filter(c => !aiChecks.includes(c) && !c.ok && c.fix)
+
+  if (aiCliCount === 0) {
+    // Neither AI CLI is authenticated — hard failure
+    const total = nonAiFailures.length + 1 // +1 for "no AI CLI" pseudo-failure
+    console.log(chalk.red(`\nAt least one AI CLI (codex or claude) must be authenticated before crosscheck can run.\n`))
+    if (nonAiFailures.length > 0) {
+      console.log(chalk.yellow(`${nonAiFailures.length} other issue(s) also need attention.\n`))
+    }
+  } else if (nonAiFailures.length > 0) {
+    console.log(chalk.yellow(`\n${nonAiFailures.length} issue(s) need attention before crosscheck can run fully.\n`))
+    if (aiCliCount === 1) {
+      const missing = aiChecks.find(c => !c.ok)?.label ?? 'one AI CLI'
+      console.log(chalk.dim(`Note: ${missing} is not available — running in single-vendor mode (cross-vendor review disabled).\n`))
+    }
   } else {
-    console.log(chalk.green('\nAll checks passed.\n'))
+    if (aiCliCount === 1) {
+      const missing = aiChecks.find(c => !c.ok)?.label ?? 'one AI CLI'
+      console.log(chalk.yellow(`\nNote: ${missing} is not available — running in single-vendor mode (cross-vendor review disabled).\n`))
+    } else {
+      console.log(chalk.green('\nAll checks passed.\n'))
+    }
   }
 
   // Write config if none exists, pre-filling allowed_authors with the detected GitHub login.

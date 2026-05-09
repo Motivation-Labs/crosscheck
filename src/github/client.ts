@@ -158,6 +158,107 @@ export async function listUserRepos(
   return results
 }
 
+export async function listOrgRepos(
+  org: string,
+  token: string,
+): Promise<Array<{ owner: string; name: string }>> {
+  const results: Array<{ owner: string; name: string }> = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&type=all`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ name: string; archived: boolean }>
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived) results.push({ owner: org, name: repo.name })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface OpenPR {
+  number: number
+  title: string
+  author: string
+  headSha: string
+  headRef: string
+  baseRef: string
+  body: string | null
+  createdAt: string
+}
+
+export async function listOpenPRs(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<OpenPR[]> {
+  const results: OpenPR[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{
+      number: number
+      title: string
+      user: { login: string }
+      head: { sha: string; ref: string }
+      base: { ref: string }
+      body: string | null
+      created_at: string
+    }>
+    if (data.length === 0) break
+    for (const pr of data) {
+      results.push({
+        number: pr.number,
+        title: pr.title,
+        author: pr.user.login,
+        headSha: pr.head.sha,
+        headRef: pr.head.ref,
+        baseRef: pr.base.ref,
+        body: pr.body,
+        createdAt: pr.created_at,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+// Returns true if any comment on the PR contains '[crosscheck]' — meaning it
+// has already been reviewed by this tool.
+export async function prHasCrossCheckComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<boolean> {
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) return false
+    const data = await res.json() as Array<{ body: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      if (comment.body.includes('[crosscheck]')) return true
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return false
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,

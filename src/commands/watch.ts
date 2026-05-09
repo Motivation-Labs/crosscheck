@@ -28,6 +28,7 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
+import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { PRBoard } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -221,7 +222,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         owner, repoName, prNumber,
         config, token, pr.user.login,
       )
-      const reviewer = assignReviewer(origin, config)
+      const reviewer = await assignReviewer(origin, config)
 
       fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 
@@ -427,9 +428,9 @@ export async function runWatch(opts: WatchOpts = {}) {
     const deployLabel = sessionOnly
       ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
       : chalk.cyan(effectiveDeployment)
-    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)} · ${chalk.dim('codex:')}${chalk.cyan(config.vendors.codex.quality)}`)
+    console.log(`  profile     ${deployLabel} · ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
   } else {
-    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)} · ${chalk.dim('codex:')}${chalk.cyan(config.vendors.codex.quality)}`)
+    console.log(`  profile     ${chalk.cyan(config.mode)} · ${chalk.cyan(config.quality.tier)}`)
   }
   if (config.orgs.length > 0) {
     console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)

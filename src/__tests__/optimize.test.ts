@@ -9,7 +9,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     orgs: [],
     users: [],
     repos: [],
-    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {} },
+    routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], claude_branch_prefixes: [], codex_branch_prefixes: [], allowed_authors: [], author_routes: {}, fallback_reviewer: 'auto' },
     server: { port: 7892, webhook_path: '/webhook' },
     quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
@@ -20,6 +20,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     logs: { enabled: false, retention_days: 7 },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
+    backtrace: { enabled: true },
     display: { theme: { bar_fill: 'blue', bar_empty: 'dim', cr_approve: 'green', cr_needs_work: 'yellow', cr_block: 'red', fix_fill: 'cyan' } },
     post_review: {
       auto_fix: {

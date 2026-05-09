@@ -155,19 +155,50 @@ export function patchAllowedAuthors(configPath: string, login: string): boolean 
   return false
 }
 
-// Adds login → 'claude' to routing.author_routes when the map is empty.
-// Returns true if the file was modified.
+// Writes routing.author_routes: { [login]: 'claude' } to an existing config file
+// using text-based patching to preserve comments and formatting.
+// No-op if author_routes already has entries (never overwrites user-set routes).
 export function patchAuthorRoutes(configPath: string, login: string): boolean {
-  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
-  if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
-  const routing = raw.routing as Record<string, unknown>
+  const content = readFileSync(configPath, 'utf8')
+
+  // Use yaml.load only to check current state — text patching does the write.
+  const raw = (yaml.load(content) ?? {}) as Record<string, unknown>
+  const routing = typeof raw.routing === 'object' && raw.routing !== null
+    ? raw.routing as Record<string, unknown>
+    : {}
   const current = typeof routing.author_routes === 'object' && routing.author_routes !== null
     ? routing.author_routes as Record<string, unknown>
     : {}
   if (Object.keys(current).length > 0) return false
-  routing.author_routes = { [login]: 'claude' }
-  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
-  return true
+
+  const entry = `  author_routes:\n    ${login}: claude  # auto-detected from gh auth\n`
+
+  // Case 1: commented-out placeholder block from the example config
+  const uncommented = content.replace(
+    /  # author_routes:\n(  #[^\n]*\n)*/,
+    entry,
+  )
+  if (uncommented !== content) { writeFileSync(configPath, uncommented); return true }
+
+  // Case 2: inline empty map — `author_routes: {}` or `author_routes: { }`
+  const filledInline = content.replace(/( {2}author_routes:\s*\{\s*\}\s*\n)/, entry)
+  if (filledInline !== content) { writeFileSync(configPath, filledInline); return true }
+
+  // Case 3: key exists but map is empty (no entries, only optional comment lines)
+  const filledEmpty = content.replace(/(  author_routes:\s*\n)((?:  #[^\n]*\n)*)/, entry)
+  if (filledEmpty !== content) { writeFileSync(configPath, filledEmpty); return true }
+
+  // Case 4: routing: section exists but author_routes is absent — insert after routing:
+  const appended = content.replace(/(routing:\s*\n)/, `$1${entry}`)
+  if (appended !== content) { writeFileSync(configPath, appended); return true }
+
+  // Case 5: no routing: section at all — append a new block
+  if (!/^routing:/m.test(content)) {
+    writeFileSync(configPath, content.trimEnd() + `\nrouting:\n${entry}`)
+    return true
+  }
+
+  return false
 }
 
 // ── Deployment mode ──────────────────────────────────────────────────────────
@@ -259,14 +290,15 @@ export function patchDeploymentConfig(
     routing.allowed_authors = []
   }
 
-  // author_routes: set login → claude when empty (personal) or clear (team, force)
+  // author_routes: in personal mode, map the owner's login → 'claude' as a fallback
+  // when no attribution footer or commit trailer is present on their PRs.
   const currentRoutes = typeof routing.author_routes === 'object' && routing.author_routes !== null
-    ? routing.author_routes as Record<string, unknown>
+    ? routing.author_routes as Record<string, string>
     : {}
   if (deployment === 'personal' && login && (force || Object.keys(currentRoutes).length === 0)) {
     routing.author_routes = { [login]: 'claude' }
   } else if (deployment === 'team' && force) {
-    routing.author_routes = {}
+    delete routing.author_routes
   }
 
   // fallback_reviewer: default to 'auto' unless already set

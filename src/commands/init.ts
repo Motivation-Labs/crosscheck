@@ -141,13 +141,20 @@ export async function runInit(configPath?: string) {
       let content = readFileSync(examplePath, 'utf8')
       const login = detectGitHubLogin()
       if (login) {
+        // Uncomment allowed_authors placeholder
         content = content.replace(
           /  # allowed_authors:\n(  #[^\n]*\n)+/,
           `  allowed_authors:\n    - ${login}  # auto-detected from gh auth\n`,
         )
+        // Uncomment author_routes placeholder so PRs lacking attribution footers
+        // are still detected and routed to the correct reviewer
+        content = content.replace(
+          /  # author_routes:\n  #[^\n]*\n/,
+          `  author_routes:\n    ${login}: claude  # auto-detected from gh auth\n`,
+        )
       }
       writeFileSync(dest, content)
-      const hint = login ? `allowed_authors set to ${chalk.cyan(login)} (github)` : 'edit to customize'
+      const hint = login ? `allowed_authors and author_routes set to ${chalk.cyan(login)}` : 'edit to customize'
       console.log(chalk.dim(`Config written to ${dest} — ${hint}.\n`))
     }
   } else {
@@ -155,22 +162,19 @@ export async function runInit(configPath?: string) {
     const existing = loadConfig(resolveConfigPath(configPath) ?? dest)
     const login = detectGitHubLogin()
     let patched = false
-    if (existing.routing.allowed_authors.length === 0 && login) {
-      if (patchAllowedAuthors(dest, login)) {
-        console.log(chalk.green(`  ✓ allowed_authors set to ${chalk.cyan(login)} in ${dest}`))
-        patched = true
+    if (login) {
+      if (existing.routing.allowed_authors.length === 0) {
+        patched = patchAllowedAuthors(dest, login) || patched
+      }
+      if (Object.keys(existing.routing.author_routes).length === 0) {
+        patched = patchAuthorRoutes(dest, login) || patched
       }
     }
-    if (Object.keys(existing.routing.author_routes).length === 0 && login) {
-      if (patchAuthorRoutes(dest, login)) {
-        console.log(chalk.green(`  ✓ author_routes: ${chalk.cyan(login)} → claude in ${dest}`))
-        patched = true
-      }
+    if (patched) {
+      console.log(chalk.green(`  ✓ routing updated for ${chalk.cyan(login ?? 'unknown')} in ${dest}\n`))
+    } else {
+      console.log(chalk.dim(`Config already exists at ${dest}\n`))
     }
-    if (!patched) {
-      console.log(chalk.dim(`Config already exists at ${dest}`))
-    }
-    console.log()
   }
 
   // Smee-client is optional but improves watch mode reliability.

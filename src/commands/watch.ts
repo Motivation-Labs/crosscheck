@@ -170,6 +170,12 @@ export async function runWatch(opts: WatchOpts = {}) {
     fileLog({ level: 'info', event: 'message', message: line2 ? `${line1} ${line2}` : line1 })
   }
 
+  // Connectivity events (tunnel/webhook) go into the live connectivity section
+  const cLog = (line: string) => {
+    board.logConnectivity(line)
+    fileLog({ level: 'info', event: 'message', message: line })
+  }
+
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
   // SHAs pushed by the address step — skip synchronize events from our own commits
@@ -486,7 +492,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (!running) break
       currentTunnelProc = null
       board.setTunnel('smee', channelUrl, false)
-      bLog(chalk.yellow(`smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
+      cLog(chalk.yellow(`smee relay exited — reconnecting in ${smeeRetryDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true, backend: 'smee' })
       await new Promise(r => setTimeout(r, smeeRetryDelay))
       smeeRetryDelay = Math.min(smeeRetryDelay * 2, 60_000)
@@ -506,7 +512,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     } catch (err: unknown) {
       if (!running) break
       const msg = err instanceof Error ? err.message : String(err)
-      bLog(chalk.yellow(`tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
+      cLog(chalk.yellow(`tunnel failed: ${msg} — retrying in ${reconnectDelay / 1000}s`))
       fileLog({ level: 'warn', event: 'tunnel_error', message: msg })
       await new Promise(r => setTimeout(r, reconnectDelay))
       reconnectDelay = Math.min(reconnectDelay * 2, 60_000)
@@ -516,6 +522,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
     currentTunnelProc = tunnelProc
     board.setTunnel('localhost.run', tunnelUrl, true)
+    cLog(`${chalk.green('✓')} tunnel ready: ${chalk.cyan(tunnelUrl)}`)
     fileLog({ level: 'info', event: 'tunnel_opened', url: tunnelUrl })
 
     // Register webhooks for this tunnel session
@@ -531,14 +538,14 @@ export async function runWatch(opts: WatchOpts = {}) {
           const hookId = await registerRepoWebhook(scope.owner, scope.repo, webhookUrl, webhookSecret, token)
           currentRegistered.push({ type: 'repo', owner: scope.owner, repo: scope.repo, hookId })
         }
-        bLog(`${chalk.green('✓')} webhook registered: ${chalk.cyan(label)}`)
+        cLog(`${chalk.green('✓')} webhook registered for ${chalk.cyan(label)}`)
         fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         const isCreds = /bad credentials|\[401\]/i.test(msg)
         const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
           || ('org' in scope && /\[404\]/i.test(msg))
-        bLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
+        cLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
         if (isCreds) {
           bLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
         } else if (isScope) {
@@ -559,7 +566,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // Clean up webhooks tied to the old URL before reconnecting
     await deleteCurrentWebhooks()
     board.setTunnel('localhost.run', tunnelUrl, false)
-    bLog(chalk.yellow('tunnel disconnected — reconnecting in 5s...'))
+    cLog(chalk.yellow('tunnel disconnected — reconnecting in 5s...'))
     fileLog({ level: 'warn', event: 'tunnel_closed', reconnecting: true })
     await new Promise(r => setTimeout(r, reconnectDelay))
   }

@@ -142,12 +142,15 @@ function buildTheme(cfg: DisplayTheme): Theme {
 
 // ── PRBoard ───────────────────────────────────────────────────────────────────
 
+const CONN_LOG_MAX = 2  // lines kept in the live connectivity section
+
 export class PRBoard {
   private slots = new Map<string, PRSlot>()
   private frameIdx = 0
   private timer: ReturnType<typeof setInterval> | null = null
   private liveLines = 0
   private readonly isTTY: boolean = Boolean(process.stdout.isTTY)
+  private connLog: string[] = []
 
   private stats: Stats = {
     prsReceived: 0,
@@ -268,6 +271,13 @@ export class PRBoard {
   /** Print 1–2 static lines to scrollback (above the live block). */
   log(line1: string, line2?: string): void {
     this.printStatic(line2 ? `${line1}\n${line2}` : line1)
+  }
+
+  /** Record a connectivity event in the live section (tunnel/webhook events). */
+  logConnectivity(line: string): void {
+    const ts = chalk.dim(new Date().toLocaleTimeString())
+    this.connLog.push(`  ${ts}  ${line}`)
+    if (this.connLog.length > CONN_LOG_MAX) this.connLog.shift()
   }
 
   // ── Private: display ───────────────────────────────────────────────────────
@@ -402,6 +412,12 @@ export class PRBoard {
     const row2 = `${indent}workflow: ${stepFlow}  │  ${vendors.join(' · ')}`
     const row3 = `${indent}${this.statsRow()}`
 
+    // ── Section 1.5: connectivity log ────────────────────────────────────────
+    const connLines: string[] = []
+    for (let i = 0; i < CONN_LOG_MAX; i++) {
+      connLines.push(this.connLog[i] ?? '')
+    }
+
     // ── Section 2: active PR slots ────────────────────────────────────────────
     const frame = FRAMES[this.frameIdx]
     const prContent: string[] = []
@@ -417,7 +433,7 @@ export class PRBoard {
       }
     }
 
-    return [row1, row2, row3, sep, ...prContent, sep].join('\n')
+    return [row1, row2, row3, sep, ...connLines, sep, ...prContent, sep].join('\n')
   }
 
   private redraw(): void {

@@ -280,6 +280,20 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - Serve `team` mode + empty `allowed_authors` → shows positive confirmation, not warning.
     - Inaccessible repo in `repos:` → warning logged, repo skipped, remaining repos monitored.
 
+- [x] **Live connectivity log section in `watch` dashboard** — add a dedicated 2-line section between the top status dashboard and the per-PR work area. Shows the 2 most recent connectivity events (tunnel open/close, webhook registrations) in-place without cluttering the scrollback.
+  - **User:** Anyone running `crosscheck watch` who wants to see tunnel/webhook status at a glance alongside active PR work.
+  - **Acceptance Criteria:**
+    - A fixed 2-line connectivity section appears between the 3-row dashboard and the PR slots in the live display.
+    - Shows the 2 most recent events: tunnel ready, tunnel disconnected, webhook registered, webhook failed.
+    - Each line is timestamped: `  9:18:14 AM  ✓ tunnel ready: https://...`
+    - Lines are padded with empty strings until 2 events have occurred, so the section height is stable.
+    - Connectivity events do NOT appear in the scrollback (they are in-place only).
+    - Tunnel errors and webhook errors still also appear in scrollback via `bLog` (so they're not lost on reconnect).
+  - **Technical Notes:**
+    - `board.ts`: add `private connLog: string[]` (max 2 entries); `logConnectivity(line): void` appends with timestamp, shifts oldest when full.
+    - `render()`: add `Section 1.5` between `sep` and PR slots, always `CONN_LOG_MAX` lines.
+    - `watch.ts`: add `cLog(line)` helper → `board.logConnectivity(line)` + `fileLog`; route tunnel open/close/fail and webhook registered/failed to `cLog`.
+
 - [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
   - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
   - **Acceptance Criteria:**

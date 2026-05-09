@@ -148,6 +148,58 @@ get-started.md                  # Single-file documentation
 
 ---
 
+## Detection & Routing
+
+These are settled architectural decisions. Do not redesign them without updating `prd.md` first.
+
+### Two-phase model
+
+Every PR event goes through exactly two phases:
+
+**Phase 1 — Detection (should we review this PR?)**
+Answer is YES when both conditions hold:
+1. PR author passes the scope gate (`allowed_authors` if set; any author otherwise)
+2. PR has no existing crosscheck review comment
+
+Attribution is irrelevant here. A PR from an unknown author goes to Phase 2 just like a PR from a known agent.
+
+**Phase 2 — Assignment (which vendor reviews it?)**
+Attribution detection runs in this fixed order — stop at first match:
+1. PR body text (configured patterns)
+2. Commit messages (same patterns)
+3. Branch name prefix
+4. PR comments (scan for `<!-- crosscheck: origin=... -->` annotation tags)
+5. `author_routes` config map
+6. `routing.fallback_reviewer` (default: `skip`)
+
+Never add a gate to Phase 1 that belongs in Phase 2. "We don't know who wrote this" is a Phase 2 concern.
+
+### Annotation contract
+
+`<!-- crosscheck: origin=<claude|codex> reviewer=<claude|codex> verdict=<APPROVE|NEEDS_WORK|BLOCK> -->`
+
+This tag is embedded in every review comment crosscheck posts. It is the stable schema that Phase 2 step 4 reads. **Changing the format is a breaking change** — same rules as config schema changes (update `annotation.ts`, bump minor version, document in changelog).
+
+### `routing.fallback_reviewer`
+
+When Phase 2 returns `origin: 'human'` (all 6 steps inconclusive) in cross-vendor mode:
+- `skip` (default) — no review posted; log why
+- `claude` / `codex` — review posted using that vendor regardless of origin
+
+In single-vendor mode, `fallback_reviewer` is unused — the one enabled vendor always reviews.
+
+### File ownership
+
+| Concern | File |
+|---|---|
+| Detection chain (Phase 2) | `src/github/detector.ts` |
+| Phase 1 scope filter | `src/lib/filter.ts` |
+| Annotation build/parse | `src/lib/annotation.ts` |
+| Comment fetching for step 4 | `src/github/client.ts` → `listPRComments` |
+| Vendor assignment logic | `src/github/detector.ts` → `assignReviewer` |
+
+---
+
 ## CLI API contract
 
 The public CLI surface is: command names, flag names, and exit codes.

@@ -155,6 +155,21 @@ export function patchAllowedAuthors(configPath: string, login: string): boolean 
   return false
 }
 
+// Adds login → 'claude' to routing.author_routes when the map is empty.
+// Returns true if the file was modified.
+export function patchAuthorRoutes(configPath: string, login: string): boolean {
+  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
+  const routing = raw.routing as Record<string, unknown>
+  const current = typeof routing.author_routes === 'object' && routing.author_routes !== null
+    ? routing.author_routes as Record<string, unknown>
+    : {}
+  if (Object.keys(current).length > 0) return false
+  routing.author_routes = { [login]: 'claude' }
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+  return true
+}
+
 // ── Deployment mode ──────────────────────────────────────────────────────────
 
 export async function promptDeploymentMode(
@@ -203,7 +218,13 @@ export function patchDeploymentConfig(
     const obj: Record<string, unknown> = { deployment, orgs }
     if (deployment === 'personal' && login) {
       obj.users = [login]
-      obj.routing = { allowed_authors: [login] }
+      obj.routing = {
+        allowed_authors: [login],
+        author_routes: { [login]: 'claude' },
+        fallback_reviewer: 'auto',
+      }
+    } else {
+      obj.routing = { fallback_reviewer: 'auto' }
     }
     writeFileSync(configPath, yaml.dump(obj, { lineWidth: -1, noRefs: true }))
     return true
@@ -228,7 +249,7 @@ export function patchDeploymentConfig(
     delete raw.users
   }
 
-  // Update routing.allowed_authors
+  // Update routing.allowed_authors, author_routes, fallback_reviewer
   if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
   const routing = raw.routing as Record<string, unknown>
   const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
@@ -236,6 +257,21 @@ export function patchDeploymentConfig(
     routing.allowed_authors = [login]
   } else if (deployment === 'team' && force) {
     routing.allowed_authors = []
+  }
+
+  // author_routes: set login → claude when empty (personal) or clear (team, force)
+  const currentRoutes = typeof routing.author_routes === 'object' && routing.author_routes !== null
+    ? routing.author_routes as Record<string, unknown>
+    : {}
+  if (deployment === 'personal' && login && (force || Object.keys(currentRoutes).length === 0)) {
+    routing.author_routes = { [login]: 'claude' }
+  } else if (deployment === 'team' && force) {
+    routing.author_routes = {}
+  }
+
+  // fallback_reviewer: default to 'auto' unless already set
+  if (routing.fallback_reviewer === undefined || force) {
+    routing.fallback_reviewer = 'auto'
   }
 
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))

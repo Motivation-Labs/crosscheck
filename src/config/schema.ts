@@ -52,6 +52,11 @@ export const RoutingConfigSchema = z.object({
   // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
   // and will be reviewed by Codex, even without any other attribution signal.
   author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
+  // When origin detection cannot determine a vendor (origin: human), use this reviewer
+  // instead of skipping the PR.
+  // 'auto' = pick whichever vendor is currently enabled (codex first, then claude).
+  // null   = skip the PR (legacy behaviour, cross-vendor mode only).
+  fallback_reviewer: z.enum(['auto', 'codex', 'claude']).nullable().default('auto'),
 })
 
 export const ServerConfigSchema = z.object({

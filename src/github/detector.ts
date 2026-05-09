@@ -81,7 +81,20 @@ export function detectPROrigin(prBody: string, config: Config, author?: string):
 
 export function shouldReview(origin: PROrigin, config: Config): boolean {
   if (config.mode === 'single-vendor') return true
-  return origin === 'claude' || origin === 'codex'
+  if (origin === 'claude' || origin === 'codex') return true
+  // human origin: reviewable when fallback_reviewer is configured
+  return config.routing.fallback_reviewer !== null
+}
+
+function resolveFallback(config: Config): 'claude' | 'codex' | null {
+  const fb = config.routing.fallback_reviewer
+  if (fb === null) return null
+  if (fb === 'codex') return config.vendors.codex.enabled ? 'codex' : null
+  if (fb === 'claude') return config.vendors.claude.enabled ? 'claude' : null
+  // 'auto': prefer codex, fall back to claude
+  if (config.vendors.codex.enabled) return 'codex'
+  if (config.vendors.claude.enabled) return 'claude'
+  return null
 }
 
 export function assignReviewer(origin: PROrigin, config: Config): 'claude' | 'codex' | null {
@@ -92,5 +105,6 @@ export function assignReviewer(origin: PROrigin, config: Config): 'claude' | 'co
   }
   if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
   if (origin === 'codex' && config.vendors.claude.enabled) return 'claude'
+  if (origin === 'human') return resolveFallback(config)
   return null
 }

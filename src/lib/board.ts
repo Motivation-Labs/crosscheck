@@ -433,8 +433,10 @@ export class PRBoard {
     // The row-2 indent (16 chars) aligns "workflow:" under "tunnel:" on row 1:
     //   "  ● crosscheck  " = 2 + 1 + 1 + 10 + 2 = 16 visible chars
     const CONN_INDENT = ' '.repeat(16)  // aligns row-2 labels under row-1 labels
-    const B1 = 52  // connectivity block width (covers typical tunnel URLs)
-    const B2 = 28  // config block width
+    // B1+B2 must equal w-1 (same constraint as the separator) to avoid the
+    // exact-terminal-width cursor wrap that breaks eraseLive() line counting.
+    const B1 = Math.min(52, Math.floor((w - 1) * 0.65))
+    const B2 = (w - 1) - B1
 
     const lb = (styled: string, width: number): string =>
       styled + ' '.repeat(Math.max(2, width - stripAnsi(styled).length))

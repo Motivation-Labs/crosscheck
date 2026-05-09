@@ -39,6 +39,28 @@ type VendorModeConfig = {
   codexEnabled: boolean
 }
 
+// Model and effort settings for each quality tier.
+// These are written directly to vendors.claude / vendors.codex in the config.
+const QUALITY_TIERS = {
+  fast: {
+    description: 'quick scan, top issues only  (~10s, lowest cost)',
+    claude: { model: 'haiku', effort: 'low' as const },
+    codex:  { model: 'o4-mini', effort: 'low' as const },
+  },
+  balanced: {
+    description: 'full review, all issues with explanations  (~30s)',
+    claude: { model: 'sonnet', effort: 'medium' as const },
+    codex:  { model: 'o4-mini', effort: 'medium' as const },
+  },
+  thorough: {
+    description: 'deep multi-pass, security + architecture  (~60s+, higher cost)',
+    claude: { model: 'sonnet', effort: 'max' as const },
+    codex:  { model: 'o3', effort: 'high' as const },
+  },
+} as const
+
+type QualityTier = keyof typeof QUALITY_TIERS
+
 function ask(question: string): Promise<string> {
   return new Promise(resolve => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
@@ -162,6 +184,43 @@ async function promptVendorMode(
     claudeEnabled: vendorIdx === 0,
     codexEnabled: vendorIdx === 1,
   }
+}
+
+async function promptQualityTier(
+  claudeEnabled: boolean,
+  codexEnabled: boolean,
+  currentTier: string | undefined,
+  opts: OnboardOpts,
+): Promise<QualityTier> {
+  if (opts.yes) {
+    const tier = (currentTier ?? 'balanced') as QualityTier
+    console.log(`  Quality: ${chalk.cyan(tier)}`)
+    return tier
+  }
+
+  function modelHint(tier: QualityTier): string {
+    const t = QUALITY_TIERS[tier]
+    const parts: string[] = []
+    if (claudeEnabled) parts.push(`claude: ${t.claude.model} · ${t.claude.effort} effort`)
+    if (codexEnabled)  parts.push(`codex: ${t.codex.model} · ${t.codex.effort} effort`)
+    return parts.join('  ·  ')
+  }
+
+  const tiers: QualityTier[] = ['fast', 'balanced', 'thorough']
+  const items: PickerItem[] = tiers.map(tier => ({
+    label: tier,
+    description: QUALITY_TIERS[tier].description,
+    hint: modelHint(tier),
+  }))
+
+  const defaultIdx = tiers.indexOf((currentTier ?? 'balanced') as QualityTier)
+  const idx = await promptSinglePicker(items, {
+    title: 'Review quality — how deep should the analysis go?',
+    defaultIndex: defaultIdx >= 0 ? defaultIdx : 1,
+  })
+  console.log()
+
+  return tiers[idx]
 }
 
 async function promptWorkflowPipeline(
@@ -453,16 +512,26 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 5: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 5 — workflow pipeline'))
+  // ── Step 5: Review quality ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 5 — review quality'))
+  const qualityTier = await promptQualityTier(
+    vendorConfig.claudeEnabled,
+    vendorConfig.codexEnabled,
+    existingConfig?.quality?.tier,
+    opts,
+  )
+  console.log()
+
+  // ── Step 6: Workflow pipeline ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 6 — workflow pipeline'))
   const pipelinePreset = await promptWorkflowPipeline(
     existingConfig?.post_review?.auto_fix?.enabled,
     opts,
   )
   console.log()
 
-  // ── Step 6: Connection type ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 6 — connection type'))
+  // ── Step 7: Connection type ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 7 — connection type'))
   const currentTunnel = existingConfig?.tunnel?.backend
   let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
@@ -487,8 +556,8 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 7: Confirm and write ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 7 — review and write config'))
+  // ── Step 8: Confirm and write ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
@@ -497,6 +566,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
   }
+  console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
   if (selectedOrgs.length > 0) {
     console.log(`  orgs         ${selectedOrgs.map(o => chalk.cyan(o)).join(', ')}`)
@@ -549,6 +619,15 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   if (!vendors.codex) vendors.codex = {}
   vendors.claude.enabled = vendorConfig.claudeEnabled
   vendors.codex.enabled = vendorConfig.codexEnabled
+
+  // Quality tier + per-vendor model and effort
+  if (!raw.quality || typeof raw.quality !== 'object') raw.quality = {}
+  ;(raw.quality as Record<string, unknown>).tier = qualityTier
+  const tierCfg = QUALITY_TIERS[qualityTier]
+  vendors.claude.model = tierCfg.claude.model
+  vendors.claude.effort = tierCfg.claude.effort
+  vendors.codex.model = tierCfg.codex.model
+  vendors.codex.effort = tierCfg.codex.effort
 
   // Workflow pipeline
   if (!raw.post_review || typeof raw.post_review !== 'object') raw.post_review = {}

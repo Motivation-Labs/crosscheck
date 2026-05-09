@@ -75,6 +75,16 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ### 🔜 Next Up
 
+- [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
+  - **User:** Any developer who wants faster CLI invocations.
+  - **Acceptance Criteria:**
+    - `ck <command>` works identically to `crosscheck <command>` for all subcommands.
+    - `ck --help` shows `Usage: ck [options] [command]` (not `crosscheck`).
+    - `crosscheck --help` continues to show `Usage: crosscheck [options] [command]`.
+    - Both aliases are published to npm and installed as symlinks on `npm i -g`.
+  - **Technical Notes:** Add `"ck": "dist/ck.js"` to `package.json` `bin` field. `src/ck.ts` sets `argv[1]='ck'` via dynamic import so the name is correct on all platforms including Windows shims.
+  - **Tests Required:** invocation-name detection unit test; no CLI contract change (patch bump).
+
 - [x] **Fix `watch` event log timestamp misalignment** — zero-pad single-digit hours so all timestamps are the same width (`01:08:08 PM` not `1:08:08 PM`). `fmtTime()` helper added to `board.ts`; all `toLocaleTimeString()` calls replaced.
 - [x] **Fix `watch` status bar embedded in scrolling log** — confirmed already anchored via `writeLive()`; no structural change needed.
 - [x] **Fix `watch` event log — show failure state in counters** — `errorsOccurred` stat counter added; shown in red in the status bar when > 0, omitted when 0.

@@ -33,6 +33,12 @@ export interface WorkflowContext {
   onPhaseChange: (label: string, data?: PRPhaseData) => void
   // SHAs crosscheck pushed — used to skip self-triggered synchronize events
   crosscheckShas: Set<string>
+  // When true, review output is printed but the GitHub comment is not posted
+  // and the fix step is skipped. Used by `crosscheck run --dry-run`.
+  dryRun?: boolean
+  // Override the steps to execute instead of loading from workflow.yml.
+  // Used by `crosscheck run --steps` to run only a subset of the pipeline.
+  steps?: import('./workflow.js').WorkflowStep[]
 }
 
 export interface WorkflowResult {
@@ -69,7 +75,7 @@ function resolveReviewer(
 
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
-  const steps = loadWorkflow(process.cwd())
+  const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
 
   for (const step of steps) {
@@ -108,15 +114,25 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
 
-      onPhaseChange('posting comment...', { verdict: verdict ?? undefined, commentCount })
-      const octokit = createGithubClient(token)
-      await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
-      const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
-      fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
-
-      results[step.name] = { verdict, commentBody, commentUrl }
+      if (ctx.dryRun) {
+        onPhaseChange('dry-run — comment not posted', { verdict: verdict ?? undefined, commentCount })
+        log(chalk.dim(`\n--- dry-run: comment that would be posted ---\n${commentBody}\n--- end ---`))
+        results[step.name] = { verdict, commentBody }
+      } else {
+        onPhaseChange('posting comment...', { verdict: verdict ?? undefined, commentCount })
+        const octokit = createGithubClient(token)
+        await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
+        const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
+        fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
+        results[step.name] = { verdict, commentBody, commentUrl }
+      }
 
     } else if (step.type === 'fix') {
+      if (ctx.dryRun) {
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'dry_run' })
+        results[step.name] = { skipped: true }
+        continue
+      }
       // Respect post_review.auto_fix config
       const autoFix = config.post_review.auto_fix
       if (!autoFix.enabled || autoFix.trigger === 'never') {

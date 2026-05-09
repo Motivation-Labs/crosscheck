@@ -2,6 +2,13 @@
 # This file is designed to be easily read and modified by coding agents.
 # All fields are optional — crosscheck uses sensible defaults.
 
+# ─── Deployment ──────────────────────────────────────────────────────────────
+# Set automatically on first run of `crosscheck watch` or `crosscheck serve`.
+# personal — monitor your own repos and orgs; review only PRs you author
+# team     — monitor org repos only; review all PRs from any author
+# Absent = first-run prompt will ask you to choose.
+# deployment: personal
+
 # ─── Mode ────────────────────────────────────────────────────────────────────
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  each AI reviews the other's PRs (Claude ↔ Codex)

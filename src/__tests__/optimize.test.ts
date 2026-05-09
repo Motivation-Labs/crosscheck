@@ -7,6 +7,7 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
   return {
     mode: 'cross-vendor',
     orgs: [],
+    users: [],
     repos: [],
     routing: { codex_reviews_patterns: [], claude_reviews_patterns: [], allowed_authors: [], author_routes: {} },
     server: { port: 7892, webhook_path: '/webhook' },
@@ -16,7 +17,6 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
       claude: { enabled: claudeEnabled, auth: 'subscription', effort: 'medium' },
       codex: { enabled: codexEnabled, auth: 'subscription', effort: 'medium' },
     },
-    users: [],
     logs: { enabled: false, retention_days: 7 },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },

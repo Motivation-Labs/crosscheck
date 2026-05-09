@@ -1,10 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { execSync } from 'child_process'
+import { createInterface } from 'readline'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import yaml from 'js-yaml'
 import { ConfigSchema, type Config } from './schema.js'
+import { listUserOrgs } from '../github/client.js'
 
 const CONFIG_FILENAME = 'crosscheck.config.yml'
 
@@ -151,4 +153,91 @@ export function patchAllowedAuthors(configPath: string, login: string): boolean 
   }
 
   return false
+}
+
+// ── Deployment mode ──────────────────────────────────────────────────────────
+
+export async function promptDeploymentMode(
+  current?: 'personal' | 'team',
+): Promise<'personal' | 'team'> {
+  if (!process.stdin.isTTY) return 'personal'
+
+  return new Promise<'personal' | 'team'>(resolve => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    console.log('\nHow are you using crosscheck?\n')
+    console.log('  [1] personal  — monitor all your repos and orgs; review only PRs you author')
+    console.log('  [2] team      — monitor org repos only; review all PRs from any author')
+    if (current) console.log(`\n  Current: ${current}`)
+    console.log()
+    rl.question('  Choice [1]: ', (answer) => {
+      rl.close()
+      resolve(answer.trim() === '2' ? 'team' : 'personal')
+    })
+  })
+}
+
+export async function detectScopesForDeployment(
+  deployment: 'personal' | 'team',
+  token: string,
+): Promise<{ login: string; users: string[]; orgs: string[] }> {
+  const login = detectGitHubLogin() ?? ''
+  const orgs = await listUserOrgs(token)
+  return {
+    login,
+    users: deployment === 'personal' && login ? [login] : [],
+    orgs,
+  }
+}
+
+// Writes deployment, orgs, users, and allowed_authors to the config file.
+// If force=false, skips silently when deployment is already set.
+// Uses yaml.load/dump so all non-deployment values (quality, budget, etc.) are preserved.
+export function patchDeploymentConfig(
+  configPath: string,
+  deployment: 'personal' | 'team',
+  login: string,
+  orgs: string[],
+  force = false,
+): boolean {
+  if (!existsSync(configPath)) {
+    const obj: Record<string, unknown> = { deployment, orgs }
+    if (deployment === 'personal' && login) {
+      obj.users = [login]
+      obj.routing = { allowed_authors: [login] }
+    }
+    writeFileSync(configPath, yaml.dump(obj, { lineWidth: -1, noRefs: true }))
+    return true
+  }
+
+  const raw = (yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>
+  if (raw.deployment && !force) return false
+
+  raw.deployment = deployment
+
+  // Update orgs unless user has already set non-example values
+  const EXAMPLE_ORGS = new Set(['motivation-labs', 'codatta'])
+  const currentOrgs = Array.isArray(raw.orgs) ? (raw.orgs as string[]) : []
+  const hasCustomOrgs = currentOrgs.length > 0 && currentOrgs.some(o => !EXAMPLE_ORGS.has(o))
+  if (force || !hasCustomOrgs) raw.orgs = orgs
+
+  // Update users
+  const currentUsers = Array.isArray(raw.users) ? (raw.users as string[]) : []
+  if (deployment === 'personal' && login && (force || currentUsers.length === 0)) {
+    raw.users = [login]
+  } else if (deployment === 'team' && force) {
+    delete raw.users
+  }
+
+  // Update routing.allowed_authors
+  if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
+  const routing = raw.routing as Record<string, unknown>
+  const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
+  if (deployment === 'personal' && login && (force || currentAuthors.length === 0)) {
+    routing.allowed_authors = [login]
+  } else if (deployment === 'team' && force) {
+    routing.allowed_authors = []
+  }
+
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+  return true
 }

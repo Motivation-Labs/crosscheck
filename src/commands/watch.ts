@@ -8,9 +8,18 @@ import {
   registerRepoWebhook,
   deleteRepoWebhook,
   listUserRepos,
+  checkRepoAccessible,
 } from '../github/client.js'
 import { detectPROrigin, assignReviewer } from '../github/detector.js'
-import { loadConfig, getGithubToken, getWebhookSecret, resolveConfigPath, detectGitHubLogin, patchAllowedAuthors } from '../config/loader.js'
+import {
+  loadConfig,
+  getGithubToken,
+  getWebhookSecret,
+  resolveConfigPath,
+  promptDeploymentMode,
+  detectScopesForDeployment,
+  patchDeploymentConfig,
+} from '../config/loader.js'
 import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
@@ -115,7 +124,15 @@ function openTunnel(localPort: number): Promise<{ url: string; proc: ChildProces
   })
 }
 
-export async function runWatch(configPath?: string) {
+export interface WatchOpts {
+  config?: string
+  personal?: boolean
+  team?: boolean
+  reconfigure?: boolean
+}
+
+export async function runWatch(opts: WatchOpts = {}) {
+  const configPath = opts.config
   let config = loadConfig(configPath)
   initLogger(config.logs)
 
@@ -274,6 +291,28 @@ export async function runWatch(configPath?: string) {
     process.exit(1)
   })
 
+  // ── Deployment setup ─────────────────────────────────────────────────────
+  // Runs before scope building so detected users/orgs feed into webhook registration.
+  let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment
+  let sessionOnly = false
+
+  if (opts.personal || opts.team) {
+    // One-time flag: auto-detect scopes for this session, no config write.
+    effectiveDeployment = opts.personal ? 'personal' : 'team'
+    sessionOnly = true
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    config = { ...config, users: detected.users, orgs: detected.orgs, repos: [] }
+  } else if (opts.reconfigure || !config.deployment) {
+    // First run (no deployment in config) or explicit --reconfigure.
+    effectiveDeployment = await promptDeploymentMode(opts.reconfigure ? config.deployment : undefined)
+    const cfgPath = resolveConfigPath(configPath) ?? join(process.cwd(), 'crosscheck.config.yml')
+    const detected = await detectScopesForDeployment(effectiveDeployment, token)
+    patchDeploymentConfig(cfgPath, effectiveDeployment, detected.login, detected.orgs, true)
+    config = loadConfig(configPath)
+    console.log(`\n  ${chalk.green('✓')} deployment set to ${chalk.cyan(effectiveDeployment)} ${chalk.dim(`(saved to ${cfgPath})`)}`)
+  }
+
+  // ── Scope building ────────────────────────────────────────────────────────
   // Determine scopes once — these don't change between tunnel reconnects.
   // orgs, users, and repos are additive: all configured sources contribute scopes.
   type Scope = { org: string } | { owner: string; repo: string }
@@ -295,7 +334,21 @@ export async function runWatch(configPath?: string) {
     }
   }
 
-  for (const { owner, name } of config.repos) scopes.push({ owner, repo: name })
+  // Validate explicitly-configured repos and skip any that are inaccessible.
+  const repoChecks = await Promise.all(
+    config.repos.map(async ({ owner, name }) => ({
+      owner, name,
+      ok: await checkRepoAccessible(owner, name, token).catch(() => false),
+    }))
+  )
+  for (const { owner, name, ok } of repoChecks) {
+    if (ok) {
+      scopes.push({ owner, repo: name })
+    } else {
+      console.log(chalk.yellow(`  ✗ repo not accessible: ${owner}/${name} — skipped`))
+      fileLog({ level: 'warn', event: 'repo_inaccessible', repo: `${owner}/${name}` })
+    }
+  }
 
   if (scopes.length === 0 && config.tunnel.backend !== 'smee') {
     // localhost.run needs a target repo to auto-register webhooks.
@@ -347,37 +400,41 @@ export async function runWatch(configPath?: string) {
   // ── Static startup banner ─────────────────────────────────────────────────
   console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
   console.log(chalk.bold('crosscheck watch\n'))
+  if (effectiveDeployment) {
+    const label = sessionOnly
+      ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)
+      : chalk.cyan(effectiveDeployment)
+    console.log(`  deployment  ${label}`)
+  }
   if (config.orgs.length > 0) {
-    console.log(`  orgs      ${chalk.cyan(config.orgs.join(', '))}`)
+    console.log(`  orgs        ${chalk.cyan(config.orgs.join(', '))}`)
   }
   if (config.users.length > 0) {
-    console.log(`  users     ${chalk.cyan(config.users.join(', '))}`)
+    console.log(`  users       ${chalk.cyan(config.users.join(', '))}`)
     for (const r of userRepoResults) {
       if ('error' in r) {
-        console.log(`            ${chalk.yellow(`⚠ ${r.user}: could not list repos — ${r.error}`)}`)
+        console.log(`              ${chalk.yellow(`⚠ ${r.user}: could not list repos — ${r.error}`)}`)
       } else {
-        console.log(`            ${chalk.dim(`${r.user}: ${r.count} repo(s) registered`)}`)
+        console.log(`              ${chalk.dim(`${r.user}: ${r.count} repo(s) registered`)}`)
       }
     }
   }
   if (config.orgs.length === 0 && config.users.length === 0) {
     const labels = scopes.map(s => 'org' in s ? s.org : `${s.owner}/${s.repo}`)
-    console.log(`  repos     ${chalk.cyan(labels.join(', '))}`)
+    console.log(`  repos       ${chalk.cyan(labels.join(', '))}`)
   }
-  console.log(`  mode      ${chalk.cyan(config.mode)}`)
-  console.log(`  quality   ${chalk.cyan(config.quality.tier)}`)
+  console.log(`  mode        ${chalk.cyan(config.mode)}`)
+  console.log(`  quality     ${chalk.cyan(config.quality.tier)}`)
   const cfgPath = resolveConfigPath(configPath)
-  console.log(`  config    ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
-  if (config.routing.allowed_authors.length === 0) {
-    const login = detectGitHubLogin()
-    if (login && cfgPath && patchAllowedAuthors(cfgPath, login)) {
-      config = loadConfig(configPath)
-      console.log(`  ${chalk.green('✓')} allowed_authors set to ${chalk.cyan(login)} ${chalk.dim(`(auto-detected — edit ${cfgPath} to change)`)}`)
-    } else {
-      console.log()
-      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
-      console.log(`     ${chalk.dim('Add to config:')} ${chalk.cyan('routing:\n       allowed_authors:\n         - your-github-login')}`)
-    }
+  console.log(`  config      ${chalk.dim(cfgPath ?? 'none (using defaults)')}  ${chalk.dim('← edit to change above')}`)
+  if (effectiveDeployment === 'team' && config.routing.allowed_authors.length === 0) {
+    console.log(`  authors     ${chalk.dim('all PRs (team mode)')}`)
+  } else if (config.routing.allowed_authors.length > 0) {
+    console.log(`  authors     ${chalk.cyan(config.routing.allowed_authors.join(', '))}`)
+  } else {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
+    console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
   }
   console.log()
 

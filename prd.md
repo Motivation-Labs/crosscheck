@@ -197,6 +197,89 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [x] **Fix `watch` mode tunnel** — replaced `gh webhook forward` (not available in gh 2.65.0) with `localhost.run` SSH tunnel. SSH is pre-installed on macOS/Linux, no account needed. Tunnel URL shown in watch banner; webhooks auto-registered and deleted on exit.
 - [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
 - [x] **Auto-detect `allowed_authors` on first run** — `crosscheck init` and `crosscheck watch` detect the signed-in GitHub login via `gh api user` and write it to `routing.allowed_authors` in the config automatically. One-time: once written, subsequent runs skip detection. Prevents the footgun of reviewing all PRs in an org because the author filter was never set.
+
+- [ ] **Deployment Mode & Smart Scope Detection** — formalize the three monitoring scope levels (repo, org, user/personal) and introduce a `deployment: personal | team` config field. `crosscheck watch` and `crosscheck serve` each prompt the user to choose a mode on first run (when `deployment` is absent from config), then auto-detect scopes from GitHub credentials and write the result to config. Subsequent runs skip the prompt entirely. Closes the gap where AI agents opening PRs to personal repos go unwatched, and removes the footgun of serving an entire org with no author filter in team mode.
+  - **User:** Personal developer running `crosscheck watch` (wants all of their own PRs reviewed across personal repos and orgs). Team operator running `crosscheck serve` (wants all org PRs reviewed, personal repos excluded).
+  - **Acceptance Criteria:**
+
+    **Scope levels (all three work independently and combine additively):**
+    - `repos:` — monitor specific repos. At startup, validate each configured repo is accessible via GitHub API; log `✗ repo not found or inaccessible: owner/name — skipped` and continue (do not crash).
+    - `orgs:` — monitor all repos in the listed orgs via one org-level webhook per org.
+    - `users:` — monitor all non-archived repos owned by the listed GitHub personal accounts; enumerated at startup via `GET /users/{username}/repos?type=owner`.
+
+    **`deployment` config field:**
+    - New top-level field: `deployment: personal | team`. No default in schema — absence triggers the first-run prompt in watch/serve.
+    - `personal` — monitors `users=[self]` + `orgs=[all-memberships]`; `allowed_authors=[self]` (only the owner's PRs reviewed).
+    - `team` — monitors `orgs=[all-memberships]` only (no personal repos); `allowed_authors=[]` (all PRs in org scope reviewed).
+
+    **`crosscheck init` — no change to scope logic:**
+    - Remains a pure environment check: CLIs, GitHub token, webhook secret, config file creation.
+    - Does not prompt for deployment mode; does not detect org memberships.
+    - Existing `allowed_authors` auto-detection behaviour is preserved for backward compatibility.
+
+    **First-run prompt in `crosscheck watch` and `crosscheck serve`:**
+    - Triggered once when `deployment` key is absent from config (i.e., first run or pre-existing config from an older version).
+    - Printed before the startup banner:
+      ```
+      How are you using crosscheck?
+
+        [1] personal  — monitor all your repos and orgs; review only PRs you author
+        [2] team      — monitor org repos only; review all PRs from any author
+
+      Choice [1]:
+      ```
+    - Default is `[1]` (personal). Pressing Enter accepts the default.
+    - After the user chooses, crosscheck detects GitHub login + org memberships, writes `deployment:`, `users:` (personal only), `orgs:`, and `allowed_authors:` to config, then continues startup without restart.
+    - Subsequent runs: `deployment` is present → prompt is skipped entirely.
+
+    **One-time override — `--personal` / `--team` flags:**
+    - Use the specified mode for this session only. Config is not read or written.
+    - Scopes are auto-detected at runtime (same detection logic as normal mode); nothing persisted after exit.
+    - Intended for CI pipelines, one-off runs, or trying a mode before committing to it.
+    - Example: `crosscheck watch --team` reviews all org PRs this session; next run reverts to whatever `deployment` says in config.
+
+    **Permanent reconfigure — `--reconfigure` flag:**
+    - Re-triggers the setup prompt unconditionally, even if `deployment` is already set.
+    - Shows current saved mode: `Current: personal`.
+    - After the user chooses, overwrites `deployment:`, `users:`, `orgs:`, `allowed_authors:` in config.
+    - Useful when joining a new org, switching from personal to team use, or correcting a first-run mistake.
+    - Example: `crosscheck watch --reconfigure`.
+
+    **`crosscheck watch` runtime behavior (after mode is known):**
+    - When `users`, `orgs`, `repos` are all empty: auto-detect scopes from GitHub credentials based on `deployment`. Prints `  ✦ scopes auto-detected from GitHub credentials`.
+    - Explicit `users`/`orgs`/`repos` in config always take precedence over auto-detection.
+    - Banner shows `  deployment  personal` or `  deployment  team`.
+
+    **`crosscheck serve` runtime behavior (after mode is known):**
+    - Same auto-detection logic as watch, keyed on `deployment`.
+    - In `team` mode with empty `allowed_authors`, replace the existing warning with: `  author filter  all PRs (team mode — set allowed_authors to restrict)`.
+    - Banner shows deployment mode.
+
+  - **Technical Notes:**
+    - Schema: add `deployment: z.enum(['personal', 'team']).optional()` to `ConfigSchema` — intentionally no default so absence can trigger the prompt.
+    - New function `src/github/client.ts`: `listUserOrgs(token: string): Promise<string[]>` — `GET /user/memberships/orgs?state=active&per_page=100`, paginates, returns org login strings; returns `[]` on error (never throws).
+    - New function `src/github/client.ts`: `checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean>` — returns false on 404/403, true on 200.
+    - New function `src/config/loader.ts`: `detectScopesForDeployment(deployment: 'personal' | 'team', token: string): Promise<{ users: string[]; orgs: string[] }>` — calls `detectGitHubLogin()` + `listUserOrgs()`; returns `{ users: [login], orgs }` for personal, `{ users: [], orgs }` for team.
+    - New function `src/config/loader.ts`: `patchDeploymentConfig(configPath, deployment, login, orgs): boolean` — writes `deployment:`, `users:` (personal only), `orgs:`, `allowed_authors:` to config YAML; no-op if `deployment` key already present (use `force: true` to overwrite for `--reconfigure`).
+    - Repo accessibility check: `watch.ts` and `serve.ts`, after loading `config.repos`, call `checkRepoAccessible` for each in parallel; log warning and filter out inaccessible ones before building scopes.
+    - `watch.ts` / `serve.ts`: prompt logic runs before the startup banner. `--personal`/`--team` skip all config reads/writes and use runtime-only scopes. `--reconfigure` runs the prompt with `force: true` and rewrites config.
+    - `crosscheck.config.example.yml`: add commented `deployment: personal` with explanation of both values.
+    - `get-started.md`: add a **Deployment mode** section documenting the three flags.
+  - **Tests Required:**
+    - `listUserOrgs` paginates correctly; returns `[]` on API error.
+    - `checkRepoAccessible` returns false on 404; true on 200.
+    - `detectScopesForDeployment('personal', token)` → `{ users: [login], orgs: [...] }`.
+    - `detectScopesForDeployment('team', token)` → `{ users: [], orgs: [...] }`.
+    - `patchDeploymentConfig` writes all fields; is a no-op if `deployment` present and `force` is false; overwrites when `force: true`.
+    - First-run prompt shown when `deployment` absent; not shown when present.
+    - `--personal` flag: uses personal scopes this session; config is not written.
+    - `--team` flag: uses team scopes this session; config is not written.
+    - `--reconfigure` flag: shows prompt even when `deployment` already set; shows current mode; writes new choice to config.
+    - Watch with empty scopes + `deployment: personal` → auto-detects users + orgs.
+    - Watch with empty scopes + `deployment: team` → auto-detects orgs only.
+    - Serve `team` mode + empty `allowed_authors` → shows positive confirmation, not warning.
+    - Inaccessible repo in `repos:` → warning logged, repo skipped, remaining repos monitored.
+
 - [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
   - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
   - **Acceptance Criteria:**
@@ -1017,6 +1100,155 @@ tunnel:
 - `watch.ts`: after banner print, branch on `config.tunnel.backend`; smee mode spawns `smee --url <channel> --path <path> --port <port>` and auto-restarts on exit; `currentTunnelProc` shared with cleanup handler
 - `init.ts`: checks if `smee` CLI is installed; shows one-line tip if missing
 - `crosscheck.config.example.yml`: commented tunnel section with full instructions
+
+---
+
+#### Deployment Mode & Smart Scope Detection
+
+**Problem:** crosscheck has no concept of *why* it's running — is this a developer's laptop monitoring their own work, or a shared server watching an entire team's org? Today:
+- Personal users must manually discover that `users:` exists; they can't say "watch everything I own."
+- Team operators who run `crosscheck serve` with no author filter inadvertently review every PR in the org from any author.
+- There's no auto-detection of org memberships — users copy-paste org names by hand.
+- An inaccessible repo in `repos:` silently drops events with no diagnostic.
+
+**Solution:** introduce `deployment: personal | team` as a first-class config concept. `crosscheck watch` and `crosscheck serve` prompt the user to choose a mode on first run (when `deployment` is absent from config), detect scopes from GitHub credentials based on the choice, write everything to config, and proceed — no restart required. `crosscheck init` is unchanged; it remains a pure environment check.
+
+**Scope model:**
+
+| Level | Config key | Coverage | Registration |
+|---|---|---|---|
+| Repo | `repos:` | Named repos only | One webhook per repo; validated at startup |
+| Org | `orgs:` | All repos in org | One webhook per org (GitHub org webhook) |
+| User | `users:` | All non-archived personal repos | Enumerated at startup; one webhook per repo |
+
+All three are additive — a config can mix `orgs:` + `users:` + `repos:`.
+
+**Deployment modes:**
+
+| | `personal` | `team` |
+|---|---|---|
+| Primary use case | Developer laptop running `crosscheck watch` | Shared server running `crosscheck serve` |
+| Auto-detected scopes | `users=[self]` + `orgs=[all-memberships]` | `orgs=[all-memberships]` only |
+| Default `allowed_authors` | `[self]` — only the owner's PRs | `[]` — all PRs in monitored scope |
+| Personal repos monitored | Yes | No |
+
+**First-run prompt (watch and serve):**
+
+Shown before the startup banner when `deployment` key is absent from config. Printed once; after the user answers, the choice is persisted and never asked again.
+
+```
+crosscheck watch
+
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+Choice [1]:
+```
+
+After selecting, crosscheck detects GitHub login + org memberships and writes to config:
+
+Personal (`[1]`):
+```yaml
+deployment: personal
+users:
+  - beingzy               # auto-detected from gh auth
+orgs:
+  - motivation-labs       # auto-detected from org memberships
+  - codatta
+routing:
+  allowed_authors:
+    - beingzy
+```
+
+Team (`[2]`):
+```yaml
+deployment: team
+orgs:
+  - motivation-labs
+  - codatta
+# users: omitted — personal repos excluded in team mode
+# allowed_authors: omitted — all PRs reviewed
+```
+
+**Three ways to control the mode:**
+
+| | Prompt shown? | Config written? | Use case |
+|---|---|---|---|
+| First run (no `deployment` in config) | Yes | Yes | Initial setup |
+| `--personal` / `--team` flag | No | **No** | One-time override, CI pipelines |
+| `--reconfigure` flag | Yes (shows current mode) | Yes (overwrites) | Switching modes permanently, re-detecting after joining a new org |
+
+```bash
+crosscheck watch --personal       # personal mode this session only, config unchanged
+crosscheck serve --team           # team mode this session only, config unchanged
+crosscheck watch --reconfigure    # re-prompts, saves new choice to config
+```
+
+**`--reconfigure` prompt** (shows current saved mode):
+
+```
+Reconfiguring deployment mode...
+
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+Current: personal
+Choice [1]:
+```
+
+Re-detecting after the choice always refreshes org memberships and repo lists — useful after joining a new org without switching modes.
+
+**Runtime auto-detection (when explicit scopes are missing):**
+
+If `deployment` is set but `users`, `orgs`, `repos` are all empty (e.g., user manually cleared them), watch/serve auto-detect scopes at startup without prompting:
+- `deployment: personal` → detect `users=[self]` + `orgs=[memberships]`
+- `deployment: team` → detect `orgs=[memberships]` only
+
+Banner line: `  deployment  personal` or `  deployment  team`.
+
+**Repo accessibility validation:**
+
+At startup, for each entry in `repos:`, call `GET /repos/{owner}/{repo}` in parallel. Any that return 404 or 403 produce:
+```
+  ✗ repo not accessible: acme/old-repo — skipped (404 Not Found)
+```
+Remaining accessible repos continue normally. Non-crashing — a stale entry shouldn't halt the whole session.
+
+**New API functions (`src/github/client.ts`):**
+
+```typescript
+// Returns org login strings for all active memberships of the authenticated user
+listUserOrgs(token: string): Promise<string[]>
+
+// Returns false on 404/403; true on 200; throws on network error
+checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean>
+```
+
+**New loader functions (`src/config/loader.ts`):**
+
+```typescript
+// Returns scopes to use for auto-detection based on deployment mode
+detectScopesForDeployment(
+  deployment: 'personal' | 'team',
+  token: string
+): Promise<{ users: string[]; orgs: string[] }>
+
+// Writes deployment, users, orgs, allowed_authors to config file; no-op if deployment already set
+patchScopesAndDeployment(
+  configPath: string,
+  deployment: 'personal' | 'team',
+  login: string,
+  orgs: string[]
+): boolean
+```
+
+**Interaction with existing `patchAllowedAuthors`:**
+
+`patchScopesAndDeployment` supersedes the single-field `patchAllowedAuthors` for new installs. `patchAllowedAuthors` is kept for backward compatibility (existing configs that already have `deployment` omitted but `allowed_authors` empty).
 
 ---
 

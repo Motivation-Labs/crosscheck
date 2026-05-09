@@ -186,6 +186,43 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ## Step 3 — Choose a deployment mode
 
+### Personal vs team
+
+On first run, `crosscheck watch` (or `crosscheck serve`) will ask how you're using it:
+
+```
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+  Choice [1]:
+```
+
+The choice is saved to `crosscheck.config.yml` as `deployment: personal` or `deployment: team`.
+
+**Personal mode** (default, recommended for individuals)
+- Monitors all repos under your personal GitHub account + all orgs you belong to
+- Only reviews PRs you authored — ignores everyone else's
+- Sets `routing.allowed_authors` to your GitHub login automatically
+
+**Team mode** (recommended for shared machines)
+- Monitors all orgs you belong to (no personal repos)
+- Reviews all PRs from any author — no author filter applied
+
+You can override the saved choice for a single session without touching the config:
+
+```bash
+crosscheck watch --personal   # personal mode this session only
+crosscheck watch --team       # team mode this session only
+```
+
+To re-run the prompt and permanently change your choice:
+
+```bash
+crosscheck watch --reconfigure
+```
+
 ### Watch mode — for your development machine
 
 Starts a local server and opens a tunnel via `localhost.run` (SSH, no install needed) so GitHub can reach your laptop. Registers webhooks automatically. Supports org-level coverage or per-repo. Runs while your terminal is open.
@@ -573,6 +610,12 @@ Run `crosscheck init` to generate a starter file with all options commented.
 ### Full reference
 
 ```yaml
+# ── Deployment ────────────────────────────────────────────────────────────────
+# Set automatically on first run. Re-run the prompt with: crosscheck watch --reconfigure
+# personal — monitor your repos + orgs; review only your PRs
+# team     — monitor org repos only; review all PRs from any author
+# deployment: personal
+
 # ── Mode ──────────────────────────────────────────────────────────────────────
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  Claude ↔ Codex review each other
@@ -606,13 +649,20 @@ budget:
   per_review_usd: 2.00      # passed to claude --max-budget-usd
 
 # ── Orgs — covers all repos in each org with one webhook ─────────────────────
-# Takes priority over `repos` when both are set.
 orgs:
   - motivation-labs
   - codatta
 
+# ── Users — monitors all repos owned by personal GitHub accounts (non-org) ───
+# At startup, crosscheck enumerates each user's repos and registers webhooks.
+# Useful when your AI agents open PRs across many personal repos.
+# Combines with `orgs` and `repos` — all configured sources are additive.
+users:
+  - beingzy           # your personal account
+  # - my-agent-login  # a bot account that pushes to its own repos
+
 # ── Repos — for monitoring specific repos only ────────────────────────────────
-# Omit when using `orgs`. In watch mode, auto-detected from git remote if empty.
+# Omit when using `orgs`/`users`. Auto-detected from git remote if all are empty.
 repos:
   - owner: acme
     name: specific-repo

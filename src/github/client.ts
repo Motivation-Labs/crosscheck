@@ -109,22 +109,48 @@ export async function deleteOrgWebhook(
   })
 }
 
+export async function listUserOrgs(token: string): Promise<string[]> {
+  const results: string[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/user/memberships/orgs?state=active&per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ organization: { login: string } }>
+    if (data.length === 0) break
+    for (const m of data) results.push(m.organization.login)
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  return res.ok
+}
+
 export async function listUserRepos(
-  user: string,
+  username: string,
   token: string,
 ): Promise<Array<{ owner: string; name: string }>> {
   const results: Array<{ owner: string; name: string }> = []
   let page = 1
   while (true) {
-    const res = await fetch(`https://api.github.com/users/${user}/repos?per_page=100&page=${page}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
-    })
-    if (!res.ok) {
-      const err = await res.json() as { message?: string }
-      throw new Error(`Failed to list repos for ${user} [${res.status}]: ${err.message ?? res.statusText}`)
+    const res = await fetch(
+      `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ name: string; owner: { login: string }; archived: boolean }>
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived) results.push({ owner: repo.owner.login, name: repo.name })
     }
-    const data = await res.json() as Array<{ owner: { login: string }; name: string }>
-    for (const repo of data) results.push({ owner: repo.owner.login, name: repo.name })
     if (data.length < 100) break
     page++
   }

@@ -25,6 +25,7 @@ export async function runClaudeReview(
   quality: QualityConfig,
   vendor: VendorConfig,
   perReviewBudget: number,
+  stepInstructions?: string,
   onLog?: (msg: string) => void,
 ): Promise<string> {
   const model = TIER_MODELS[quality.tier] ?? 'claude-sonnet-4-6'
@@ -34,17 +35,15 @@ export async function runClaudeReview(
     : ''
   const customLine = quality.custom_prompt ?? ''
 
-  // Adaptive instructions from ~/.crosscheck/instructions.md (managed by `crosscheck optimize`)
-  const adaptiveInstructions = readInstructions(repoDir)
+  // stepInstructions from workflow step takes precedence; fall back to ~/.crosscheck/instructions.md
+  const behaviorInstructions = stepInstructions !== undefined ? stepInstructions : readInstructions(repoDir)
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,
     `The branch \`${baseBranch}\` is the base. Review only the changes introduced in this PR.`,
     focusLine,
     customLine,
-    adaptiveInstructions,
-    'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
-    'Be concise. Skip praise.',
+    behaviorInstructions,
   ].filter(Boolean).join('\n')
 
   const outputFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')

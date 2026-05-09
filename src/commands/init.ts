@@ -1,6 +1,7 @@
 import { execSync } from 'child_process'
-import { existsSync, writeFileSync, readFileSync } from 'fs'
+import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
+import { homedir } from 'os'
 import chalk from 'chalk'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
@@ -108,7 +109,8 @@ export async function runInit(configPath?: string) {
   }
 
   // Write config if none exists, pre-filling allowed_authors with the detected GitHub login
-  const dest = configPath ?? join(process.cwd(), 'crosscheck.config.yml')
+  const dest = configPath ?? join(homedir(), '.crosscheck', 'config.yml')
+  mkdirSync(join(homedir(), '.crosscheck'), { recursive: true })
   if (!existsSync(dest)) {
     const examplePath = new URL('../../crosscheck.config.example.yml', import.meta.url).pathname
     if (existsSync(examplePath)) {

@@ -5,7 +5,7 @@ import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { runAddressStep } from '../reviewers/address.js'
+import { runFixStep } from '../reviewers/fix.js'
 import { parseVerdict, prependVerdictToComment } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
@@ -93,9 +93,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       onPhaseChange(`${reviewer} reviewing...`)
       let rawReview: string
       if (reviewer === 'codex') {
-        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth)
+        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex.model, config.vendors.codex.auth, step.instructions)
       } else {
-        rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd)
+        rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions)
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -111,7 +111,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       results[step.name] = { verdict, commentBody, commentUrl }
 
-    } else if (step.type === 'address') {
+    } else if (step.type === 'fix') {
       // Respect post_review.auto_fix config
       const autoFix = config.post_review.auto_fix
       if (!autoFix.enabled || autoFix.trigger === 'never') {
@@ -157,9 +157,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // Codex address not yet implemented — skip gracefully
+      // Codex fix not yet implemented — skip gracefully
       if (vendor === 'codex') {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'codex_address_unsupported' })
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'codex_fix_unsupported' })
         results[step.name] = { skipped: true }
         continue
       }
@@ -177,10 +177,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      onPhaseChange(`${vendor} addressing...`)
+      onPhaseChange(`${vendor} fixing...`)
       let appliedCount = 0
       try {
-        ;({ appliedCount } = await runAddressStep(
+        ;({ appliedCount } = await runFixStep(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -189,7 +189,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           config,
         ))
       } catch (err) {
-        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'address' }, err)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix' }, err)
         results[step.name] = { skipped: true }
         continue
       }
@@ -211,7 +211,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
         execSync(
-          `git commit -m "[crosscheck] address: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
+          `git commit -m "[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -220,17 +220,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        onPhaseChange('addressed ✓', { fixCount: appliedCount })
-        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
         // Create a fix branch and open a PR targeting the original branch
-        const fixBranch = `fix/cr-${prNumber}-address-issues`
+        const fixBranch = `fix/cr-${prNumber}-review-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
         execSync('git add -A', { cwd: tmpDir })
         execSync(
-          `git commit -m "[crosscheck] fix: address CR issues from review of PR #${prNumber} — by Claude Code"`,
+          `git commit -m "[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code"`,
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -257,8 +257,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             })
           } catch { /* label may not exist in this repo — skip */ }
         }
-        onPhaseChange('addressed ✓', { fixCount: appliedCount })
-        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -270,8 +270,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
-        onPhaseChange('addressed ✓', { fixCount: appliedCount })
-        fileLog({ level: 'info', event: 'address_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
         results[step.name] = { applied_count: appliedCount }
       }
     }

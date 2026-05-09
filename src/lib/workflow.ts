@@ -5,7 +5,8 @@ import { z } from 'zod'
 
 export const WorkflowStepSchema = z.object({
   name: z.string(),
-  type: z.enum(['review', 'address', 'recheck']),
+  // 'address' is the legacy name — normalized to 'fix' at parse time for backward compat
+  type: z.enum(['review', 'fix', 'recheck', 'address']).transform(t => t === 'address' ? 'fix' : t) as z.ZodType<'review' | 'fix' | 'recheck'>,
   reviewer: z.enum(['auto', 'claude', 'codex', 'origin']).default('auto'),
   when: z.string().optional(),
   max_rounds: z.number().int().positive().default(1),
@@ -19,7 +20,24 @@ export const WorkflowSchema = z.object({
 
 export type WorkflowStep = z.infer<typeof WorkflowStepSchema>
 
-// Default pipeline: review then address issues (skipped if verdict is APPROVE).
+const DEFAULT_REVIEW_INSTRUCTIONS = [
+  '## Constraints',
+  '- Do not run tsc, ts-node, or build commands — inspect source files directly with git diff/log.',
+  '- Do not install packages or modify lock files.',
+  '## Output format',
+  'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
+  'Be concise. Skip praise.',
+  '## Verdict',
+  'End with one of: VERDICT: APPROVE | NEEDS_WORK | BLOCK',
+].join('\n')
+
+const DEFAULT_FIX_INSTRUCTIONS = [
+  'Only fix issues explicitly called out in the review.',
+  'Do not refactor unrelated code, rename variables, or add tests unless specifically requested.',
+  'If a comment requires deeper understanding of business logic, skip it.',
+].join('\n')
+
+// Default pipeline: review → fix issues (fix skipped when verdict is APPROVE).
 // Execution always goes through this constant — there is no legacy direct-call path.
 export const DEFAULT_WORKFLOW: WorkflowStep[] = [
   {
@@ -27,14 +45,15 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
     type: 'review',
     reviewer: 'auto',
     max_rounds: 1,
+    instructions: DEFAULT_REVIEW_INSTRUCTIONS,
   },
   {
-    name: 'address',
-    type: 'address',
+    name: 'fix',
+    type: 'fix',
     reviewer: 'origin',
     when: "review.verdict != 'APPROVE'",
     max_rounds: 1,
-    instructions: 'Only fix issues explicitly called out in the review. Do not refactor unrelated code, rename variables, or add tests unless specifically requested.',
+    instructions: DEFAULT_FIX_INSTRUCTIONS,
   },
 ]
 

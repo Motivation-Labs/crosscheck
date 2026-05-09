@@ -180,6 +180,35 @@ These four items fix the two-phase model described in Design Principles. Any new
     - Global workflow.yml only written for the `review-fix-recheck` preset; `review-only` and `review-fix` are handled entirely through config fields.
   - **Related items:** Custom Workflow Engine (workflow.yml schema), Post-Review Auto-Fix (auto_fix config), Deployment Mode (patchDeploymentConfig pattern). The global workflow.yml fallback unblocks the full review→fix→recheck loop for users who don't have a per-project workflow file.
 
+- [ ] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants a cleaner, scannable terminal output.
+  - **Acceptance Criteria:**
+    - **Section order (live block, top to bottom):**
+      1. **Summary** — compact single line: aggregate stats (PRs received, CRs completed, fixes applied, avg CR time) + uptime. Replaces `row3` (currently the third line). This anchors the stable numbers at the top where the eye returns.
+      2. **Connectivity / status** — tunnel/endpoint URL + alive indicator + `connLog` entries (webhook events, connection events). Currently split between `row1`/`row2` and the conditional `connLog` section; merged into one coherent block.
+      3. **Active PR catalog** — active in-flight PR slots (two-line per PR, separated by blank lines). Grows downward as more PRs arrive concurrently; collapses to `waiting for PRs...` when idle.
+    - **Completed PR entry format (printed to scrollback via `completePR()`):**
+      - Line 1 (unchanged): `HH:MM:SS AM  [verdict badge]  #N  owner/repo  branch  (Xs)  → url`
+      - Line 2 (new): `PR [bar 10] Nloc  |  CR [bar 8] N issues (VERDICT)  |  Fix [bar 6] N fixes`
+        - Separator is ` | ` (space-pipe-space) between the three pipeline stages.
+        - `N issues` replaces the current `·N` suffix — more readable in isolation.
+        - `(VERDICT)` appended after issue count in the CR section: `(APPROVE)`, `(NEEDS WORK)`, `(BLOCK)`. Always use the full unabbreviated form — no short aliases.
+        - `N fixes` replaces `N applied` — consistent noun form with `N issues`.
+        - If fix step did not run (review-only workflow or APPROVE verdict), Fix section reads `Fix ░░░░░░ —` (empty bar, dash) rather than being omitted — keeps the three columns visually consistent.
+    - **Active PR slot format (live block, `renderPRSlot()`):**
+      - Line 1: spinner + `#N  repo  branch` + right-aligned elapsed + `  ⠋ phase-label` (phase label moves to end of line 1, freeing line 2 for data only).
+      - Line 2: same `PR | CR | Fix` layout as completed entries; CR and Fix sections show empty bars with `pending` label until data is available.
+    - `board.ts` `render()` function reorders its sections to match the new top/middle/bottom layout; no new public API changes to `PRBoard`.
+    - All existing `PRBoard` public methods (`addPR`, `updatePR`, `completePR`, `failPR`, `log`, `logConnectivity`, `setTunnel`, `setConfig`, `start`, `stop`) keep their signatures.
+  - **Technical Notes:**
+    - `src/lib/board.ts`: reorder `render()` sections; update `renderPRSlot()` line 1/2 split; update `completePR()` line 2 format string.
+    - The `statsRow()` and `uptime()` helpers are unchanged — just reposition their output in `render()`.
+    - `connLog` and tunnel display move below the stats row rather than above it.
+    - The separator lines (`─`.repeat(w-1)) remain — one above the connectivity block, one above/below the PR catalog section.
+    - Pending CR/Fix state: use the existing `undefined` check — `slot.verdict === undefined` means CR hasn't arrived yet; `slot.fixCount === undefined` means fix hasn't run. Render `░` bars + `pending` in those cases.
+  - **Tests Required:** No new behavioral logic — pure rendering change. Smoke-test: start `watch` against a real PR; verify (a) stats appear at top, (b) tunnel line appears below stats, (c) completed PR entries print in `PR | CR | Fix` format with `(VERDICT)` suffix.
+  - **Decided:** Verdict in parentheses uses the full unabbreviated form: `(APPROVE)`, `(NEEDS WORK)`, `(BLOCK)`. Consistent across active slots and completed entries.
+
 - [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
   - **User:** Any developer who wants faster CLI invocations.
   - **Acceptance Criteria:**
@@ -195,6 +224,38 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [x] **Fix `watch` event log — show failure state in counters** — `errorsOccurred` stat counter added; shown in red in the status bar when > 0, omitted when 0.
 - [x] **Fix `watch` event log — improve two-line event readability** — `board.log()` prepends a blank line for 2-line events so consecutive PR entries are visually separated in the scrollback.
 - [x] **Fix `crosscheck issue` codex invocation — replace `-q` with `exec` subcommand** — `runWithCodex()` in `src/commands/issue.ts` was calling `codex -q`, which was removed from the Codex CLI; replaced with `codex exec` (issue #57).
+
+- [ ] **`crosscheck issue` — harness guide for directed pattern analysis** — introduce a bundled `ISSUE.md` harness (parallel to `AGENT.md` for `optimize`) that gives the coding agent structured direction when analyzing logs via `crosscheck issue`. Instead of always hunting for error patterns to file a bug report, the agent should be able to run named analyses — session stability, tunnel reliability, throughput trends — and surface patterns with directional context.
+  - **User:** Developer running `crosscheck watch` who wants to understand _how_ the tool has been behaving over time, not just _what_ broke. E.g., "why do sessions keep dying?", "are tunnels getting more stable?", "how long does a typical watch session last?"
+  - **Background — interaction that shaped this spec (2026-05-10):** Manual analysis of `~/.crosscheck/logs/*.ndjson` across May 7–9 (64 sessions, ~9,400 events) revealed: average session lifespan of 32.1 min; 50% of sessions had no `session_end` (abrupt kill); a 3.5-hour rapid-restart storm on May 9 09:08–12:38 UTC (19 sessions, none reached `tunnel_opened`); 236 tunnel errors (208 SSH timeouts, 28 SSH code-255 exits); longest stable session 275 min. None of these patterns were surfaced by `diagnose` because they require session-level reasoning, not error-row counting. This is the analysis the harness should be able to perform.
+  - **Acceptance Criteria:**
+    - `ISSUE.md` exists at the package root and is included in the npm package (`files` in `package.json`).
+    - The harness defines at minimum these named analyses, each with: what data to read, what to compute, and what the output format should be:
+      - **`session-stability`** — per-session table (start, end, duration, tunnel URL, end reason clean vs inferred), aggregate stats (total sessions, average lifespan, min/max, clean-exit %, crash %). Crash = no `session_end`. Flag sessions where `session_end` is absent but a `tunnel_opened` was logged (suggests abrupt kill, not startup failure).
+      - **`tunnel-reliability`** — counts of `tunnel_opened`, `tunnel_closed`, `tunnel_error` by error subtype (SSH timeout, SSH code-255, other); reconnect rate (`reconnecting: true`); terminal close rate; % of sessions that never reached `tunnel_opened`.
+      - **`throughput`** — PRs received, reviews completed, fixes applied, per-day and per-session averages.
+    - `crosscheck issue --analysis <name>` runs the named analysis using the selected coding agent and prints the structured report to stdout. No GitHub issue is filed for analysis runs (unlike the default bug-report flow).
+    - `crosscheck issue --analysis session-stability` is the canonical way to get the session report we produced manually on 2026-05-10.
+    - `crosscheck issue --list-analyses` prints the available analysis names from the active harness.
+    - Harness override: looks for `ISSUE.md` at `{cwd}/ISSUE.md` → `{cwd}/.crosscheck/ISSUE.md` → bundled. Same override pattern as `AGENT.md` in `optimize`.
+    - Agent selection: reuses `selectOptimizeAgent()` — same vendor-selection logic (prefer higher-success-rate vendor; fallback to claude).
+    - Analysis output is printed to stdout; exit 0 always (reporting tool, not a gate).
+    - `--since <date>` scopes the log window (default: last 7 days).
+    - `--json` emits the structured report as JSON for scripting.
+  - **Technical Notes:**
+    - New file: bundled `ISSUE.md` at package root. Plain Markdown; no build step. Keep under 400 lines.
+    - `src/commands/issue.ts`: add `--analysis <name>` and `--list-analyses` flags to the existing Commander definition. When `--analysis` is present, skip the interactive bug-report flow entirely; build the analysis prompt from the harness section matching `<name>`, invoke the agent via `runWithClaude` / `runWithCodex`, stream output to stdout.
+    - New helper `src/lib/harness.ts`: `loadIssueHarness(cwd: string): string` — same override lookup as `loadAgentHarness` in `optimize.ts`. `parseAnalysisNames(harness: string): string[]` — extracts `## <name>` sections.
+    - `ISSUE.md` structure: one `## <analysis-name>` section per named analysis; each section contains: `### Input` (which log events and fields to read), `### Computation` (what to calculate), `### Output format` (markdown table or JSON schema). Prose-only; no code in the harness.
+    - Log parsing for analysis runs: reuse `loadErrorEntriesForPattern` / `sanitizeEntry` where applicable; for session-level analysis, build a `groupBySessions(entries)` helper that splits on `session_start` events.
+    - New function `src/lib/log-analysis.ts`: `groupBySessions(entries: RawLogEntry[]): Session[]` where `Session = { start: Date; end: Date | null; events: RawLogEntry[]; tunnelUrl: string | null; cleanExit: boolean }`.
+  - **Tests Required:**
+    - `groupBySessions` splits entries correctly on multiple `session_start` events; last session with no `session_end` gets `cleanExit: false`.
+    - `parseAnalysisNames` extracts correct section names from a fixture harness string.
+    - `loadIssueHarness` respects override order (cwd → .crosscheck → bundled).
+    - `--list-analyses` prints names without invoking an agent.
+    - `--analysis unknown-name` exits 1 with a clear message listing valid names.
+    - `--json` output is valid JSON; `--since` filters log files by date correctly.
 
 - [x] **`crosscheck diagnose`** — analyze `~/.crosscheck/logs/*.ndjson`, surface failure patterns and review quality signals as a human-readable report (with `--json` for machine output). This is the observability foundation that `optimize` and future tooling build on.
   - **User:** Anyone whose reviews are failing silently or who wants to understand what's working.

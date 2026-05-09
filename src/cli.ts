@@ -119,6 +119,7 @@ program
   .option('--dry-run', 'print the draft without submitting')
   .option('-y, --yes', 'skip interactive questions and confirmation')
   .option('-c, --config <path>', 'config file path')
-  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string }) => void runIssue(opts))
+  .option('--opportunities', 'analyze logs for reliability patterns and improvement opportunities instead of error patterns')
+  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string; opportunities?: boolean }) => void runIssue(opts))
 
 program.parse()

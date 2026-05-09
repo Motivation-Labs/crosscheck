@@ -158,6 +158,28 @@ These four items fix the two-phase model described in Design Principles. Any new
 
 ### 🔜 Next Up
 
+- [x] **Onboard — workflow, mode, and pipeline steps** — extend `crosscheck onboard` with interactive steps for review mode (cross-vendor vs single-vendor) and workflow pipeline (review-only, review→fix, review→fix→re-check). Mode step is shown only when both AI CLIs are authenticated; pipeline step always shown.
+  - **User:** Anyone running `crosscheck onboard` for the first time, or re-running after installing a second AI CLI.
+  - **Acceptance Criteria:**
+    - `checkEnv()` now returns `{ ok, claudeOk, codexOk }` so downstream steps know which CLIs are available.
+    - **Step 4 — review mode:** shown when both claude and codex are authenticated.
+      - `[1] cross-vendor` (default) → `mode: cross-vendor`, both vendors enabled.
+      - `[2] single-vendor` → asks which vendor; disables the other in `vendors.*.enabled`.
+      - When only one CLI is available, step auto-selects single-vendor and skips the prompt.
+      - `--yes` keeps the existing mode from config without prompting.
+    - **Step 5 — workflow pipeline:**
+      - `[1] review only` → `post_review.auto_fix.enabled: false`.
+      - `[2] review → fix` (recommended default) → `auto_fix.enabled: true, trigger: on_issues, delivery.mode: commit`.
+      - `[3] review → fix → re-check` → same as fix, plus writes `~/.crosscheck/workflow.yml` with a three-step pipeline (review, fix, recheck).
+      - `--yes` preserves existing auto_fix.enabled setting.
+    - Step 6 (was 4) summary shows `mode` and `pipeline` rows in addition to existing fields.
+    - `loadWorkflow()` checks `~/.crosscheck/workflow.yml` as a global fallback (after project-local `.crosscheck/workflow.yml`, before `DEFAULT_WORKFLOW`).
+  - **Technical Notes:**
+    - `src/commands/onboard.ts`: `checkEnv()` returns `EnvCheckResult`; new helpers `promptVendorMode()` and `promptWorkflowPipeline()`; config write also patches `mode`, `vendors.*.enabled`, `post_review.auto_fix.*`.
+    - `src/lib/workflow.ts`: `loadWorkflow` candidates array extended with `join(homedir(), '.crosscheck', 'workflow.yml')`.
+    - Global workflow.yml only written for the `review-fix-recheck` preset; `review-only` and `review-fix` are handled entirely through config fields.
+  - **Related items:** Custom Workflow Engine (workflow.yml schema), Post-Review Auto-Fix (auto_fix config), Deployment Mode (patchDeploymentConfig pattern). The global workflow.yml fallback unblocks the full review→fix→recheck loop for users who don't have a per-project workflow file.
+
 - [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
   - **User:** Any developer who wants faster CLI invocations.
   - **Acceptance Criteria:**

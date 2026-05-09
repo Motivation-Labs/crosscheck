@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { homedir } from 'os'
 import yaml from 'js-yaml'
 import { z } from 'zod'
 
@@ -58,9 +59,13 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
 ]
 
 export function loadWorkflow(operatorDir?: string): WorkflowStep[] {
-  // Only look in the operator's own directory — never inside the PR checkout.
+  // Only look in operator-controlled directories — never inside the PR checkout.
   // Loading workflow config from untrusted PR code would let a PR hijack the runner.
-  const candidates = operatorDir ? [join(operatorDir, '.crosscheck', 'workflow.yml')] : []
+  // Priority: project-local → global user config → DEFAULT_WORKFLOW.
+  const candidates = [
+    ...(operatorDir ? [join(operatorDir, '.crosscheck', 'workflow.yml')] : []),
+    join(homedir(), '.crosscheck', 'workflow.yml'),
+  ]
   for (const path of candidates) {
     if (!existsSync(path)) continue
     try {

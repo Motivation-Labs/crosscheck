@@ -433,7 +433,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
     **Coverage measurement:**
     - Computes an *uptime window* from `session_start` events in `~/.crosscheck/logs/` — the union of all periods crosscheck was running.
-    - For each repo/org/user in the current config, calls the GitHub API to enumerate all PRs opened or updated during the uptime window.
+    - For each repo/org/user in the current config, calls the GitHub API to enumerate all PRs opened or updated during the full analysis period (from the earliest `session_start` in logs, or `--since` if provided — not limited to uptime windows). This ensures PRs that were active only while crosscheck was offline are still enumerated and can be classified as `offline_window`.
     - Cross-references that list against `pr_received` + `review_complete` log entries to find PRs in scope that were never reviewed.
     - Reports a coverage percentage per scope and overall: `63 / 71 PRs reviewed (89%)`.
 
@@ -502,7 +502,7 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
   - **Technical Notes:**
     - New file: `src/commands/coverage.ts`.
     - **Uptime computation:** scan log entries for `session_start` / `session_end` pairs; merge overlapping windows; the result is a list of `[start, end]` intervals. For `session_start` with no matching `session_end` (process killed), assume the window ended at the timestamp of the next non-session log entry.
-    - **Scope enumeration:** GitHub has no `GET /orgs/{org}/pulls` endpoint and the pulls list API has no `since` filter. Use the Search API instead: `GET /search/issues?q=type:pr+org:{org}+created:>{since}&per_page=100` where `since` is the start of the earliest uptime window. For `config.users` entries, enumerate repos first via `listUserRepos` (already in `client.ts`) then query `GET /repos/{owner}/{repo}/pulls?state=all&per_page=100` per repo. For `config.repos`, query each repo directly the same way. Search API rate limit is 30 req/min authenticated — add a small delay between org queries if the user has many orgs.
+    - **Scope enumeration:** GitHub has no `GET /orgs/{org}/pulls` endpoint and the pulls list API has no `since` filter. Use the Search API for org scopes: `GET /search/issues?q=type:pr+org:{org}+updated:>{since}&per_page=100` where `since` is the earliest analysis period boundary. Using `updated:>` (not `created:>`) ensures long-lived PRs opened before the window but updated during it are included, matching the "opened or updated during analysis period" requirement. For `config.users` entries, enumerate repos first via `listUserRepos` (already in `client.ts`) then query `GET /repos/{owner}/{repo}/pulls?state=all&per_page=100` per repo. For `config.repos`, query each repo directly the same way. Search API rate limit is 30 req/min authenticated — add a small delay between org queries if the user has many orgs.
     - **Log join:** a PR is "reviewed" if there is a `pr_received` log entry matching `owner/repo#number` AND a `review_complete` entry for the same key.
     - **Scope enumeration uses the full analysis period, not uptime windows.** The `since` parameter for Search/pulls queries is `max(--since flag, earliest session_start in logs)` — it covers everything crosscheck has ever been configured to watch, regardless of whether it was online. This ensures `offline_window` is reachable.
     - **Gap classification:** applied in priority order; first matching rule wins. `offline_window` fires when a PR is not in the reviewed set AND all of its `created_at`/`updated_at` timestamps fall outside every uptime window — meaning crosscheck simply wasn't running when the PR was active. PRs that overlap at least one uptime window but were still not reviewed proceed to the author/attribution/routing checks.
@@ -1410,12 +1410,12 @@ PR in scope (full analysis period), not in reviewed logs
                       YES → reviewer assigned?
                               NO → no_reviewer       (config_fix: enable vendor)
                               YES → flag as anomaly (reviewed but not logged)
-                      NO → author in author_routes?
-                              YES → (shouldn't be here — flag as anomaly)
-                              NO  → no_attribution   (config_fix: add author_routes)
-                                     └─ PR authored by known AI agent without crosscheck support?
-                                          YES → unsupported_agent  (feature_request)
-                                          NO  → no_attribution     (config_fix)
+                      NO → PR authored by a known-but-unsupported AI agent?
+                              YES → unsupported_agent  (feature_request: add detection pattern)
+                              NO
+                              └─ author in author_routes?
+                                   YES → (shouldn't be here — flag as anomaly)
+                                   NO  → no_attribution  (config_fix: add author_routes)
 ```
 
 **Uptime window computation:**

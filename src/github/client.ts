@@ -302,6 +302,53 @@ export async function findRepoWebhook(owner: string, repo: string, url: string, 
   return hooks.find(h => h.config.url === url)?.id ?? null
 }
 
+// ── Repo activity for onboarding ────────────────────────────────────────────
+
+export interface RepoActivity {
+  tier: 1 | 2 | 3  // 1=new(<7d), 2=active(pushed<90d), 3=inactive
+  fullName: string  // "owner/repo"
+  pushedAt: Date
+  createdAt: Date
+}
+
+export async function fetchActiveRepos(login: string, token: string): Promise<RepoActivity[]> {
+  const results: RepoActivity[] = []
+  const now = Date.now()
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
+  const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000
+  let page = 1
+
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/user/repos?affiliation=owner&visibility=all&sort=pushed&per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{
+      name: string; owner: { login: string }; archived: boolean
+      pushed_at: string | null; created_at: string
+    }>
+    if (data.length === 0) break
+
+    for (const r of data) {
+      if (r.archived || r.owner.login !== login) continue
+      const createdAt = new Date(r.created_at)
+      const pushedAt = r.pushed_at ? new Date(r.pushed_at) : createdAt
+      const createdAgo = now - createdAt.getTime()
+      const pushedAgo = now - pushedAt.getTime()
+      const tier: 1 | 2 | 3 = createdAgo < sevenDaysMs ? 1 : pushedAgo < ninetyDaysMs ? 2 : 3
+      results.push({ tier, fullName: `${login}/${r.name}`, pushedAt, createdAt })
+    }
+
+    if (data.length < 100) break
+    page++
+  }
+
+  // Tier 1 first (newest created), within each tier sort by pushedAt desc
+  results.sort((a, b) => a.tier !== b.tier ? a.tier - b.tier : b.pushedAt.getTime() - a.pushedAt.getTime())
+  return results
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,

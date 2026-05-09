@@ -436,7 +436,7 @@ crosscheck onboard
 | Flag | Description |
 |---|---|
 | `-c, --config <path>` | Write the config to a specific path |
-| `-y, --yes` | Accept all defaults without interactive prompts |
+| `-y, --yes` | Skip all prompts: use existing config values or built-in defaults. Also enables non-TTY execution (useful in scripts and CI). |
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |

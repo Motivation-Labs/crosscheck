@@ -126,6 +126,11 @@ async function promptVendorMode(
     }
   }
 
+  if (opts.yes) {
+    console.log(`  Mode: ${chalk.cyan('cross-vendor')} (default)`)
+    return { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true }
+  }
+
   if (currentMode && !opts.yes) {
     const keep = await ask(`  Current mode: ${chalk.cyan(currentMode)}. Keep this? [Y/n]: `)
     if (keep.toLowerCase() !== 'n') {
@@ -211,8 +216,8 @@ steps:
 `
 
 export async function runOnboard(opts: OnboardOpts = {}) {
-  if (!process.stdin.isTTY) {
-    console.error(chalk.red('onboard requires an interactive terminal.'))
+  if (!process.stdin.isTTY && !opts.yes) {
+    console.error(chalk.red('onboard requires an interactive terminal (or pass --yes to apply defaults).'))
     console.error(chalk.dim('Run crosscheck init and edit crosscheck.config.yml manually.'))
     process.exit(1)
   }
@@ -244,6 +249,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   } else if (currentDeployment && opts.yes) {
     deployment = currentDeployment
     console.log(`  Using existing mode: ${chalk.cyan(deployment)}`)
+  } else if (opts.yes) {
+    deployment = 'personal'
+    console.log(`  Mode: ${chalk.cyan('personal')} (default)`)
   } else {
     deployment = await promptDeploymentMode()
   }
@@ -286,10 +294,14 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   let selectedRepos: string[]
   let selectedOrgs: string[]
 
-  if (opts.yes && existingConfig) {
+  if (opts.yes) {
     selectedRepos = [...currentRepoKeys]
     selectedOrgs = [...currentOrgs]
-    console.log(`  Using existing repo selection (${selectedRepos.length} repos, ${selectedOrgs.length} orgs)`)
+    if (existingConfig) {
+      console.log(`  Using existing repo selection (${selectedRepos.length} repos, ${selectedOrgs.length} orgs)`)
+    } else {
+      console.log(chalk.dim('  No existing config — repo scope left empty. Add repos in config.yml.'))
+    }
   } else {
     if (allRepos.length === 0) {
       console.log(chalk.yellow('  No repos found. You can add repos manually in your config file.'))

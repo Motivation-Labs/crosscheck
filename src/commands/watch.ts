@@ -33,6 +33,7 @@ import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { findAvailablePort } from '../lib/port.js'
 
 // Compute PR diff size in lines, excluding noise (lockfiles, binaries, data files)
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
@@ -317,19 +318,22 @@ export async function runWatch(opts: WatchOpts = {}) {
     fileLog,
   )
 
+  let effectivePort: number
+  try {
+    effectivePort = await findAvailablePort(config.server.port)
+  } catch (err) {
+    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  if (effectivePort !== config.server.port) {
+    console.log(chalk.yellow(`  ⚠  Port ${config.server.port} in use — using port ${effectivePort} instead`))
+    config = { ...config, server: { ...config.server, port: effectivePort } }
+  }
+
   await new Promise<void>((resolve, reject) => {
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        reject(new Error(
-          `Port ${config.server.port} is already in use.\n` +
-          `  Another crosscheck instance may be running. Stop it first, or change the port in config:\n` +
-          `    server:\n      port: 7892`
-        ))
-      } else {
-        reject(err)
-      }
-    })
-    server.listen(config.server.port, resolve)
+    server.on('error', reject)
+    server.listen(effectivePort, resolve)
   }).catch((err: Error) => {
     console.error(chalk.red(`\n✗ ${err.message}`))
     process.exit(1)

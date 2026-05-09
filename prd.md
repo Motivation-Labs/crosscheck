@@ -820,16 +820,16 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/status.ts`: show active webhook count.
   - **Tests Required:** `getExistingWebhook` returns hook ID when matching URL exists; returns null when no match; registration skipped when hook already exists; old hook deleted before new registration on reconnect; retry fires on 422 response with correct delays; aggregated log line shows correct count; status shows hook count.
 
-- [ ] **`crosscheck onboard` — Guided Persona Setup and Smart Scope Configuration** — an interactive wizard that runs all `init` environment checks and then guides the user through persona selection, repo/org scope picking, author filtering, workflow depth, and (for service operators) comment branding. Produces a complete, working `crosscheck.config.yml` without manual YAML editing. Supersedes the minimal first-run prompts in `watch`/`serve` as the recommended entry point for new users.
+- [ ] **`crosscheck onboard` — Guided Persona Setup and Smart Scope Configuration** — an interactive wizard that runs all `init` environment checks and then guides the user through persona selection, repo/org scope picking, author filtering, workflow depth, and optional comment branding. Produces a complete, working `crosscheck.config.yml` without manual YAML editing. Supersedes the minimal first-run prompts in `watch`/`serve` as the recommended entry point for new users.
 
-  **The four deployment personas this command covers:**
+  **The deployment scenarios this command covers:**
 
   | ID | Name | Core need |
   |---|---|---|
   | UC-01 | Personal — curated repos | Personal + org accounts; building personal projects; wants to limit monitoring to a hand-picked set of active repos (backtracing feature requires tight scope) |
   | UC-02 | Personal — cross-scope, author-filtered | Monitors both personal and org repos but only wants their own PRs reviewed |
   | UC-03 | Team shared CR | Each member uses local Claude Code to author PRs; team shares a Codex account for review; configurable depth: CR-only vs CR + auto-fix |
-  | UC-04 | CRaaS provider | Runs crosscheck as a review service for end-users; needs branded annotations and custom signatures on every posted comment |
+  | UC-04 | CRaaS / branded service | Any of the above, plus custom service name and comment annotations; available as an optional add-on at the end of any onboarding path |
 
   **Command:** `crosscheck onboard [--reconfigure]`
 
@@ -846,9 +846,8 @@ These four items fix the two-phase model described in Design Principles. Any new
   ```
   How will you use crosscheck?
 
-    [1] personal  — review my own PRs across my repos and orgs
-    [2] team      — shared CR workflow for a team or org
-    [3] service   — Code Review as a Service with custom branding
+    [1] personal  — I author PRs; review only my own work across my repos and orgs
+    [2] team      — shared CR workflow; review PRs from multiple authors in org repos
 
   Choice [1]:
   ```
@@ -861,31 +860,35 @@ These four items fix the two-phase model described in Design Principles. Any new
   ```
   What should crosscheck monitor?  (detected: member of my-company, another-org)
 
-    [1] My personal repos only
-    [2] My org repos only
-    [3] Both personal repos and orgs  ← recommended for solo developers
+    [1] My personal repos only     — github.com/beingzy/* — side projects and tools you own directly
+    [2] My org repos only          — github.com/my-company/*, another-org/* — team repos you contribute to
+    [3] Both personal repos + orgs — everything across your GitHub account  ← recommended
 
   Choice [3]:
   ```
 
   Step 3 — Repo picker (shown only when personal repos are in scope):
 
-  Fetch `GET /users/{login}/repos?type=owner&sort=pushed&per_page=100`. Count PRs per repo in the last 90 days via `GET /repos/{owner}/{repo}/pulls?state=all&per_page=1` (read `X-Total-Count`). Sort descending by PR count; filter to repos with ≥ 1 PR in the last 180 days for the primary list. Show the top 5. A `[ ] Show more` row expands inline to all repos with any activity in 180 days, then finally any with none.
+  Fetch `GET /users/{login}/repos?type=owner&sort=pushed&per_page=100`. Partition into three tiers:
+  - **Tier 1 — New repos** (created within last 7 days): shown first in the primary list, tagged `new`, pre-selected. A newly-created repo signals active intent even before its first PR lands — missing it would frustrate the user immediately.
+  - **Tier 2 — Active repos** (≥ 1 PR in last 90 days): sorted by PR count descending.
+  - **Tier 3 — Inactive repos** (no PRs in 90 days, not new): deferred behind `[ ] Show more`.
+
+  Primary list shows all Tier-1 repos + top Tier-2 repos up to a combined cap of 8. A `[ ] Show more` row expands inline to all Tier-2 + Tier-3 repos. Repos with zero PRs in 180 days that are not new are omitted entirely and noted: "add manually to config.repos if needed."
 
   ```
   Which personal repos should crosscheck monitor?
 
+    [x] beingzy/new-side-project   (new · 0 PRs)
     [x] beingzy/api-service        18 PRs (last 90 days)
     [x] beingzy/cool-project       12 PRs
     [ ] beingzy/dashboard           3 PRs
     [ ] beingzy/old-tool            1 PR
-        ──────────────────────────────────────────
-    [ ] Show more  (4 repos inactive or very new — or add to config.yml manually)
+        ────────────────────────────────────────────────
+    [ ] Show more  (3 repos with no recent activity — or add to config.yml manually)
 
   Space to toggle · Enter to confirm
   ```
-
-  Repos with zero PRs in 180 days are excluded from the primary list and named only in the "Show more" footnote. Repos created within the last 7 days with zero PRs are also excluded — they appear after their first PR lands. Users can always add any repo to `config.repos` by hand.
 
   Step 4 — Author filter:
   ```
@@ -940,9 +943,8 @@ These four items fix the two-phase model described in Design Principles. Any new
   ```
   How should auto-fixes be delivered?
 
-    [1] Open a fix PR  (human reviews and merges)   ← recommended
+    [1] Open a fix PR  (human reviews and merges before merge)   ← recommended
     [2] Push directly onto the PR branch
-    [3] Post as inline review suggestions only
 
   Choice [1]:
   ```
@@ -952,39 +954,30 @@ These four items fix the two-phase model described in Design Principles. Any new
 
   ---
 
-  **CRaaS path (UC-04):**
+  **Optional — Custom comment branding (available for all personas, including UC-04 CRaaS):**
 
-  Step 2 — Service identity:
+  After the persona-specific questions complete, all paths ask one optional step:
+
   ```
-  Service name (shown in every review comment):
-  > MyCodeReview.ai
+  Add custom branding to review comments? (for teams, services, or personal flair) [y/N]:
   ```
 
-  Step 3 — Comment branding (each field is optional — press Enter to skip):
+  If yes:
   ```
+  Name or label shown in every review comment:
+  > My Team
+
   Comment header (prepended to every review, Enter to skip):
   > [Enter]
 
-  Comment footer (appended to every review):
-  > Reviewed by MyCodeReview.ai — request a review at mycodereview.ai
+  Comment footer (appended to every review, Enter to skip):
+  > Code review powered by My Team · AI-assisted, human-approved.
 
-  Reviewer attribution line (replaces the default "Reviewed by {vendor}" line):
-  > AI-powered review by MyCodeReview.ai
+  Reviewer attribution line (replaces "Reviewed by {vendor}", Enter to skip):
+  > [Enter]
   ```
 
-  Step 4 — Scope restriction:
-  ```
-  Which PRs should this service review?
-
-    [1] Any PR URL passed to  crosscheck review <url>  (no restriction)
-    [2] Restrict to specific orgs or repos
-
-  Choice [1]:
-  ```
-  If [2]: same org/repo picker as the personal path's Step 3.
-
-  Config written by service path:
-  `deployment: personal`, `brand.service_name: "MyCodeReview.ai"`, `brand.comment_footer: "..."`, `brand.reviewer_attribution: "..."`, plus scope fields.
+  Branding is lightweight for personal users (e.g., a footer with a link) and richer for CRaaS operators (service name + attribution + footer). All fields are optional and independently skippable. Saved to the `brand` config section; comment format unchanged when all fields are empty.
 
   ---
 
@@ -1009,7 +1002,7 @@ These four items fix the two-phase model described in Design Principles. Any new
 
   ---
 
-  **New config schema — `brand` section (for UC-04):**
+  **New config schema — `brand` section (available to all personas):**
 
   ```typescript
   export const BrandConfigSchema = z.object({
@@ -1038,24 +1031,24 @@ These four items fix the two-phase model described in Design Principles. Any new
 
   ---
 
-  - **User:** New crosscheck users of any persona — solo developers building side projects, teams running shared CR pipelines, and SaaS operators offering code review as a product.
+  - **User:** New crosscheck users of any persona — solo developers building side projects, teams running shared CR pipelines, and anyone (personal or team) who wants light or rich comment branding.
   - **Acceptance Criteria:**
     - `crosscheck onboard` runs environment checks first and prints a compact one-line-per-tool summary.
-    - Persona question is always shown; branch into the correct question flow based on answer.
-    - Personal path: scope → repo picker (when personal repos in scope) → author filter → correct config for UC-01, UC-02, and the unrestricted variant.
-    - Team path: org picker → author filter → review depth → (if auto-fix chosen) delivery mode → correct config for UC-03.
-    - CRaaS path: service name → 3 branding fields (each skippable) → scope restriction → correct `brand` config for UC-04.
-    - Repo picker shows top 5 active repos by default; "Show more" expands inline; repos with zero PRs in 180 days omitted from primary list with a footnote; repos < 7 days old with zero PRs also omitted.
+    - Persona question is always shown with two choices (personal / team); no third "service" option — branding is an optional add-on step for all paths.
+    - Personal path: scope (with per-option descriptions) → repo picker (when personal repos in scope) → author filter → optional branding → correct config for UC-01, UC-02, and the unrestricted variant.
+    - Team path: org picker → author filter → review depth → (if auto-fix) delivery mode (fix PR or direct push only — no inline-suggestion option) → optional branding → correct config for UC-03.
+    - Repo picker: Tier-1 new repos (< 7 days) shown first and pre-selected; Tier-2 active repos (≥ 1 PR last 90 days) sorted by count; Tier-3 inactive repos behind "Show more"; repos absent from both tiers for 180+ days noted as "add manually."
+    - Branding step is optional (`[y/N]`, default N); if yes, shows 4 fields each independently skippable.
     - Confirmation preview accurately reflects all choices before writing.
     - `--reconfigure` re-runs all steps with current config values pre-filled as defaults; overwrites on confirm; exits without writing on decline.
     - `brand` fields injected into GitHub comments by both `claude.ts` and `codex.ts` when non-empty; comment format unchanged when all `brand` fields are empty.
     - `crosscheck status` shows `persona` row and `brand.service_name` when non-default.
     - `crosscheck init` output includes the onboard hint line.
     - Running `onboard` twice produces identical config (no duplicate entries).
-    - `onboard` with environment check failures still completes the persona questions and writes config; it does not abort.
+    - `onboard` with environment check failures still completes all questions and writes config; it does not abort.
   - **Technical Notes:**
-    - New file: `src/commands/onboard.ts`. Imports `runChecks` from `init.ts`. Drives persona branching. At the end, calls `patchDeploymentConfig` (extended to accept brand fields) + `patchBrandConfig` to write all config values atomically.
-    - New file: `src/lib/repo-picker.ts`: `fetchActiveRepos(login: string, token: string, windowDays?: number): Promise<RepoActivity[]>` — GitHub API calls, PR count sort, 180-day filter; `promptRepoPicker(repos: RepoActivity[], defaults?: string[]): Promise<string[]>` — readline-based two-stage checkbox UI (no new prompt library dependency).
+    - New file: `src/commands/onboard.ts`. Imports `runChecks` from `init.ts`. Drives persona branching. Branding step runs for all paths after persona-specific questions. At the end, calls `patchDeploymentConfig` + `patchBrandConfig` to write all config values atomically.
+    - New file: `src/lib/repo-picker.ts`: `fetchActiveRepos(login: string, token: string): Promise<{ tier: 1 | 2 | 3; repo: string; prCount: number; createdAt: Date }[]>` — GitHub API calls, three-tier partition; `promptRepoPicker(repos, defaults?)` — readline-based checkbox UI showing Tier 1 + Tier 2 up to 8 combined, "Show more" expands Tier 3; no new prompt-library dependency.
     - `src/config/schema.ts`: add `BrandConfigSchema` and `brand: BrandConfigSchema.default({})` to `ConfigSchema`.
     - `src/config/loader.ts`: add `patchBrandConfig(configPath: string, brand: Partial<BrandConfig>): boolean`.
     - `src/reviewers/claude.ts`: inject `brand.comment_header` / `comment_footer` / `reviewer_attribution` when composing the final comment string; no-op when all empty.
@@ -1064,15 +1057,16 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/init.ts`: append hint line at the end of output.
     - Wire into `cli.ts` as `crosscheck onboard [--reconfigure]`.
     - `crosscheck.config.example.yml`: add commented `brand:` block with all four fields.
-    - `get-started.md`: add **First-time setup** section explaining `crosscheck onboard` as the recommended entry point, with each persona described in 2–3 sentences.
+    - `get-started.md`: add **First-time setup** section with each UC described in 2–3 sentences.
   - **Tests Required:**
-    - `fetchActiveRepos`: repos sorted by PR count descending; repos with zero PRs in 180 days excluded from primary list; repos < 7 days old with zero PRs excluded; returns `[]` gracefully when GitHub returns no repos.
-    - `promptRepoPicker`: shows top 5 by default; "Show more" expands to full list; returns correct selection array; pre-selected defaults shown with `[x]`.
+    - `fetchActiveRepos`: repos < 7 days old in Tier 1 regardless of PR count; repos ≥ 1 PR in last 90 days in Tier 2 sorted by count; zero-PR repos older than 7 days in Tier 3; returns `[]` gracefully when GitHub returns nothing.
+    - `promptRepoPicker`: Tier-1 repos shown first and pre-selected; Tier-2 shown next up to cap; "Show more" expands Tier-3 inline; returns correct selection array.
     - Personal + both scopes + author-mine → `{ deployment: 'personal', users: [login], orgs: [...], allowed_authors: [login] }`.
     - Personal + personal-only + 2 repos selected → `{ deployment: 'personal', repos: [r1, r2], users: [], orgs: [], allowed_authors: [login] }`.
     - Team + all-authors + CR-only → `{ deployment: 'team', allowed_authors: [], post_review: { auto_fix: { enabled: false } } }`.
     - Team + specific logins + CR + fix-PR → `{ deployment: 'team', allowed_authors: ['john', 'jane'], post_review: { auto_fix: { enabled: true, delivery: { mode: 'pull_request' } } } }`.
-    - CRaaS + branding → `brand.service_name`, `brand.comment_footer`, `brand.reviewer_attribution` written; skipped (blank) fields remain empty string in config.
+    - Branding opt-in → `brand.service_name`, `brand.comment_footer` written; skipped fields remain empty string.
+    - Branding opt-out (default N) → no `brand` fields written (all remain at schema defaults).
     - `claude.ts` with non-empty `brand.comment_header` → header prepended to posted comment.
     - `claude.ts` with empty `brand` fields → comment format unchanged.
     - `patchBrandConfig` writes correctly; idempotent on second run.

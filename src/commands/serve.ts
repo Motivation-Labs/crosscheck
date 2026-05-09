@@ -60,7 +60,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     owner, repoName, prNumber,
     config, token, pr.user.login,
   )
-  const reviewer = assignReviewer(origin, config)
+  const reviewer = await assignReviewer(origin, config)
 
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
 

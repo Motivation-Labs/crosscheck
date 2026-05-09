@@ -53,7 +53,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
   } else {
     const origin = detectPROrigin(pr.body ?? '', config, pr.user?.login)
-    reviewer = assignReviewer(origin, config)
+    reviewer = await assignReviewer(origin, config)
     if (!reviewer) {
       console.log(chalk.dim(`  PR origin: ${origin} — no reviewer assigned (use --reviewer codex|claude to force)`))
       return

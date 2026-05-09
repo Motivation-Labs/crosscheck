@@ -1,5 +1,7 @@
 import type { Config } from '../config/schema.js'
 import { getPRCommits } from './client.js'
+import { checkCodexAuth } from '../reviewers/codex.js'
+import { checkClaudeAuth } from '../reviewers/claude.js'
 
 export type PROrigin = 'claude' | 'codex' | 'human'
 
@@ -86,18 +88,20 @@ export function shouldReview(origin: PROrigin, config: Config): boolean {
   return config.routing.fallback_reviewer !== null
 }
 
-function resolveFallback(config: Config): 'claude' | 'codex' | null {
+async function resolveFallback(config: Config): Promise<'claude' | 'codex' | null> {
   const fb = config.routing.fallback_reviewer
   if (fb === null) return null
   if (fb === 'codex') return config.vendors.codex.enabled ? 'codex' : null
   if (fb === 'claude') return config.vendors.claude.enabled ? 'claude' : null
-  // 'auto': prefer codex, fall back to claude
-  if (config.vendors.codex.enabled) return 'codex'
-  if (config.vendors.claude.enabled) return 'claude'
+  // 'auto': use runtime capability checks so a Claude-only install doesn't
+  // attempt Codex just because both vendors are enabled in config by default.
+  const [codexAuth, claudeAuth] = await Promise.all([checkCodexAuth(), checkClaudeAuth()])
+  if (codexAuth.ok) return 'codex'
+  if (claudeAuth.ok) return 'claude'
   return null
 }
 
-export function assignReviewer(origin: PROrigin, config: Config): 'claude' | 'codex' | null {
+export async function assignReviewer(origin: PROrigin, config: Config): Promise<'claude' | 'codex' | null> {
   if (config.mode === 'single-vendor') {
     if (config.vendors.codex.enabled) return 'codex'
     if (config.vendors.claude.enabled) return 'claude'

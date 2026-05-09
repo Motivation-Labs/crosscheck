@@ -37,6 +37,16 @@ crosscheck wires that loop:
 
 ---
 
+## Who this is for
+
+**The AI-native developer** — You use Claude Code and Codex to ship features across multiple repos. crosscheck routes every PR to the rival AI, closes the loop with auto-fix PRs, and requires zero new infrastructure beyond your existing subscriptions.
+
+**The solo founder or indie hacker** — You're the only engineer and your agents run around the clock. Without crosscheck, no one reviews what the agent ships. With it, every PR gets a second opinion before it lands — automatically, while you sleep.
+
+**The team scaling AI** — Your org has adopted AI coding tools across multiple repos. crosscheck gives you consistent coverage out of the box, a self-improving instruction set via `crosscheck optimize`, and a quantified ROI story via `crosscheck impact --money` when leadership asks whether the AI investment is paying off.
+
+---
+
 ## Quick start
 
 ```bash
@@ -97,14 +107,13 @@ $ crosscheck watch
 
 crosscheck watch
 
-  repos     your-org/your-repo
-  mode      cross-vendor
-  quality   balanced
+  profile   personal · cross-vendor · balanced
+  users     your-github-login (5 repos)
   auto-fix  on_issues · same-as-author · pull_request
   config    ./crosscheck.config.yml  ← edit to change above
 
-  ✓ tunnel ready: https://abc123.lhr.life
-  ✓ webhook registered for your-org/your-repo
+  9:18:14 AM  ✓ tunnel ready: https://abc123.lhr.life
+  9:18:15 AM  ✓ webhook registered for your-org/your-repo
 Waiting for PR events — Ctrl+C to stop.
 
 PR #47 opened: add retry logic for flaky network calls
@@ -130,13 +139,16 @@ PR #49 opened: implement caching layer
 
 ```bash
 crosscheck init                     # check prerequisites, write starter config
+crosscheck onboard                  # guided setup — pick repos and set deployment mode
 crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # full workflow: review → auto-fix → recheck
 crosscheck watch                    # local dev — tunnel + auto-webhook + listening
 crosscheck serve                    # always-on — fixed port, register webhook once
 crosscheck status                   # auth state, config, log summary, CLI versions
 crosscheck diagnose                 # surface failure patterns from review logs
 crosscheck optimize [--apply]       # update reviewer instructions from diagnose output
 crosscheck impact [--money]         # time saved, issues caught, code quality trends
+crosscheck issue                    # draft and file a bug report from recent error logs
 ```
 
 ---
@@ -299,6 +311,7 @@ crosscheck registers the webhook automatically on first `watch` start — no man
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all commands and flags, complete config reference, how it works, FAQ |
 | **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config file with every option |
 | **[AGENT.md](./AGENT.md)** | Harness document used by `crosscheck optimize` — how the AI improves reviewer instructions |
+| **[CHANGELOG.md](./CHANGELOG.md)** | Release notes — what's new in each version |
 
 ---
 

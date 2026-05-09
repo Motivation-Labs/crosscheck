@@ -39,7 +39,10 @@ program
   .description('Guided setup — select repos to monitor and write config')
   .option('-c, --config <path>', 'config file path to write')
   .option('-y, --yes', 'skip confirmation prompts, accept defaults')
-  .action((opts: { config?: string; yes?: boolean }) => void runOnboard(opts))
+  .option('--personal', 'pre-select personal deployment mode, skip persona prompt')
+  .option('--team', 'pre-select team deployment mode, skip persona prompt')
+  .option('--reconfigure', 're-run setup (accepted for compatibility; onboard always reconfigures)')
+  .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
   .command('serve')

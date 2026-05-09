@@ -31,6 +31,9 @@ export async function promptRepoPicker(
         : [],
     )
     let showAll = false
+    // Track how many lines the last render printed so the next re-render moves
+    // the cursor by the right amount even when showAll changes between renders.
+    let lastLineCount = 0
 
     function visibleItems(): { item: string; index: number }[] {
       if (showAll || items.length <= PAGE_SIZE) {
@@ -46,10 +49,13 @@ export async function promptRepoPicker(
       const vis = visible()
 
       if (!firstRender) {
-        // Move cursor up to the first rendered line and clear downward
-        const lineCount = (opts.title ? 1 : 0) + vis.length + (hasMore() ? 1 : 0) + 1
-        process.stdout.write(`\x1b[${lineCount}A`)
+        // Move cursor up by the previously rendered line count, not the new one.
+        // After `m` expands the list, vis.length has grown but the terminal only
+        // has lastLineCount lines — using vis.length here overshoots and overwrites
+        // content above the picker.
+        process.stdout.write(`\x1b[${lastLineCount}A`)
       }
+      lastLineCount = (opts.title ? 1 : 0) + vis.length + (hasMore() ? 1 : 0) + 1
 
       if (opts.title) {
         process.stdout.write(`${ERASE_LINE}${BOLD}${opts.title}${RESET}\n`)
@@ -131,10 +137,14 @@ export async function promptRepoPicker(
         }
         render()
       } else if (key === 'a') {
-        if (selected.size === items.length) {
-          selected.clear()
+        // Toggle only the currently visible set — hidden overflow items are never
+        // touched until the user expands with `m`.
+        const visIndicesAll = visible().map(v => v.index)
+        const allVisSelected = visIndicesAll.every(i => selected.has(i))
+        if (allVisSelected) {
+          for (const i of visIndicesAll) selected.delete(i)
         } else {
-          for (let i = 0; i < items.length; i++) selected.add(i)
+          for (const i of visIndicesAll) selected.add(i)
         }
         render()
       } else if (key === 'm' && hasMore()) {

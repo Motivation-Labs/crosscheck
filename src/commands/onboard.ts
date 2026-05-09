@@ -21,6 +21,9 @@ import { promptRepoPicker } from '../lib/repo-picker.js'
 export interface OnboardOpts {
   config?: string
   yes?: boolean
+  personal?: boolean
+  team?: boolean
+  reconfigure?: boolean
 }
 
 function ask(question: string): Promise<string> {
@@ -104,7 +107,13 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   const currentDeployment = existingConfig?.deployment
 
   let deployment: 'personal' | 'team'
-  if (currentDeployment && !opts.yes) {
+  if (opts.personal) {
+    deployment = 'personal'
+    console.log(`  Mode: ${chalk.cyan('personal')} (--personal flag)`)
+  } else if (opts.team) {
+    deployment = 'team'
+    console.log(`  Mode: ${chalk.cyan('team')} (--team flag)`)
+  } else if (currentDeployment && !opts.yes) {
     const keep = await ask(`  Current mode: ${chalk.cyan(currentDeployment)}. Keep this? [Y/n]: `)
     deployment = keep.toLowerCase() === 'n' ? await promptDeploymentMode() : currentDeployment
   } else if (currentDeployment && opts.yes) {
@@ -238,9 +247,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const [owner, name] = r.split('/')
     return { owner, name }
   })
-  // Explicit repo selections take precedence over the `users` expansion in watch/serve.
-  // Clear `users` so watch doesn't expand to every repo owned by the login in addition to `repos`.
-  if (selectedRepos.length > 0) delete raw.users
+  // Explicit repo/org selections take precedence over the `users` expansion in watch/serve.
+  // Clear `users` whenever the user has set any explicit scope — repos OR orgs.
+  // Without this, org-only selections still trigger the personal-user expansion in watch/serve.
+  if (selectedRepos.length > 0 || selectedOrgs.length > 0) delete raw.users
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
   console.log(chalk.green(`  ✓ config written to ${configPath}`))

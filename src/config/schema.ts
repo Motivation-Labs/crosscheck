@@ -25,19 +25,26 @@ export const RepoConfigSchema = z.object({
 
 export const RoutingConfigSchema = z.object({
   codex_reviews_patterns: z.array(z.string()).default([
-    'Generated with \\[Claude Code\\]',
+    'Generated with \\[Claude Code\\]',  // PR body attribution footer
+    'Co-Authored-By: Claude',            // commit trailer added by Claude Code
   ]),
   claude_reviews_patterns: z.array(z.string()).default([
-    'Generated with \\[OpenAI Codex\\]',
-    'Co-Authored-By: codex',
+    'Generated with \\[OpenAI Codex\\]', // PR body attribution footer
+    'Co-Authored-By: codex',             // commit trailer added by Codex
   ]),
+  // Branch prefix routing — checked when body and commit patterns don't match.
+  // Agents should branch with these prefixes so crosscheck can identify origin
+  // even without attribution text in the PR body.
+  claude_branch_prefixes: z.array(z.string()).default(['claude/']),
+  codex_branch_prefixes: z.array(z.string()).default(['codex/']),
   // Only review PRs opened by these GitHub logins.
   // Empty list = no restriction (reviews all AI-authored PRs in cross-vendor mode,
   // or all PRs in single-vendor mode). Recommended: set to the logins of your AI agents.
   allowed_authors: z.array(z.string()).default([]),
-  // Fallback origin when no body pattern matches. Maps GitHub login → vendor origin.
+  // Last-resort fallback when body, commit, and branch checks all fail.
+  // Maps GitHub login → vendor origin.
   // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
-  // and will be reviewed by Codex, even without the attribution footer in the PR body.
+  // and will be reviewed by Codex, even without any other attribution signal.
   author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
 })
 
@@ -93,7 +100,22 @@ export const PostReviewConfigSchema = z.object({
   auto_fix: PostReviewFixSchema.default({}),
 })
 
+export const DisplayThemeSchema = z.object({
+  bar_fill: z.string().default('blue'),
+  bar_empty: z.string().default('dim'),
+  cr_approve: z.string().default('green'),
+  cr_needs_work: z.string().default('yellow'),
+  cr_block: z.string().default('red'),
+  fix_fill: z.string().default('cyan'),
+})
+
+export const DisplayConfigSchema = z.object({
+  theme: DisplayThemeSchema.default({}),
+})
+
 export const ConfigSchema = z.object({
+  // Absent = not yet configured; watch/serve will prompt on first run.
+  deployment: z.enum(['personal', 'team']).optional(),
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
   vendors: z.object({
     codex: VendorConfigSchema.default({}),
@@ -102,6 +124,7 @@ export const ConfigSchema = z.object({
   quality: QualityConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   orgs: z.array(z.string()).default([]),
+  users: z.array(z.string()).default([]),
   repos: z.array(RepoConfigSchema).default([]),
   routing: RoutingConfigSchema.default({}),
   server: ServerConfigSchema.default({}),
@@ -109,6 +132,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
+  display: DisplayConfigSchema.default({}),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -119,3 +143,5 @@ export type TunnelConfig = z.infer<typeof TunnelConfigSchema>
 export type ImpactConfig = z.infer<typeof ImpactConfigSchema>
 export type PostReviewConfig = z.infer<typeof PostReviewConfigSchema>
 export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
+export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
+export type DisplayTheme = z.infer<typeof DisplayThemeSchema>

@@ -109,6 +109,96 @@ export async function deleteOrgWebhook(
   })
 }
 
+export async function listUserOrgs(token: string): Promise<string[]> {
+  const results: string[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/user/memberships/orgs?state=active&per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ organization: { login: string } }>
+    if (data.length === 0) break
+    for (const m of data) results.push(m.organization.login)
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  return res.ok
+}
+
+export async function listUserRepos(
+  username: string,
+  token: string,
+  isSelf = false,  // true → use /user/repos to include private repos for the authenticated user
+): Promise<Array<{ owner: string; name: string }>> {
+  const results: Array<{ owner: string; name: string }> = []
+  let page = 1
+  while (true) {
+    const url = isSelf
+      ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
+      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
+    if (!res.ok) break
+    const data = await res.json() as Array<{ name: string; owner: { login: string }; archived: boolean }>
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived && repo.owner.login === username) results.push({ owner: repo.owner.login, name: repo.name })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function getPRCommits(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<string[]> {
+  const results: string[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ commit: { message: string } }>
+    if (data.length === 0) break
+    for (const c of data) results.push(c.commit.message)
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function findOrgWebhook(org: string, url: string, token: string): Promise<number | null> {
+  const res = await fetch(`https://api.github.com/orgs/${org}/hooks?per_page=100`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) return null
+  const hooks = await res.json() as Array<{ id: number; config: { url: string } }>
+  return hooks.find(h => h.config.url === url)?.id ?? null
+}
+
+export async function findRepoWebhook(owner: string, repo: string, url: string, token: string): Promise<number | null> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks?per_page=100`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) return null
+  const hooks = await res.json() as Array<{ id: number; config: { url: string } }>
+  return hooks.find(h => h.config.url === url)?.id ?? null
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,

@@ -197,6 +197,103 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 - [x] **Fix `watch` mode tunnel** — replaced `gh webhook forward` (not available in gh 2.65.0) with `localhost.run` SSH tunnel. SSH is pre-installed on macOS/Linux, no account needed. Tunnel URL shown in watch banner; webhooks auto-registered and deleted on exit.
 - [x] **Clean up `watch` output** — subprocess output no longer dumped raw; structured log lines only.
 - [x] **Auto-detect `allowed_authors` on first run** — `crosscheck init` and `crosscheck watch` detect the signed-in GitHub login via `gh api user` and write it to `routing.allowed_authors` in the config automatically. One-time: once written, subsequent runs skip detection. Prevents the footgun of reviewing all PRs in an org because the author filter was never set.
+
+- [ ] **Deployment Mode & Smart Scope Detection** — formalize the three monitoring scope levels (repo, org, user/personal) and introduce a `deployment: personal | team` config field. `crosscheck watch` and `crosscheck serve` each prompt the user to choose a mode on first run (when `deployment` is absent from config), then auto-detect scopes from GitHub credentials and write the result to config. Subsequent runs skip the prompt entirely. Closes the gap where AI agents opening PRs to personal repos go unwatched, and removes the footgun of serving an entire org with no author filter in team mode.
+  - **User:** Personal developer running `crosscheck watch` (wants all of their own PRs reviewed across personal repos and orgs). Team operator running `crosscheck serve` (wants all org PRs reviewed, personal repos excluded).
+  - **Acceptance Criteria:**
+
+    **Scope levels (all three work independently and combine additively):**
+    - `repos:` — monitor specific repos. At startup, validate each configured repo is accessible via GitHub API; log `✗ repo not found or inaccessible: owner/name — skipped` and continue (do not crash).
+    - `orgs:` — monitor all repos in the listed orgs via one org-level webhook per org.
+    - `users:` — monitor all non-archived repos owned by the listed GitHub personal accounts; enumerated at startup via `GET /users/{username}/repos?type=owner`.
+
+    **`deployment` config field:**
+    - New top-level field: `deployment: personal | team`. No default in schema — absence triggers the first-run prompt in watch/serve.
+    - `personal` — monitors `users=[self]` + `orgs=[all-memberships]`; `allowed_authors=[self]` (only the owner's PRs reviewed).
+    - `team` — monitors `orgs=[all-memberships]` only (no personal repos); `allowed_authors=[]` (all PRs in org scope reviewed).
+
+    **`crosscheck init` — no change to scope logic:**
+    - Remains a pure environment check: CLIs, GitHub token, webhook secret, config file creation.
+    - Does not prompt for deployment mode; does not detect org memberships.
+    - Existing `allowed_authors` auto-detection behaviour is preserved for backward compatibility.
+
+    **First-run prompt in `crosscheck watch` and `crosscheck serve`:**
+    - Triggered once when `deployment` key is absent from config (i.e., first run or pre-existing config from an older version).
+    - Printed before the startup banner:
+      ```
+      How are you using crosscheck?
+
+        [1] personal  — monitor all your repos and orgs; review only PRs you author
+        [2] team      — monitor org repos only; review all PRs from any author
+
+      Choice [1]:
+      ```
+    - Default is `[1]` (personal). Pressing Enter accepts the default.
+    - After the user chooses, crosscheck detects GitHub login + org memberships, writes `deployment:`, `users:` (personal only), `orgs:`, and `allowed_authors:` to config, then continues startup without restart.
+    - Subsequent runs: `deployment` is present → prompt is skipped entirely.
+
+    **One-time override — `--personal` / `--team` flags:**
+    - Use the specified mode for this session only. Config is not read or written.
+    - Scopes are auto-detected at runtime (same detection logic as normal mode); nothing persisted after exit.
+    - Intended for CI pipelines, one-off runs, or trying a mode before committing to it.
+    - Example: `crosscheck watch --team` reviews all org PRs this session; next run reverts to whatever `deployment` says in config.
+
+    **Permanent reconfigure — `--reconfigure` flag:**
+    - Re-triggers the setup prompt unconditionally, even if `deployment` is already set.
+    - Shows current saved mode: `Current: personal`.
+    - After the user chooses, overwrites `deployment:`, `users:`, `orgs:`, `allowed_authors:` in config.
+    - Useful when joining a new org, switching from personal to team use, or correcting a first-run mistake.
+    - Example: `crosscheck watch --reconfigure`.
+
+    **`crosscheck watch` runtime behavior (after mode is known):**
+    - When `users`, `orgs`, `repos` are all empty: auto-detect scopes from GitHub credentials based on `deployment`. Prints `  ✦ scopes auto-detected from GitHub credentials`.
+    - Explicit `users`/`orgs`/`repos` in config always take precedence over auto-detection.
+    - Banner shows `  deployment  personal` or `  deployment  team`.
+
+    **`crosscheck serve` runtime behavior (after mode is known):**
+    - Same auto-detection logic as watch, keyed on `deployment`.
+    - In `team` mode with empty `allowed_authors`, replace the existing warning with: `  author filter  all PRs (team mode — set allowed_authors to restrict)`.
+    - Banner shows deployment mode.
+
+  - **Technical Notes:**
+    - Schema: add `deployment: z.enum(['personal', 'team']).optional()` to `ConfigSchema` — intentionally no default so absence can trigger the prompt.
+    - New function `src/github/client.ts`: `listUserOrgs(token: string): Promise<string[]>` — `GET /user/memberships/orgs?state=active&per_page=100`, paginates, returns org login strings; returns `[]` on error (never throws).
+    - New function `src/github/client.ts`: `checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean>` — returns false on 404/403, true on 200.
+    - New function `src/config/loader.ts`: `detectScopesForDeployment(deployment: 'personal' | 'team', token: string): Promise<{ users: string[]; orgs: string[] }>` — calls `detectGitHubLogin()` + `listUserOrgs()`; returns `{ users: [login], orgs }` for personal, `{ users: [], orgs }` for team.
+    - New function `src/config/loader.ts`: `patchDeploymentConfig(configPath, deployment, login, orgs): boolean` — writes `deployment:`, `users:` (personal only), `orgs:`, `allowed_authors:` to config YAML; no-op if `deployment` key already present (use `force: true` to overwrite for `--reconfigure`).
+    - Repo accessibility check: `watch.ts` and `serve.ts`, after loading `config.repos`, call `checkRepoAccessible` for each in parallel; log warning and filter out inaccessible ones before building scopes.
+    - `watch.ts` / `serve.ts`: prompt logic runs before the startup banner. `--personal`/`--team` skip all config reads/writes and use runtime-only scopes. `--reconfigure` runs the prompt with `force: true` and rewrites config.
+    - `crosscheck.config.example.yml`: add commented `deployment: personal` with explanation of both values.
+    - `get-started.md`: add a **Deployment mode** section documenting the three flags.
+  - **Tests Required:**
+    - `listUserOrgs` paginates correctly; returns `[]` on API error.
+    - `checkRepoAccessible` returns false on 404; true on 200.
+    - `detectScopesForDeployment('personal', token)` → `{ users: [login], orgs: [...] }`.
+    - `detectScopesForDeployment('team', token)` → `{ users: [], orgs: [...] }`.
+    - `patchDeploymentConfig` writes all fields; is a no-op if `deployment` present and `force` is false; overwrites when `force: true`.
+    - First-run prompt shown when `deployment` absent; not shown when present.
+    - `--personal` flag: uses personal scopes this session; config is not written.
+    - `--team` flag: uses team scopes this session; config is not written.
+    - `--reconfigure` flag: shows prompt even when `deployment` already set; shows current mode; writes new choice to config.
+    - Watch with empty scopes + `deployment: personal` → auto-detects users + orgs.
+    - Watch with empty scopes + `deployment: team` → auto-detects orgs only.
+    - Serve `team` mode + empty `allowed_authors` → shows positive confirmation, not warning.
+    - Inaccessible repo in `repos:` → warning logged, repo skipped, remaining repos monitored.
+
+- [x] **Live connectivity log section in `watch` dashboard** — add a dedicated 2-line section between the top status dashboard and the per-PR work area. Shows the 2 most recent connectivity events (tunnel open/close, webhook registrations) in-place without cluttering the scrollback.
+  - **User:** Anyone running `crosscheck watch` who wants to see tunnel/webhook status at a glance alongside active PR work.
+  - **Acceptance Criteria:**
+    - A fixed 2-line connectivity section appears between the 3-row dashboard and the PR slots in the live display.
+    - Shows the 2 most recent events: tunnel ready, tunnel disconnected, webhook registered, webhook failed.
+    - Each line is timestamped: `  9:18:14 AM  ✓ tunnel ready: https://...`
+    - Lines are padded with empty strings until 2 events have occurred, so the section height is stable.
+    - Connectivity events do NOT appear in the scrollback (they are in-place only).
+    - Tunnel errors and webhook errors still also appear in scrollback via `bLog` (so they're not lost on reconnect).
+  - **Technical Notes:**
+    - `board.ts`: add `private connLog: string[]` (max 2 entries); `logConnectivity(line): void` appends with timestamp, shifts oldest when full.
+    - `render()`: add `Section 1.5` between `sep` and PR slots, always `CONN_LOG_MAX` lines.
+    - `watch.ts`: add `cLog(line)` helper → `board.logConnectivity(line)` + `fileLog`; route tunnel open/close/fail and webhook registered/failed to `cLog`.
+
 - [ ] **Custom Workflow Engine** — `workflow.yml` per-repo pipeline definition: ordered steps (`review`, `address`, `recheck`), `when` conditions on verdict/context, per-step `instructions` for behavior steering, and `max_rounds` guard. Enables the review → auto-fix → re-review loop without code changes.
   - **User:** Teams with high PR volume who want crosscheck to close the feedback loop, not just comment. Also teams that want different reviewer behavior at each pipeline stage.
   - **Acceptance Criteria:**
@@ -329,6 +426,109 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
     - **Defect cost**: NIST studies put post-merge defect fix cost at 4–10× the cost of catching it during review. At $150/hr and 1 hr median fix time, each issue caught pre-merge is conservatively worth $150. BLOCK-severity issues are not weighted more (keeps the math transparent and conservative).
     - **Second-order quality signal**: Declining BLOCK rate over time is a leading indicator that PRs are getting cleaner upstream — teams internalize review feedback. This is a proxy metric, not a hard measurement.
   - **Tests Required:** empty log dir → graceful no-data message; log with mixed verdicts → correct APPROVE/NEEDS_WORK/BLOCK counts; duration data present → `actual_ai_review_min` calculated correctly; duration data absent → falls back to default; `--since` filters log entries by date; `--json` output is valid JSON matching schema; `--money` flag gates monetary estimate display; `crosscheck status` shows one-line summary.
+
+- [ ] **`crosscheck coverage` — Gap Analysis and Self-Improvement Engine** — compare what crosscheck *should* have reviewed (monitored scope × live uptime) against what it *actually* reviewed (logs), identify the root cause of each missed PR, and route the finding to the appropriate remediation: config fixes are applied or filed as best-practice issues; feature gaps become prd.md proposals that can optionally be auto-contributed as PRs to `motivation-labs/crosscheck`.
+  - **User:** Anyone who has been running crosscheck for a week or more and wants to know whether it's actually catching everything it should be, and what to do about the gaps.
+  - **Acceptance Criteria:**
+
+    **Coverage measurement:**
+    - Computes an *uptime window* from `session_start` events in `~/.crosscheck/logs/` — the union of all periods crosscheck was running.
+    - For each repo/org/user in the current config, calls the GitHub API to enumerate all PRs opened or updated during the uptime window.
+    - Cross-references that list against `pr_received` + `review_complete` log entries to find PRs in scope that were never reviewed.
+    - Reports a coverage percentage per scope and overall: `63 / 71 PRs reviewed (89%)`.
+
+    **Gap classification — each missed PR is classified into exactly one root cause:**
+
+    | Cause | Meaning | Action type |
+    |---|---|---|
+    | `author_filtered` | PR author not in `allowed_authors` | `config_fix` |
+    | `no_attribution` | PR body has no Claude/Codex footer and no `author_routes` entry | `config_fix` |
+    | `no_reviewer` | Attribution detected but no vendor enabled for that origin | `config_fix` |
+    | `offline_window` | PR opened while crosscheck was not running | `config_info` |
+    | `webhook_miss` | PR in scope but no webhook event arrived (webhook not registered?) | `config_fix` |
+    | `unknown_pattern` | PR reviewed but reviewer assignment logged as skipped with unknown origin | `feature_request` |
+    | `unsupported_agent` | PR authored by an AI agent crosscheck doesn't recognize | `feature_request` |
+
+    **Config-fix recommendations:**
+    - Each `config_fix` gap produces a specific, copy-pasteable suggestion:
+      - `author_filtered`: "3 PRs from `dependabot[bot]` skipped — add to `allowed_authors` or switch to team mode."
+      - `no_attribution`: "5 PRs from `beingzy` had no attribution footer — add `author_routes: { beingzy: claude }` to route them."
+      - `no_reviewer`: "2 PRs detected as `codex`-origin but Codex is disabled — set `vendors.codex.enabled: true`."
+    - `--apply` writes the suggested config changes directly to `crosscheck.config.yml` after confirmation.
+    - `--issue` files the config gap as a best-practice issue to `motivation-labs/crosscheck` using the same `gh issue create` pipeline as `crosscheck issue`. Issue title: `config: [gap type] — best practice recommendation`. The issue describes the condition, the ideal config, and asks the maintainers to surface it in `crosscheck init` as a warning.
+
+    **Feature-request recommendations:**
+    - Each `feature_request` gap produces a structured feature proposal: problem statement, example missed PRs (sanitized), proposed detection logic, and estimated impact (N PRs/week that would be caught).
+    - `--prd` clones `motivation-labs/crosscheck` to a temp dir, creates a feature branch, appends the proposal to `prd.md` under **Build Queue → 🔜 Next Up**, and opens a draft PR. PR body includes the sanitized gap data as supporting evidence.
+    - `--build` goes further: after writing the prd.md entry, instructs the local AI agent (via `claude --print`) to implement the feature — creating the necessary source files, updating schema/config/tests — and pushes the implementation commits onto the same branch before opening the PR as ready-for-review.
+    - Both `--prd` and `--build` require `gh auth status` to confirm the user has push access to the repo (or their fork). Falls back to `--dry-run` behavior if access check fails.
+
+    **CLI interface:**
+    ```bash
+    crosscheck coverage                    # show gap report, no changes
+    crosscheck coverage --apply            # apply config fixes after confirmation
+    crosscheck coverage --issue            # file config gaps as best-practice issues
+    crosscheck coverage --prd              # open a draft PR with prd.md feature proposal
+    crosscheck coverage --build            # implement the feature and open a ready PR
+    crosscheck coverage --since YYYY-MM-DD # limit analysis window
+    crosscheck coverage --json             # structured JSON output
+    ```
+
+    **Sample output:**
+    ```
+    crosscheck coverage  (last 14 days · 71 PRs in scope)
+
+      Coverage: 63 / 71 PRs reviewed  (89%)
+      Missing:   8 PRs
+
+      author_filtered    3 PRs  → add to allowed_authors or switch to team mode
+        PR #44  dependabot[bot] · acme/api
+        PR #47  dependabot[bot] · acme/api
+        PR #51  dependabot[bot] · acme/frontend
+
+      no_attribution     3 PRs  → add author_routes to config
+        PR #48  beingzy · acme/api        (no Claude/Codex footer detected)
+        PR #52  beingzy · acme/frontend
+        PR #53  beingzy · acme/tools
+
+      unsupported_agent  2 PRs  → feature gap (GitHub Copilot attribution not recognized)
+        PR #49  copilot-swe-agent[bot] · acme/api
+        PR #55  copilot-swe-agent[bot] · acme/tools
+
+    Config fixes available:
+      Run  crosscheck coverage --apply   to apply the config fixes above.
+      Run  crosscheck coverage --issue   to file best-practice issues for each config gap.
+
+    Feature gaps available:
+      Run  crosscheck coverage --prd     to propose attribution support for Copilot agents.
+      Run  crosscheck coverage --build   to implement + open a PR to motivation-labs/crosscheck.
+    ```
+
+  - **Technical Notes:**
+    - New file: `src/commands/coverage.ts`.
+    - **Uptime computation:** scan log entries for `session_start` / `session_end` pairs; merge overlapping windows; the result is a list of `[start, end]` intervals. For `session_start` with no matching `session_end` (process killed), assume the window ended at the timestamp of the next non-session log entry.
+    - **Scope enumeration:** for each org in `config.orgs`, call `GET /orgs/{org}/pulls?state=all&per_page=100&since=<earliest-window-start>`; for each user in `config.users`, call `GET /repos/{owner}/{name}/pulls?state=all` per-repo. Intersect `created_at` / `updated_at` with uptime windows.
+    - **Log join:** a PR is "reviewed" if there is a `pr_received` log entry matching `owner/repo#number` AND a `review_complete` entry for the same key.
+    - **Gap classification:** applied in priority order; first matching rule wins. `offline_window` fires only if the PR's `created_at` and `updated_at` both fall outside all uptime windows.
+    - **Config apply:** uses `yaml.load` + `yaml.dump` pattern (same as `patchDeploymentConfig`). Shows a before/after diff and prompts `Apply? [y/N]` unless `--yes` is passed.
+    - **Issue filing (`--issue`):** calls `gh issue create --repo motivation-labs/crosscheck` with a templated body. Body includes: gap type, frequency, ideal config, and a request to add a startup warning. No PR data included — only the gap pattern and config suggestion.
+    - **PR contribution (`--prd`, `--build`):**
+      1. `gh repo clone motivation-labs/crosscheck <tmpDir>` (or fork + clone if no push access).
+      2. `git checkout -b feat/coverage-<gap-type>-<date>`.
+      3. Append PRD entry to `prd.md` (or `--build`: generate and write source files).
+      4. `git commit -m "feat: <gap type> — <one-line description>"`.
+      5. `gh pr create --title "..." --body "..."` — draft PR for `--prd`, ready PR for `--build`.
+    - Wire into `cli.ts` as `crosscheck coverage [--apply] [--issue] [--prd] [--build] [--since <date>] [--json] [-y/--yes]`.
+    - Agent selection for `--build`: same `selectOptimizeAgent` logic. Prompt instructs the agent to implement only the specific detection pattern or config handling identified in the gap, not a full feature rewrite.
+  - **Tests Required:**
+    - Uptime window computation: two overlapping sessions → merged; unclosed session → window ends at next log entry timestamp.
+    - Scope enumeration stub: given a mock GitHub API, returns correct PR list within uptime window.
+    - Gap classification: `author_filtered` fires before `no_attribution`; `offline_window` only fires when both `created_at` and `updated_at` are outside all windows.
+    - `--apply` shows diff and writes correct YAML; is a no-op when `--yes` not passed and user declines.
+    - `--issue` calls `gh issue create` with no PR identifiers or repo names in the body.
+    - `--prd` clones repo, creates branch, appends to prd.md, opens draft PR.
+    - `--json` output is valid JSON matching schema.
+    - Coverage % calculated correctly: 0 reviewed → 0%; all reviewed → 100%.
 
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
@@ -1017,6 +1217,269 @@ tunnel:
 - `watch.ts`: after banner print, branch on `config.tunnel.backend`; smee mode spawns `smee --url <channel> --path <path> --port <port>` and auto-restarts on exit; `currentTunnelProc` shared with cleanup handler
 - `init.ts`: checks if `smee` CLI is installed; shows one-line tip if missing
 - `crosscheck.config.example.yml`: commented tunnel section with full instructions
+
+---
+
+#### Deployment Mode & Smart Scope Detection
+
+**Problem:** crosscheck has no concept of *why* it's running — is this a developer's laptop monitoring their own work, or a shared server watching an entire team's org? Today:
+- Personal users must manually discover that `users:` exists; they can't say "watch everything I own."
+- Team operators who run `crosscheck serve` with no author filter inadvertently review every PR in the org from any author.
+- There's no auto-detection of org memberships — users copy-paste org names by hand.
+- An inaccessible repo in `repos:` silently drops events with no diagnostic.
+
+**Solution:** introduce `deployment: personal | team` as a first-class config concept. `crosscheck watch` and `crosscheck serve` prompt the user to choose a mode on first run (when `deployment` is absent from config), detect scopes from GitHub credentials based on the choice, write everything to config, and proceed — no restart required. `crosscheck init` is unchanged; it remains a pure environment check.
+
+**Scope model:**
+
+| Level | Config key | Coverage | Registration |
+|---|---|---|---|
+| Repo | `repos:` | Named repos only | One webhook per repo; validated at startup |
+| Org | `orgs:` | All repos in org | One webhook per org (GitHub org webhook) |
+| User | `users:` | All non-archived personal repos | Enumerated at startup; one webhook per repo |
+
+All three are additive — a config can mix `orgs:` + `users:` + `repos:`.
+
+**Deployment modes:**
+
+| | `personal` | `team` |
+|---|---|---|
+| Primary use case | Developer laptop running `crosscheck watch` | Shared server running `crosscheck serve` |
+| Auto-detected scopes | `users=[self]` + `orgs=[all-memberships]` | `orgs=[all-memberships]` only |
+| Default `allowed_authors` | `[self]` — only the owner's PRs | `[]` — all PRs in monitored scope |
+| Personal repos monitored | Yes | No |
+
+**First-run prompt (watch and serve):**
+
+Shown before the startup banner when `deployment` key is absent from config. Printed once; after the user answers, the choice is persisted and never asked again.
+
+```
+crosscheck watch
+
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+Choice [1]:
+```
+
+After selecting, crosscheck detects GitHub login + org memberships and writes to config:
+
+Personal (`[1]`):
+```yaml
+deployment: personal
+users:
+  - beingzy               # auto-detected from gh auth
+orgs:
+  - motivation-labs       # auto-detected from org memberships
+  - codatta
+routing:
+  allowed_authors:
+    - beingzy
+```
+
+Team (`[2]`):
+```yaml
+deployment: team
+orgs:
+  - motivation-labs
+  - codatta
+# users: omitted — personal repos excluded in team mode
+# allowed_authors: omitted — all PRs reviewed
+```
+
+**Three ways to control the mode:**
+
+| | Prompt shown? | Config written? | Use case |
+|---|---|---|---|
+| First run (no `deployment` in config) | Yes | Yes | Initial setup |
+| `--personal` / `--team` flag | No | **No** | One-time override, CI pipelines |
+| `--reconfigure` flag | Yes (shows current mode) | Yes (overwrites) | Switching modes permanently, re-detecting after joining a new org |
+
+```bash
+crosscheck watch --personal       # personal mode this session only, config unchanged
+crosscheck serve --team           # team mode this session only, config unchanged
+crosscheck watch --reconfigure    # re-prompts, saves new choice to config
+```
+
+**`--reconfigure` prompt** (shows current saved mode):
+
+```
+Reconfiguring deployment mode...
+
+How are you using crosscheck?
+
+  [1] personal  — monitor all your repos and orgs; review only PRs you author
+  [2] team      — monitor org repos only; review all PRs from any author
+
+Current: personal
+Choice [1]:
+```
+
+Re-detecting after the choice always refreshes org memberships and repo lists — useful after joining a new org without switching modes.
+
+**Runtime auto-detection (when explicit scopes are missing):**
+
+If `deployment` is set but `users`, `orgs`, `repos` are all empty (e.g., user manually cleared them), watch/serve auto-detect scopes at startup without prompting:
+- `deployment: personal` → detect `users=[self]` + `orgs=[memberships]`
+- `deployment: team` → detect `orgs=[memberships]` only
+
+Banner line: `  deployment  personal` or `  deployment  team`.
+
+**Repo accessibility validation:**
+
+At startup, for each entry in `repos:`, call `GET /repos/{owner}/{repo}` in parallel. Any that return 404 or 403 produce:
+```
+  ✗ repo not accessible: acme/old-repo — skipped (404 Not Found)
+```
+Remaining accessible repos continue normally. Non-crashing — a stale entry shouldn't halt the whole session.
+
+**New API functions (`src/github/client.ts`):**
+
+```typescript
+// Returns org login strings for all active memberships of the authenticated user
+listUserOrgs(token: string): Promise<string[]>
+
+// Returns false on 404/403; true on 200; throws on network error
+checkRepoAccessible(owner: string, repo: string, token: string): Promise<boolean>
+```
+
+**New loader functions (`src/config/loader.ts`):**
+
+```typescript
+// Returns scopes to use for auto-detection based on deployment mode
+detectScopesForDeployment(
+  deployment: 'personal' | 'team',
+  token: string
+): Promise<{ users: string[]; orgs: string[] }>
+
+// Writes deployment, users, orgs, allowed_authors to config file; no-op if deployment already set
+patchScopesAndDeployment(
+  configPath: string,
+  deployment: 'personal' | 'team',
+  login: string,
+  orgs: string[]
+): boolean
+```
+
+**Interaction with existing `patchAllowedAuthors`:**
+
+`patchScopesAndDeployment` supersedes the single-field `patchAllowedAuthors` for new installs. `patchAllowedAuthors` is kept for backward compatibility (existing configs that already have `deployment` omitted but `allowed_authors` empty).
+
+---
+
+#### `crosscheck coverage` — Gap Analysis and Self-Improvement Engine
+
+**Problem:** crosscheck runs silently in the background and users have no way to know what percentage of eligible PRs it actually reviewed. Missed PRs fall into several categories — author filter excluded them, no attribution footer existed, the webhook wasn't registered during that window, or an unknown AI agent wrote the PR. Without a way to enumerate these gaps, users can't tell whether their config is optimal or whether a crosscheck feature is missing. And when a feature *is* missing, there's currently no automated path from "I spotted the gap" to "I filed a proposal" to "I implemented the fix."
+
+**Solution:** `crosscheck coverage` enumerates all PRs in the monitored scope during the crosscheck uptime window, joins that list against review logs, classifies each missed PR by root cause, and routes each class to the right remediation:
+
+- **Config gaps** (author filter, missing `author_routes`, disabled vendor) → suggest and optionally apply config changes; optionally file a best-practice issue to the crosscheck repo
+- **Feature gaps** (unrecognized AI agent attribution, unsupported routing pattern) → draft a prd.md feature proposal; optionally clone `motivation-labs/crosscheck`, write the implementation, and open a ready-for-review PR
+
+**Why this is different from `diagnose`:**
+
+`diagnose` reads error events — things that broke during a review that *was attempted*. `coverage` reads the inverse: PRs that were never attempted at all. The two are complementary: `diagnose` finds quality problems in the review pipeline; `coverage` finds scope problems upstream of it.
+
+**Self-improvement loop:**
+
+```
+crosscheck running
+       ↓
+   coverage gap detected
+       ↓
+   config gap?  ──────────────→  --apply (config write) or --issue (best-practice PR)
+       ↓
+   feature gap? ──────────────→  --prd (prd.md proposal PR, draft)
+                                  --build (implement + ready PR)
+```
+
+The `--build` path makes this the first crosscheck command that contributes back to its own development autonomously: it clones the repo, detects exactly which detection pattern or config handling is missing, implements it, adds tests, updates prd.md, and opens a PR. The human reviews and merges.
+
+**Gap classification decision tree:**
+
+```
+PR in scope, not in reviewed logs
+  └─ PR author in allowed_authors?
+       NO → author_filtered        (config_fix: add to allowed_authors)
+       YES
+       └─ PR body matches any attribution pattern?
+            YES → reviewer assigned?
+                    NO → no_reviewer       (config_fix: enable vendor)
+                    YES → this shouldn't happen — flag as anomaly
+            NO → author in author_routes?
+                    YES → reviewer assigned → reviewed (shouldn't be here)
+                    NO  → no_attribution   (config_fix: add author_routes)
+                           └─ PR authored by unknown AI agent?
+                                YES → unsupported_agent  (feature_request)
+                                NO  → no_attribution     (config_fix)
+              └─ Did webhook arrive?
+                   NO, and PR in uptime window → webhook_miss (config_fix)
+                   NO, PR outside all uptime windows → offline_window (config_info)
+```
+
+**Uptime window computation:**
+
+Session boundaries from log entries:
+```
+session_start @ 09:00 → session_end @ 17:00   window: [09:00, 17:00]
+session_start @ 18:00 → (no session_end)       window: [18:00, next-log-ts]
+```
+
+Overlapping windows are merged. A PR's uptime membership check: `window.some(w => pr.updated_at >= w.start && pr.created_at <= w.end)`.
+
+**`--issue` payload (config gaps):**
+
+Filed to `motivation-labs/crosscheck`. Body structure:
+```
+## Config best-practice gap: author_filtered
+
+**Condition:** User has `allowed_authors: [beingzy]` and PRs from `dependabot[bot]` are being skipped.
+
+**Ideal behavior:** `crosscheck init` or `crosscheck watch` startup should warn when known bot accounts (dependabot, renovate, copilot-workspace) are present in the repo's PR history but absent from `allowed_authors`.
+
+**Suggested config:**
+routing:
+  allowed_authors:
+    - beingzy
+    - dependabot[bot]
+    - renovate[bot]
+
+**Supporting data:** 3 PRs skipped over 14 days in 1 repo.
+```
+
+No repo names, PR numbers, or user identities beyond the pattern type are included.
+
+**`--build` agent prompt structure:**
+
+```
+You are implementing a feature for crosscheck (an AI code review orchestrator).
+
+Gap type: unsupported_agent
+Description: PRs authored by `copilot-swe-agent[bot]` are not being recognized
+as AI-authored and therefore not reviewed. crosscheck needs a detection pattern
+for this agent's attribution footer.
+
+GitHub Copilot attribution footer: "Co-Authored-By: GitHub Copilot <>"
+
+Task:
+1. Add `'Co-Authored-By: GitHub Copilot'` to `claude_reviews_patterns` default in
+   `src/config/schema.ts` (GitHub Copilot is reviewed by Claude, as Codex reviews Claude-authored code).
+2. Update `crosscheck.config.example.yml` with the new pattern, commented.
+3. Update `get-started.md` routing section with a note about GitHub Copilot support.
+4. Add a test case to the routing test suite verifying the new pattern matches.
+
+Do not touch any other files. Do not change existing patterns.
+```
+
+**Implementation phasing:**
+
+Phase 1 (this feature): Config-gap detection + `--apply` + `--issue`. Delivers immediate value, no cloning required.
+
+Phase 2: `--prd` — generates prd.md proposal, opens draft PR. No code generation.
+
+Phase 3: `--build` — full autonomous contribution. Requires careful scoping of the agent prompt to prevent scope creep.
 
 ---
 

@@ -51,7 +51,7 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .option('--backtrace', 'scan for unreviewed open PRs on startup (opt-in)')
   .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
 
 program
@@ -61,7 +61,7 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .option('--backtrace', 'scan for unreviewed open PRs on startup (opt-in)')
   .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program

@@ -406,7 +406,36 @@ These four items fix the two-phase model described in Design Principles. Any new
   - **Technical Notes:** The description suffix `(current)` is appended in-place in `promptVendorMode`, `promptQualityTier`, `promptWorkflowPipeline`, `promptConnectionType` when the item matches the existing config value. No change to `promptSinglePicker` signature needed — use the `description` field.
   - **Tests Required:** When existing config has `quality.tier: thorough`, the `thorough` item's description includes `(current)`. When no config exists, no `(current)` suffix appears on any item.
 
-- [ ] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
+- [x] **Per-PR status bar — live step states + workflow-aware Fix/Recheck visibility** — the active PR slot's second line (`PR | CR | Fix`) does not accurately reflect real-time step state: CR shows `pending` even while a review is actively running, Fix and Recheck are always rendered as `pending` regardless of whether the workflow is configured to run them, and the per-PR section disappears from the board after completion.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who monitors the terminal during active reviews.
+  - **Problem (observed in screenshot):** While codex is reviewing PR #78, the status bar shows `CR [░░░] pending | Fix [░░░] pending`. Two issues: (1) CR should show an active/in-progress state (e.g. a spinner or `reviewing…` label) rather than `pending` — `pending` implies the step hasn't started; (2) Fix (and Recheck, for review-fix-recheck workflows) should respect the loaded `workflow.yml` — if the step is not in the workflow, the column should show `—` or be omitted rather than implying it is queued. If the step is in the workflow but waiting for the prior step to finish, it should show `queued`; if it ran, it should show its outcome.
+  - **Acceptance Criteria:**
+    - **CR step state transitions (active slot):**
+      - `queued` — PR arrived, review has not started yet (brief gap between event receipt and reviewer launch).
+      - `⠋ reviewing…` (spinner) — reviewer CLI is actively running.
+      - `✓ APPROVE` / `⚠ NEEDS WORK` / `✗ BLOCK` — review completed; colored badge.
+      - `✗ error` — reviewer exited non-zero.
+    - **Fix step state (workflow-aware):**
+      - Not in workflow → column shows `Fix —` (dash, no bar). Column width and separator preserved so layout doesn't shift.
+      - In workflow, waiting for CR to finish → `Fix queued`.
+      - In workflow, running → `Fix ⠋ applying…`.
+      - In workflow, completed → `Fix ✓ N applied` or `Fix — skipped` (when verdict was APPROVE and `when` condition was false).
+      - In workflow, errored → `Fix ✗ error`.
+    - **Recheck step state** — same state machine as Fix, using the same column rules. Shown as a fourth column `| Recheck …` when present in workflow; absent (not even `—`) when not in workflow.
+    - **Per-PR section persists after completion** — after `completePR()` is called, the two-line entry is printed to scrollback (as it is today) AND a "completed" version of the slot remains visible in the live board area until the next render cycle clears it naturally (or for at least 5 seconds). This gives the user a moment to see the final verdict before the slot disappears.
+    - The three columns always align; column widths do not change between state transitions (use fixed-width labels).
+  - **Technical Notes:**
+    - `src/lib/board.ts` (`renderPRSlot()`): add a `phase` field to `PRSlot` to distinguish `queued | reviewing | reviewed | fixing | fixed | rechecking | rechecked | error`. Drive the CR/Fix/Recheck labels from `phase` rather than checking `slot.verdict === undefined`.
+    - `src/commands/watch.ts` (or wherever `updatePR()` is called): emit a `phase` update at each step transition — before launching the reviewer CLI, after it exits, before launching the fixer, after it exits.
+    - Load the active workflow steps at board-init time (via `loadWorkflow()`); pass the step names to `PRBoard` so it knows which columns to render.
+    - For the 5-second completed-slot retention: set a `completedAt` timestamp on the slot in `completePR()`; `render()` includes recently-completed slots (within the retention window) in the live block, rendered with a dim ✓ prefix on line 1 and frozen final state on line 2.
+  - **Tests Required:**
+    - `renderPRSlot()` with `phase: 'reviewing'` renders `⠋ reviewing…` in the CR column, not `pending`.
+    - `renderPRSlot()` with Fix step absent from workflow renders `Fix —`, not `Fix [░] pending`.
+    - `renderPRSlot()` with Fix step present and `phase: 'fixing'` renders `Fix ⠋ applying…`.
+    - Completed slot appears in live block for 5s after `completePR()`, then is absent on the next render after the window expires.
+
+- [x] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
   - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants a cleaner, scannable terminal output.
   - **Acceptance Criteria:**
     - **Section order (live block, top to bottom):**
@@ -1082,7 +1111,7 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
 
-- [ ] **Fix `verdict: null` — handle Codex reviews that complete without a parseable verdict line** — when Codex finishes a review but its output contains no `VERDICT: APPROVE|NEEDS WORK|BLOCK` line, the current code logs `verdict: null` and posts the comment without a verdict badge. The missing verdict silently degrades the review experience and breaks downstream features (`diagnose` verdict counts, `impact` BLOCK metrics). This fix adds a fallback extraction pass, a warning comment annotation, and a structured log field so the failure is visible.
+- [x] **Fix `verdict: null` — handle Codex reviews that complete without a parseable verdict line** — when Codex finishes a review but its output contains no `VERDICT: APPROVE|NEEDS WORK|BLOCK` line, the current code logs `verdict: null` and posts the comment without a verdict badge. The missing verdict silently degrades the review experience and breaks downstream features (`diagnose` verdict counts, `impact` BLOCK metrics). This fix adds a fallback extraction pass, a warning comment annotation, and a structured log field so the failure is visible.
   - **User:** Anyone running `crosscheck watch`/`serve` with Codex as the reviewer — especially on large diffs where Codex may truncate or reformat output.
   - **Acceptance Criteria:**
     - Primary extraction: scan the full Codex output for the last line matching `/^VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)/i`. Case-insensitive; tolerate `NEEDS_WORK` and `NEEDS WORK` spellings.

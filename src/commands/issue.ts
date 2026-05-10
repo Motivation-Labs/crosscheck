@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'fs'
+import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
 import { homedir, platform, tmpdir } from 'os'
@@ -16,6 +16,39 @@ const __dirname = dirname(__filename)
 const PACKAGE_ROOT = resolve(__dirname, '..', '..')
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 const ISSUE_REPO = 'Motivation-Labs/crosscheck'
+
+function loadIssueHarness(cwd: string): string {
+  const candidates = [
+    join(cwd, 'ISSUE.md'),
+    join(cwd, '.crosscheck', 'ISSUE.md'),
+    join(PACKAGE_ROOT, 'ISSUE.md'),
+  ]
+  for (const p of candidates) {
+    if (existsSync(p)) return readFileSync(p, 'utf8')
+  }
+  return ''
+}
+
+function loadRawLogEntries(since: string): RawLogEntry[] {
+  if (!existsSync(LOG_DIR)) return []
+  const sinceMs = new Date(since).getTime()
+  const entries: RawLogEntry[] = []
+  for (const f of readdirSync(LOG_DIR).sort()) {
+    if (!f.endsWith('.ndjson')) continue
+    const fileDate = f.replace('.ndjson', '')
+    if (fileDate < since.slice(0, 10)) continue
+    const lines = readFileSync(join(LOG_DIR, f), 'utf8').split('\n')
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const entry = JSON.parse(trimmed) as RawLogEntry
+        if (new Date(entry.ts as string).getTime() >= sinceMs) entries.push(entry)
+      } catch { /* skip malformed lines */ }
+    }
+  }
+  return entries
+}
 
 const { version: PKG_VERSION } = JSON.parse(
   readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'),
@@ -122,6 +155,45 @@ function buildAgentPrompt(
   ].filter(Boolean).join('\n')
 }
 
+function buildOpportunityPrompt(
+  harness: string,
+  entries: RawLogEntry[],
+  daysSince: number,
+  mode: string,
+): string {
+  const sample = entries
+    .filter(e => ['session_start', 'session_end', 'tunnel_opened', 'tunnel_closed',
+      'tunnel_error', 'webhook_registered', 'webhook_error', 'pr_received',
+      'review_complete', 'verdict_parse_failed', 'error'].includes(e.event as string))
+    .map(e => JSON.stringify(sanitizeEntry(e)))
+    .join('\n')
+
+  return [
+    harness,
+    '',
+    '---',
+    '',
+    `## Log data to analyze (last ${daysSince} day${daysSince !== 1 ? 's' : ''})`,
+    '',
+    `Environment: crosscheck ${PKG_VERSION} · ${platform()} · mode: ${mode}`,
+    `Total events loaded: ${entries.length}`,
+    '',
+    'Filtered events (session lifecycle, tunnel, webhook, review):',
+    '```',
+    sample || '(no matching events in range)',
+    '```',
+    '',
+    'Apply the analysis framework above. Identify the highest-priority issue or',
+    'improvement opportunity present in this data. Output exactly:',
+    'TITLE: <concise title under 80 characters>',
+    'LABELS: <comma-separated labels>',
+    '---',
+    '<issue body per the Output format section above>',
+    '',
+    'Report one issue only — the highest priority finding.',
+  ].join('\n')
+}
+
 async function runWithClaude(prompt: string): Promise<string> {
   let result
   try {
@@ -182,6 +254,7 @@ export async function runIssue(opts: {
   dryRun?: boolean
   yes?: boolean
   config?: string
+  opportunities?: boolean
 }): Promise<void> {
   const since = opts.since ?? defaultSince()
 
@@ -189,6 +262,90 @@ export async function runIssue(opts: {
     console.error(chalk.yellow('No logs found. Run `crosscheck watch` or `crosscheck serve` first.'))
     return
   }
+
+  const config = loadConfig(opts.config)
+  const days = daysBetween(since)
+
+  // --- Opportunity analysis mode (--opportunities) ---
+  if (opts.opportunities) {
+    const harness = loadIssueHarness(process.cwd())
+    if (!harness) {
+      console.error(chalk.red('✗ ISSUE.md harness not found — expected at project root or .crosscheck/ISSUE.md'))
+      process.exit(1)
+    }
+
+    console.log(chalk.dim('  loading logs for opportunity analysis...'))
+    const allEntries = loadRawLogEntries(since)
+    if (allEntries.length === 0) {
+      console.log('  No log entries found in range — nothing to analyze')
+      return
+    }
+    console.log(chalk.dim(`  ${allEntries.length} events across ${days} day${days !== 1 ? 's' : ''}`))
+
+    const prompt = buildOpportunityPrompt(harness, allEntries, days, config.mode)
+
+    const candidates: Array<'claude' | 'codex'> = []
+    try {
+      const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
+      candidates.push(sel.agent)
+    } catch {
+      candidates.push('claude')
+    }
+    const fallback = (['claude', 'codex'] as const).find(
+      v => !candidates.includes(v) && config.vendors[v].enabled,
+    )
+    if (fallback) candidates.push(fallback)
+
+    let agentOutput: string | undefined
+    for (let i = 0; i < candidates.length; i++) {
+      const agent = candidates[i] as 'claude' | 'codex'
+      const reason = i === 0 ? 'selected by optimize logic' : `fallback — ${candidates[i - 1]} failed`
+      console.log(chalk.dim(`  analyzing with ${agent} (${reason})...`))
+      try {
+        agentOutput = agent === 'claude'
+          ? await runWithClaude(prompt)
+          : await runWithCodex(prompt)
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const hasNext = i < candidates.length - 1
+        console.error(chalk.yellow(`  ✗ ${agent} failed: ${msg}${hasNext ? ' — trying next agent...' : ''}`))
+      }
+    }
+
+    if (agentOutput === undefined) {
+      console.error(chalk.red('✗ all configured agents failed'))
+      process.exit(1)
+    }
+
+    const draftParsed = parseDraft(agentOutput)
+    if (!draftParsed) {
+      console.error(chalk.red('✗ Agent returned unexpected output format'))
+      console.error(chalk.dim('  Expected: TITLE: line, then ---, then body'))
+      process.exit(1)
+    }
+
+    const cleanDraft = sanitizeDraftContent(draftParsed.title, draftParsed.body)
+    printDraft(cleanDraft.title, cleanDraft.body)
+
+    if (opts.dryRun) {
+      console.log(chalk.dim('  (dry run — not submitting)'))
+      return
+    }
+
+    if (!opts.yes) {
+      const confirmed = await ask(`  Submit to ${ISSUE_REPO}? [y/N]: `)
+      if (!/^y(es)?$/i.test(confirmed)) {
+        console.log('  Cancelled.')
+        return
+      }
+    }
+
+    await submitIssue(cleanDraft.title, cleanDraft.body, ['improvement'])
+    return
+  }
+
+  // --- Default mode: error-pattern bug report ---
 
   // 1. Scan logs for error patterns
   console.log(chalk.dim('  scanning logs...'))
@@ -202,7 +359,6 @@ export async function runIssue(opts: {
   // 2. Select which error to report
   let errorIdx = 0
   if (report.errors.length > 1 && !opts.yes) {
-    const days = daysBetween(since)
     console.log(chalk.bold(`\n  Found ${report.errors.length} error patterns in the last ${days} day${days !== 1 ? 's' : ''}:\n`))
     report.errors.forEach((e, i) => {
       const label = errorLabel(e).padEnd(44)
@@ -229,7 +385,6 @@ export async function runIssue(opts: {
   )
 
   // 4. Select agents — primary first, then other enabled vendor as fallback
-  const config = loadConfig(opts.config)
   const candidates: Array<'claude' | 'codex'> = []
   let primaryReason = 'default'
   try {
@@ -245,7 +400,6 @@ export async function runIssue(opts: {
   if (fallbackVendor) candidates.push(fallbackVendor)
 
   // 5. Draft issue via AI agent — try each candidate in order
-  const days = daysBetween(since)
   const prompt = buildAgentPrompt(
     errorLabel(selected),
     selected.count,
@@ -335,6 +489,10 @@ export async function runIssue(opts: {
   const labels = ['bug']
   if (answers.impact === 'Blocked') labels.push('priority:high')
 
+  await submitIssue(title, body, labels)
+}
+
+async function submitIssue(title: string, body: string, labels: string[]): Promise<void> {
   const ghArgs = [
     'issue', 'create',
     '--repo', ISSUE_REPO,
@@ -354,7 +512,6 @@ export async function runIssue(opts: {
     } else {
       console.error(chalk.yellow(`  gh issue create failed: ${msg}`))
     }
-    // Fall back to printing the command the user can run manually
     const escapedTitle = title.replace(/'/g, "'\\''")
     const escapedBody = body.replace(/'/g, "'\\''")
     const labelsStr = labels.map(l => `--label '${l}'`).join(' ')

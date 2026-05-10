@@ -11,6 +11,7 @@
     "dist",
     "crosscheck.config.example.yml",
     "AGENT.md",
+    "ISSUE.md",
     "README.md",
     "README.zh.md",
     "get-started.md",

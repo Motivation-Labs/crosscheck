@@ -133,10 +133,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         results[step.name] = { skipped: true }
         continue
       }
-      // Respect post_review.auto_fix config
-      const autoFix = config.post_review.auto_fix
-      if (!autoFix.enabled || autoFix.trigger === 'never') {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'auto_fix_disabled' })
+
+      // Migration gate: honor legacy opt-out fields while users migrate to workflow.yml.
+      // If the config has auto_fix.enabled: false or trigger: never, skip and warn.
+      const legacyDisabled = config.post_review.auto_fix.enabled === false
+        || config.post_review.auto_fix.trigger === 'never'
+      if (legacyDisabled) {
+        log(chalk.yellow(`⚠  auto_fix.enabled/trigger are deprecated — remove them from config and add a "when:" condition to the fix step in workflow.yml instead`))
+        fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'legacy_auto_fix_disabled' })
         results[step.name] = { skipped: true }
         continue
       }
@@ -149,29 +153,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // min_severity gate: BLOCK=error, NEEDS_WORK=warning, APPROVE=info
-      if (autoFix.trigger === 'on_issues') {
-        const verdictRank: Record<string, number> = { BLOCK: 2, NEEDS_WORK: 1, APPROVE: 0 }
-        const severityRank: Record<string, number> = { error: 2, warning: 1, info: 0 }
-        const minRank = severityRank[autoFix.min_severity] ?? 1
-        const actualRank = verdictRank[reviewResult.verdict ?? ''] ?? 0
-        if (actualRank < minRank) {
-          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'below_min_severity', verdict: reviewResult.verdict })
-          results[step.name] = { skipped: true }
-          continue
-        }
-      }
-
-      // Derive vendor from autoFix.fixer, not from the workflow step's reviewer field
-      let vendor: 'claude' | 'codex' | null
-      if (autoFix.fixer === 'same-as-author') {
-        vendor = resolveReviewer('origin', origin, config)
-      } else if (autoFix.fixer === 'same-as-reviewer') {
-        vendor = resolveReviewer('auto', origin, config)
-      } else {
-        vendor = resolveReviewer(autoFix.fixer, origin, config)
-      }
-
+      // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
+      // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
+      const vendor = resolveReviewer(step.reviewer, origin, config)
       if (!vendor) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_vendor' })
         results[step.name] = { skipped: true }
@@ -227,7 +211,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      const deliveryMode = autoFix.delivery.mode
+      const deliveryMode = config.post_review.auto_fix.delivery.mode
 
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
@@ -262,7 +246,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ctx.crosscheckShas.add(newSha)
 
         const octokit = createGithubClient(token)
-        const fixPrTitle = autoFix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
+        const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
         const { data: fixPr } = await octokit.rest.pulls.create({
           owner,
           repo: repoName,
@@ -271,10 +255,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           title: fixPrTitle,
           body: `Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         })
-        if (autoFix.delivery.label) {
+        if (config.post_review.auto_fix.delivery.label) {
           try {
             await octokit.rest.issues.addLabels({
-              owner, repo: repoName, issue_number: fixPr.number, labels: [autoFix.delivery.label],
+              owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
             })
           } catch { /* label may not exist in this repo — skip */ }
         }

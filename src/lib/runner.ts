@@ -134,6 +134,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
+      // Migration gate: honor legacy opt-out fields while users migrate to workflow.yml.
+      // If the config has auto_fix.enabled: false or trigger: never, skip and warn.
+      const legacyDisabled = config.post_review.auto_fix.enabled === false
+        || config.post_review.auto_fix.trigger === 'never'
+      if (legacyDisabled) {
+        log(chalk.yellow(`⚠  auto_fix.enabled/trigger are deprecated — remove them from config and add a "when:" condition to the fix step in workflow.yml instead`))
+        fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'legacy_auto_fix_disabled' })
+        results[step.name] = { skipped: true }
+        continue
+      }
+
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
       if (!reviewResult?.commentBody) {

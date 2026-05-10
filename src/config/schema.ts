@@ -103,6 +103,10 @@ export const PostReviewDeliverySchema = z.object({
 // mechanism — how fixes land on the PR — which is operational config, not pipeline logic.
 export const PostReviewFixSchema = z.object({
   delivery: PostReviewDeliverySchema.default({}),
+  // Migration compat: honored with a deprecation warning but no longer the control plane.
+  // Remove these from config and use workflow.yml to control when fix steps run.
+  enabled: z.boolean().optional(),
+  trigger: z.enum(['on_issues', 'always', 'never']).optional(),
 })
 
 export const PostReviewConfigSchema = z.object({

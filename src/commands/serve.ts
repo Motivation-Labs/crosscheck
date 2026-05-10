@@ -272,7 +272,7 @@ export async function runServe(opts: ServeOpts = {}) {
     console.log(chalk.dim('Listening for pull_request events...\n'))
 
     // Backtrace: find open PRs that haven't been reviewed yet
-    if (opts.backtrace === true || config.backtrace.enabled) {
+    if (opts.backtrace === true || (opts.backtrace !== false && config.backtrace.enabled)) {
       void (async () => {
         try {
           board.log('backtrace: scanning open PRs in monitored scope...')

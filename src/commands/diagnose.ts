@@ -336,7 +336,7 @@ function printReport(report: DiagnoseReport): void {
     for (const s of suggestions) {
       const icon = s.type === 'add_constraint' ? chalk.yellow('→') : chalk.dim('→')
       console.log(`    ${icon} ${s.reason}`)
-      if (s.instruction) console.log(`      ${chalk.cyan(`add to instructions.md: "${s.instruction}"`)}`)
+      if (s.instruction) console.log(`      ${chalk.cyan(`add to workflow.yml review step instructions: "${s.instruction}"`)}`)
     }
     console.log()
     console.log(chalk.dim('  Run `crosscheck optimize` to apply suggestions automatically.'))

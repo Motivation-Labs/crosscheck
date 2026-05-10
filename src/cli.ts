@@ -96,7 +96,7 @@ program
 program
   .command('optimize')
   .description('Use AI to improve review instructions based on diagnose output')
-  .option('--apply', 'write the improved instructions to ~/.crosscheck/instructions.md')
+  .option('--apply', 'write the improved instructions to the review step in ~/.crosscheck/workflow.yml')
   .option('--dry-run', 'show diff without writing (default behavior)')
   .option('--agent <vendor>', 'force a specific agent: claude | codex')
   .option('--since <date>', 'limit the diagnose window (YYYY-MM-DD)')

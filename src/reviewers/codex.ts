@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
-import { readInstructions } from '../lib/instructions.js'
+import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
 function extractErrorSummary(stderr: string): string | undefined {
@@ -54,8 +54,7 @@ export async function runCodexReview(
     ? `Focus areas: ${quality.focus.join(', ')}. `
     : ''
   const customNote = quality.custom_prompt ?? ''
-  // stepInstructions from workflow step takes precedence; fall back to ~/.crosscheck/instructions.md
-  const behaviorInstructions = stepInstructions !== undefined ? stepInstructions : readInstructions(repoDir)
+  const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
   const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)

@@ -603,7 +603,7 @@ crosscheck diagnose
 
   Suggestions
     → tsc: command not found ×2 (codex)
-      add to instructions.md: "Do not run tsc, ts-node, or tsx."
+      add to workflow.yml review step instructions: "Do not run tsc, ts-node, or tsx."
     → base branch 'staging' not found ×2 — verify branch is fetched before review
 
   Run `crosscheck optimize` to apply suggestions automatically.
@@ -618,7 +618,7 @@ crosscheck diagnose
 
 ### `crosscheck optimize`
 
-Runs `diagnose` internally, selects the best available AI agent, and generates an improved `~/.crosscheck/instructions.md`. Dry-run by default — shows a diff without writing.
+Runs `diagnose` internally, selects the best available AI agent, and generates improved instructions for the review step in `~/.crosscheck/workflow.yml`. Dry-run by default — shows a diff without writing.
 
 ```bash
 crosscheck optimize             # show diff only
@@ -630,7 +630,7 @@ crosscheck optimize --agent codex --apply
   Running diagnose...
   agent    claude  (default — both enabled, no data)
 
-  diff  /Users/you/.crosscheck/instructions.md
+  diff  /Users/you/.crosscheck/workflow.yml (review step)
 
   +## Constraints
   +
@@ -638,7 +638,7 @@ crosscheck optimize --agent codex --apply
   +- Do not run npm, npx, yarn, or pnpm.
   ...
 
-  Run with --apply to write changes to ~/.crosscheck/instructions.md
+  Run with --apply to write changes to /Users/you/.crosscheck/workflow.yml (review step)
 ```
 
 **Which agent does `optimize` use?**
@@ -652,7 +652,7 @@ crosscheck optimize --agent codex --apply
 
 | Flag | Description |
 |---|---|
-| `--apply` | Write the improved instructions (default is dry-run) |
+| `--apply` | Write the improved instructions to the review step in `~/.crosscheck/workflow.yml` (default is dry-run) |
 | `--dry-run` | Show diff without writing (default behavior, explicit alias) |
 | `--agent <claude\|codex>` | Force a specific agent regardless of config or log data |
 | `--since <YYYY-MM-DD>` | Limit the diagnose window used as input |
@@ -770,8 +770,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 | File | Written by | Read by | Purpose |
 |---|---|---|---|
 | `config.yml` | `onboard`, `init`, `watch`/`serve` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
-| `workflow.yml` | `onboard` (recheck preset only) | `watch`, `serve`, `run` | Global pipeline steps. Written once when you choose review→fix→recheck; left unchanged on re-runs unless you change the pipeline |
-| `instructions.md` | `optimize --apply` | `watch`, `serve`, `run` | Reviewer constraints injected into every review prompt. Grows smarter over time |
+| `workflow.yml` | `onboard` (first run only) | `watch`, `serve`, `run` | Global pipeline steps with per-step inline instructions. Written once on first onboard; never overwritten on re-runs — edit freely |
 | `webhook-secret` | auto-generated on first use | `watch`, `serve` | HMAC secret for GitHub webhook signature verification — reused across restarts |
 | `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
 
@@ -791,7 +790,7 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
-**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `instructions.md`, harness files
+**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), harness files
 
 ---
 
@@ -1122,7 +1121,7 @@ agent opens PR #42  →  opposite vendor reviews  →  issues found?
 
 ### How does crosscheck improve over time?
 
-Every review — success or failure — is appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Running `crosscheck diagnose` reads those logs and surfaces patterns: which commands failed, which reviewer is struggling, which language-specific tools were missing. Running `crosscheck optimize` feeds that report into your best-performing AI agent (guided by the bundled `AGENT.md`) and generates an improved `~/.crosscheck/instructions.md`. Both reviewers (claude and codex) read `instructions.md` before every review, so the improvements take effect immediately on the next PR.
+Every review — success or failure — is appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Running `crosscheck diagnose` reads those logs and surfaces patterns: which commands failed, which reviewer is struggling, which language-specific tools were missing. Running `crosscheck optimize` feeds that report into your best-performing AI agent (guided by the bundled `AGENT.md`) and updates the `instructions` field of the review step in `~/.crosscheck/workflow.yml`. The improvements take effect immediately on the next PR.
 
 ### Which agent does `crosscheck optimize` use?
 
@@ -1156,12 +1155,9 @@ steps:
     instructions: "Only fix issues explicitly called out. Do not refactor unrelated code."
 ```
 
-`~/.crosscheck/instructions.md` serves as a fallback when a workflow step has no `instructions:` field. `crosscheck optimize --apply` writes to that file to persist learned improvements across sessions.
+`crosscheck optimize --apply` updates the review step's `instructions` field in `~/.crosscheck/workflow.yml` to persist learned improvements across sessions.
 
-To reset instructions.md to defaults, delete the file:
-```bash
-rm ~/.crosscheck/instructions.md
-```
+To reset the review step instructions to defaults, delete `~/.crosscheck/workflow.yml` and re-run `crosscheck onboard` — it will regenerate the file with the built-in defaults.
 
 ### Can I have per-project workflow?
 
@@ -1175,7 +1171,7 @@ You can override it by placing an `AGENT.md` at your project root or `.crosschec
 
 ### Why did my review fail with "command not found"?
 
-The reviewer (codex or claude) tried to run a CLI tool (e.g. `tsc`, `pytest`) that isn't available in the temporary clone. The clone is a shallow `git` checkout with no `node_modules` or other installed dependencies. Run `crosscheck diagnose` to see which commands failed, then `crosscheck optimize --apply` to add the appropriate constraints to `instructions.md` so the reviewer stops trying.
+The reviewer (codex or claude) tried to run a CLI tool (e.g. `tsc`, `pytest`) that isn't available in the temporary clone. The clone is a shallow `git` checkout with no `node_modules` or other installed dependencies. Run `crosscheck diagnose` to see which commands failed, then `crosscheck optimize --apply` to add the appropriate constraints to the review step in `~/.crosscheck/workflow.yml` so the reviewer stops trying.
 
 ### Why did my review fail with "no such branch"?
 
@@ -1215,4 +1211,4 @@ The authoring agent has the most context about its own code — the same style, 
 
 ### Does optimize run automatically?
 
-No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `instructions.md`.
+No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `~/.crosscheck/workflow.yml`.

@@ -761,6 +761,40 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 ---
 
+## Customization home
+
+`~/.crosscheck/` is the persistent home for everything crosscheck learns and configures. Back it up before a machine migration and a reinstall is instant — run `crosscheck onboard` and press Enter through each step to confirm your previous settings.
+
+### Files in `~/.crosscheck/`
+
+| File | Written by | Read by | Purpose |
+|---|---|---|---|
+| `config.yml` | `onboard`, `init`, `watch`/`serve` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
+| `workflow.yml` | `onboard` (recheck preset only) | `watch`, `serve`, `run` | Global pipeline steps. Written once when you choose review→fix→recheck; left unchanged on re-runs unless you change the pipeline |
+| `instructions.md` | `optimize --apply` | `watch`, `serve`, `run` | Reviewer constraints injected into every review prompt. Grows smarter over time |
+| `webhook-secret` | auto-generated on first use | `watch`, `serve` | HMAC secret for GitHub webhook signature verification — reused across restarts |
+| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
+
+### Per-project overrides (checked before the global files)
+
+| File | Read by | Purpose |
+|---|---|---|
+| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `serve`, `run` | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/AGENT.md` *(in repo)* | `optimize` | Per-project harness — takes priority over bundled `AGENT.md` |
+| `AGENT.md` *(bundled with crosscheck)* | `optimize` | Default harness — shipped with the package, always available as fallback |
+
+### What `crosscheck onboard` owns vs. preserves
+
+On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
+
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+
+**Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
+
+**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `instructions.md`, harness files
+
+---
+
 ## Configuration
 
 crosscheck stores its config in `~/.crosscheck/config.yml` by default — persistent across projects, no per-repo file needed. It also looks in these locations (first found wins):

@@ -195,6 +195,27 @@ Full configuration reference: [get-started.md](./get-started.md)
 
 ---
 
+## Customization home
+
+Everything crosscheck learns and every choice you make persists in `~/.crosscheck/`. Back this directory up and a reinstall is instant — just run `crosscheck onboard` and press Enter through each step to confirm your previous settings.
+
+| File | Written by | Purpose |
+|---|---|---|
+| `config.yml` | `onboard`, `init` | Deployment, repos, mode, vendors, quality tier, tunnel, routing, budget |
+| `workflow.yml` | `onboard` (recheck preset) | Global pipeline steps — review → fix → recheck. Never overwritten unless you change the pipeline preset |
+| `instructions.md` | `optimize --apply` | Reviewer constraints injected into every review. Grows smarter with each `optimize` run |
+| `webhook-secret` | auto-generated | HMAC secret for GitHub webhook verification. Reused across restarts |
+| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | Structured review event log — feeds `diagnose`, `optimize`, `impact` |
+
+Per-project overrides (checked before the global files):
+
+| File | Purpose |
+|---|---|
+| `.crosscheck/workflow.yml` *(in repo)* | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/AGENT.md` *(in repo)* | Per-project harness for `crosscheck optimize` — takes priority over bundled `AGENT.md` |
+
+---
+
 ## Self-improving reviews
 
 Every review outcome is logged to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Over time, patterns emerge — which commands the reviewer tries to run (and fails), verdict distributions, review duration trends.

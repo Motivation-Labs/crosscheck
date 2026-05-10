@@ -86,6 +86,112 @@ Detection step 4 (PR comments) scans for `<!-- crosscheck: origin=... -->` tags 
 
 **Why this matters**: the first time crosscheck reviews a PR, attribution may be inferred from patterns. On follow-up events (new commits, recheck), the annotation provides a durable, precise attribution record — no re-inference needed.
 
+### P4 — Agent behavior is governed by a harness system
+
+Every time crosscheck invokes an AI agent — to review a PR, apply a fix, recheck after
+changes, improve review instructions, or analyze logs — the agent's behavior is defined
+by a **harness file**: a plain Markdown document that specifies what the agent receives,
+what it must do, and what format it must output. No agent behavior is hardcoded in
+TypeScript prompt strings. Logic lives in harness files.
+
+---
+
+#### The three-layer stack
+
+```
+workflow.yml          — declares steps and which harness section governs each
+    ↓  cites
+AGENT.md              — behavioral specification for all PR workflow steps
+    ↓  produces
+instructions.md       — persistent reviewer constraints, injected into every review call
+```
+
+At the bottom, `instructions.md` is what actually gets injected into `claude` and `codex`
+during review. It is maintained automatically by `crosscheck optimize`, which reads
+`AGENT.md` to know how to improve it.
+
+---
+
+#### Harness files
+
+**`AGENT.md`** — the master behavioral guide, shipped with the package.
+
+Has one section per workflow step. Each section is self-contained: it defines what data
+the agent receives, what it must produce, and what constraints apply.
+
+| Section | Used by | What it governs |
+|---|---|---|
+| `## optimize` | `crosscheck optimize` | How to read `diagnose` output and improve `instructions.md` |
+| `## review` | `crosscheck review`, `crosscheck watch/serve` | How the reviewer agent should analyze a PR diff and produce a VERDICT |
+| `## fix` | address step in `crosscheck run` | How the fixer agent should apply changes based on review findings |
+| `## recheck` | recheck step in `crosscheck run` | How the re-reviewer should verify fixes and produce a final VERDICT |
+
+`workflow.yml` steps cite a section by name (`harness: AGENT.md#review`). At runtime,
+crosscheck reads the named section and prepends it to the agent invocation. The agent
+receives: harness section + `instructions.md` constraints + PR diff/context.
+
+**`ISSUE.md`** — specialized harness for `crosscheck issue --opportunities`.
+
+Guides an agent to analyze `~/.crosscheck/logs/*.ndjson` for session stability, tunnel
+reliability, and process health patterns — and draft a GitHub issue for the
+highest-priority finding. Uses the same override chain as `AGENT.md`.
+
+---
+
+#### Override chain (identical for every harness)
+
+```
+{cwd}/<FILE>.md
+{cwd}/.crosscheck/<FILE>.md
+{packageRoot}/<FILE>.md     ← bundled fallback, always present after npm install
+```
+
+The first file found wins. Teams can ship a custom `AGENT.md` in their repo to override
+review behavior for their stack without forking crosscheck.
+
+---
+
+#### How workflow.yml cites harnesses
+
+```yaml
+# .crosscheck/workflow.yml
+steps:
+  - type: review
+    harness: AGENT.md#review          # injects ## review section into the reviewer agent
+  - type: fix
+    harness: AGENT.md#fix             # injects ## fix section into the fixer agent
+    when: verdict != APPROVE
+  - type: recheck
+    harness: AGENT.md#review          # same review harness for consistency
+    when: fix.applied == true
+```
+
+When `harness` is omitted from a step, crosscheck injects only `instructions.md` — the
+current behavior. When `harness` is present, it prepends the named section before
+`instructions.md`.
+
+A project may supply a custom section by placing a local `AGENT.md` with a `## review`
+override — crosscheck picks it up via the override chain automatically.
+
+---
+
+#### Rules for harness files
+
+- Plain Markdown only — no code, no secrets, no runtime-generated content
+- Keep each file under 400 lines — longer files reduce instruction-following fidelity
+- Each section must define: (1) what data the agent receives, (2) what it must produce,
+  (3) exact output format the TypeScript caller parses
+- Output format changes are breaking — bump minor version and update the parser together
+- Every harness file ships in `package.json` `files` so it is always present after `npm install`
+
+#### Adding a harness for a new command
+
+1. Add a `## <step-name>` section to `AGENT.md` (or create a new `<NAME>.md` for a
+   distinct concern like `ISSUE.md`)
+2. Add `load<Name>Harness(cwd)` using the three-path override chain
+3. Add the file to `package.json` `files`
+4. Update the harness table above
+
 ---
 
 ## Current Status (v0.1.x)
@@ -154,6 +260,19 @@ These four items fix the two-phase model described in Design Principles. Any new
 
 - [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
 
+- [x] **`crosscheck onboard` destroys existing config customizations on re-run** — fixed in PR #74. All write logic extracted into `applyOnboardConfig`; routing.* fields now initialised on first run only and preserved exactly on re-runs; workflow.yml only written when it doesn't already exist and only deleted when the pipeline explicitly changes away from recheck.
+
+- [ ] **review → fix → re-check loop is not implemented** — `crosscheck onboard` lets users select the `review-fix-recheck` pipeline and writes `~/.crosscheck/workflow.yml`, but no execution engine reads or runs that file during `watch`/`serve`. The `post_review.auto_fix` config drives a single fix pass; there is no loop that re-reviews after the fix to confirm issues are resolved.
+  - **User:** Anyone who selected `review → fix → re-check` during onboard and expects a full loop.
+  - **Acceptance Criteria:**
+    - `loadWorkflow()` in `src/lib/workflow.ts` resolves `workflow.yml` via the override chain: `{cwd}/.crosscheck/workflow.yml` → `~/.crosscheck/workflow.yml` → built-in default.
+    - For a three-step workflow (review → fix → recheck): after the fix step completes and `fix.applied_count > 0`, the recheck step runs the reviewer again on the updated branch.
+    - Verdict from the recheck step is posted as a follow-up comment on the original PR.
+    - If no fix was applied (reviewer approved or fixer found nothing to change), the recheck step is skipped.
+    - Loop terminates after `max_rounds` per step (default: 1) — no infinite looping.
+  - **Technical Notes:** `src/lib/workflow.ts` has the schema and `loadWorkflow()` but the step execution logic in `watch.ts`/`serve.ts` only runs a single review pass. The fix step (`post_review.auto_fix`) is partially implemented but the recheck step after fix is missing. The `workflow.yml` `when:` condition (`fix.applied_count > 0`) requires a step-result context object to be threaded through the execution loop.
+  - **Tests Required:** mock workflow with review → fix → recheck; assert recheck fires only when `fix.applied_count > 0`; assert loop stops at `max_rounds: 1`; assert recheck is skipped when review verdict is APPROVE.
+
 ---
 
 ### 🔜 Next Up
@@ -179,6 +298,43 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/lib/workflow.ts`: `loadWorkflow` candidates array extended with `join(homedir(), '.crosscheck', 'workflow.yml')`.
     - Global workflow.yml only written for the `review-fix-recheck` preset; `review-only` and `review-fix` are handled entirely through config fields.
   - **Related items:** Custom Workflow Engine (workflow.yml schema), Post-Review Auto-Fix (auto_fix config), Deployment Mode (patchDeploymentConfig pattern). The global workflow.yml fallback unblocks the full review→fix→recheck loop for users who don't have a per-project workflow file.
+
+- [ ] **`~/.crosscheck/` as the persistent customization home — document all files and their roles** — crosscheck accumulates customization across multiple commands (`onboard`, `optimize`, manual edits). Today these relationships are implicit. Formalise the full file map in docs and in `crosscheck status` output so users know exactly what they have configured and how it is consumed.
+  - **User:** Anyone who wants to understand what crosscheck has remembered, back it up, or restore it after a reinstall.
+  - **Acceptance Criteria:**
+    - `get-started.md` has a dedicated "Customization home" section that lists every file in `~/.crosscheck/`, what writes it, what reads it, and which fields are owned vs user-managed.
+    - `README.md` has a brief "Customization files" table linking to the full section.
+    - `crosscheck status` output includes a "files" row listing which customization files exist (✓ present / — absent): `config.yml`, `workflow.yml`, `instructions.md`, `webhook-secret`, `logs/`.
+    - The complete file map (canonical reference):
+
+      | File | Written by | Read by | Purpose |
+      |---|---|---|---|
+      | `~/.crosscheck/config.yml` | `onboard`, `init`, `watch` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
+      | `~/.crosscheck/workflow.yml` | `onboard` (recheck preset only) | `watch`, `serve`, `run` | Global pipeline steps override — written once, never overwritten unless explicitly changed |
+      | `~/.crosscheck/instructions.md` | `optimize --apply` | `watch`, `serve`, `run` (injected into every review prompt) | Learned reviewer constraints — grows over time via optimize |
+      | `~/.crosscheck/webhook-secret` | `init`, `watch` (auto-generated) | `watch`, `serve` | HMAC secret for GitHub webhook signature verification |
+      | `~/.crosscheck/logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log — one file per day, 7-day retention |
+      | `.crosscheck/workflow.yml` *(in repo)* | manual | `watch`, `serve`, `run` | Per-project pipeline override — takes priority over global |
+      | `.crosscheck/AGENT.md` *(in repo)* | manual | `optimize` | Per-project harness override — takes priority over bundled |
+      | `AGENT.md` *(bundled)* | npm package | `optimize` | Default harness — defines how `optimize` builds reviewer instructions |
+
+    - Ownership rules (enforced by `applyOnboardConfig`):
+      - `onboard` owns: `deployment`, `orgs`, `repos`, `mode`, `vendors.*.enabled/effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+      - `onboard` initialises on first run only: `routing.*` (never overwritten on re-runs)
+      - `onboard` never touches: `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `instructions.md`, harness files
+  - **Technical Notes:** `crosscheck status` already reads config; extend it to check for the existence of each `~/.crosscheck/` file and print a summary row. No schema changes needed.
+  - **Tests Required:** status output includes files row; each file shows correct ✓/— based on filesystem state.
+
+- [ ] **Smart onboard re-run — "last choice" indicators and instant re-confirm** — re-running `crosscheck onboard` after a reinstall or on a new machine should feel instant. Since `~/.crosscheck/config.yml` persists, every picker can pre-select the previous answer and mark it visually, letting the user press Enter through all steps to confirm without re-reading every option.
+  - **User:** Anyone re-running onboard after `npm install -g @motivation-labs/crosscheck` (upgrade or fresh machine with backed-up `~/.crosscheck/`).
+  - **Acceptance Criteria:**
+    - Each `promptSinglePicker` step pre-selects the value from the existing config (already done via `defaultIndex`).
+    - The pre-selected item shows a `(current)` suffix appended to its description line so users can visually confirm they are accepting the previous value, not a random default.
+    - A one-line dim header appears at the top of `crosscheck onboard` when a config is detected: `Resuming from ~/.crosscheck/config.yml — press Enter to keep each setting.`
+    - `crosscheck onboard --yes` is the fully silent re-confirm path: reads config, applies all previous values, writes config, exits. Zero prompts. Suitable for scripted reinstalls.
+    - Repo picker pre-selects repos from `config.repos` + orgs from `config.orgs` (already done via `initialSelected`).
+  - **Technical Notes:** The description suffix `(current)` is appended in-place in `promptVendorMode`, `promptQualityTier`, `promptWorkflowPipeline`, `promptConnectionType` when the item matches the existing config value. No change to `promptSinglePicker` signature needed — use the `description` field.
+  - **Tests Required:** When existing config has `quality.tier: thorough`, the `thorough` item's description includes `(current)`. When no config exists, no `(current)` suffix appears on any item.
 
 - [ ] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
   - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants a cleaner, scannable terminal output.

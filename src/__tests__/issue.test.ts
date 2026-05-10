@@ -227,6 +227,24 @@ describe('parseDraft', () => {
     const result = parseDraft(output)
     expect(result?.body).toContain('some --- in content')
   })
+
+  it('parses LABELS line between TITLE and separator', () => {
+    const output = 'TITLE: my title\nLABELS: bug, priority:high\n---\nbody text'
+    const result = parseDraft(output)
+    expect(result?.labels).toEqual(['bug', 'priority:high'])
+  })
+
+  it('returns undefined labels when LABELS line is absent', () => {
+    const output = 'TITLE: my title\n---\nbody text'
+    const result = parseDraft(output)
+    expect(result?.labels).toBeUndefined()
+  })
+
+  it('ignores empty label values in LABELS line', () => {
+    const output = 'TITLE: my title\nLABELS: bug,  ,improvement\n---\nbody'
+    const result = parseDraft(output)
+    expect(result?.labels).toEqual(['bug', 'improvement'])
+  })
 })
 
 // ──────────────────────────────────────────────────────

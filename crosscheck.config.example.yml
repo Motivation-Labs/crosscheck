@@ -29,9 +29,17 @@ vendors:
 # ─── Quality & Focus ─────────────────────────────────────────────────────────
 quality:
   tier: balanced            # fast | balanced | thorough
-  # fast      → quick scan, top issues only (~10s, lowest cost)
-  # balanced  → full review, all issues with explanations (~30s)
-  # thorough  → deep multi-pass, security + architecture (~60s+)
+  #
+  # Tier determines the model and effort level used for each vendor:
+  #
+  #   tier       claude               codex        time     cost
+  #   ─────────  ───────────────────  ───────────  ───────  ──────
+  #   fast       haiku · low          o4-mini · low   ~10s  lowest
+  #   balanced   sonnet · medium      o4-mini · med   ~30s  standard
+  #   thorough   sonnet · max         o3 · high       ~60s  higher
+  #
+  # crosscheck onboard writes these automatically when you pick a tier.
+  # You can override individual vendor settings in the vendors: block below.
 
   focus:                    # optional — narrows review scope
     - security

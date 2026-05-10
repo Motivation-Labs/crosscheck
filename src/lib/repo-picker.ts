@@ -1,154 +1,266 @@
-import { createInterface } from 'readline'
-import chalk from 'chalk'
-import type { RepoActivity } from '../github/client.js'
+// Interactive arrow-key picker for CLI prompts.
+// Uses raw-mode TTY input — degrades gracefully when stdin is not a TTY.
 
-function daysSince(d: Date): number {
-  return Math.floor((Date.now() - d.getTime()) / 86400000)
+const HIDE_CURSOR = '\x1b[?25l'
+const SHOW_CURSOR = '\x1b[?25h'
+const ERASE_LINE = '\x1b[2K\r'
+const BOLD = '\x1b[1m'
+const DIM = '\x1b[2m'
+const CYAN = '\x1b[36m'
+const RESET = '\x1b[0m'
+
+const DEFAULT_PAGE_SIZE = 5
+
+// ── Single-select picker ─────────────────────────────────────────────────────
+
+export interface PickerItem {
+  label: string
+  description?: string  // shown dim next to label
+  hint?: string         // tip shown at the bottom when this item is focused
 }
 
-function ageLabel(r: RepoActivity): string {
-  if (r.tier === 1) {
-    const d = daysSince(r.createdAt)
-    return chalk.green(`new · created ${d === 0 ? 'today' : `${d}d ago`}`)
-  }
-  const d = daysSince(r.pushedAt)
-  return chalk.dim(`active · pushed ${d === 0 ? 'today' : `${d}d ago`}`)
-}
+// Arrow-key single-select. Returns the index of the chosen item.
+// Returns defaultIndex when stdin is not a TTY.
+export async function promptSinglePicker(
+  items: PickerItem[],
+  opts: { title?: string; defaultIndex?: number } = {},
+): Promise<number> {
+  if (!process.stdin.isTTY || items.length === 0) return opts.defaultIndex ?? 0
 
-function printRepoList(
-  visible: RepoActivity[],
-  selected: Set<string>,
-  overflowCount: number,
-  showingMore: boolean,
-): void {
-  process.stdout.write(chalk.bold('\nWhich personal repos should crosscheck monitor?\n'))
-  process.stdout.write(chalk.dim('  Numbers to toggle · m = expand list · Enter to confirm\n\n'))
-  for (let i = 0; i < visible.length; i++) {
-    const r = visible[i]
-    const num = chalk.dim(`${i + 1}`.padStart(3))
-    const box = selected.has(r.fullName) ? chalk.green('[x]') : chalk.dim('[ ]')
-    const name = r.fullName.padEnd(40)
-    process.stdout.write(`  ${num} ${box} ${name}${ageLabel(r)}\n`)
-  }
-  if (!showingMore && overflowCount > 0) {
-    process.stdout.write(chalk.dim(`\n       ${'─'.repeat(54)}\n`))
-    process.stdout.write(
-      chalk.dim(`     m  [ ] Show more  (${overflowCount} inactive repos — or add to config.yml manually)\n`),
-    )
-  }
-  process.stdout.write('\n')
-}
+  return new Promise<number>((resolve, reject) => {
+    let cursor = opts.defaultIndex ?? 0
+    let lastLineCount = 0
 
-// Interactive repo picker with 3-tier display:
-// Tier 1 (< 7d old) shown first and pre-selected — signals active new work
-// Tier 2 (pushed < 90d) shown next, sorted by recency
-// Tier 3 (inactive) hidden behind "m" expansion
-export async function promptRepoPicker(repos: RepoActivity[], defaults?: string[]): Promise<string[]> {
-  if (repos.length === 0) return []
+    function render(firstRender = false) {
+      if (!firstRender) {
+        process.stdout.write(`\x1b[${lastLineCount}A`)
+      }
 
-  const tier1 = repos.filter(r => r.tier === 1)
-  const tier2 = repos.filter(r => r.tier === 2)
-  const tier3 = repos.filter(r => r.tier === 3)
+      const hint = items[cursor]?.hint ?? ''
+      // title + items + hint line (always reserved) + footer
+      lastLineCount = (opts.title ? 1 : 0) + items.length + 1 + 1
 
-  const CAP = 8
-  const primary: RepoActivity[] = [...tier1, ...tier2.slice(0, Math.max(0, CAP - tier1.length))]
-  const overflow: RepoActivity[] = [...tier2.slice(Math.max(0, CAP - tier1.length)), ...tier3]
+      if (opts.title) {
+        process.stdout.write(`${ERASE_LINE}${BOLD}${opts.title}${RESET}\n`)
+      }
 
-  if (!process.stdin.isTTY) {
-    return defaults ?? [...tier1, ...tier2.slice(0, 3)].map(r => r.fullName)
-  }
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        const isFocused = cursor === i
+        const arrow = isFocused ? `${CYAN}❯${RESET}` : ' '
+        const descStr = item.description ? `  ${DIM}${item.description}${RESET}` : ''
+        const labelStr = isFocused ? `${BOLD}${item.label}${RESET}` : `${DIM}${item.label}${RESET}`
+        process.stdout.write(`${ERASE_LINE}  ${arrow} ${labelStr}${descStr}\n`)
+      }
 
-  // Default selection: all Tier 1 + first 3 Tier 2 (or caller-provided defaults)
-  const selected = new Set<string>(
-    defaults ?? [...tier1, ...tier2.slice(0, 3)].map(r => r.fullName),
-  )
-
-  let visible: RepoActivity[] = [...primary]
-  let showingMore = false
-
-  printRepoList(visible, selected, overflow.length, showingMore)
-
-  return new Promise<string[]>(resolve => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-
-    const loop = (): void => {
-      const mHint = !showingMore && overflow.length > 0 ? ', m' : ''
-      rl.question(chalk.dim(`  Toggle (1-${visible.length}${mHint}) or Enter to confirm: `), ans => {
-        const t = ans.trim().toLowerCase()
-
-        if (t === '') {
-          rl.close()
-          resolve([...selected])
-          return
-        }
-
-        if (t === 'm' && !showingMore && overflow.length > 0) {
-          showingMore = true
-          visible = [...primary, ...overflow]
-          printRepoList(visible, selected, 0, true)
-          loop()
-          return
-        }
-
-        let changed = false
-        for (const tok of t.split(/[\s,]+/).filter(Boolean)) {
-          const n = parseInt(tok, 10)
-          if (n >= 1 && n <= visible.length) {
-            const repo = visible[n - 1].fullName
-            selected.has(repo) ? selected.delete(repo) : selected.add(repo)
-            changed = true
-          }
-        }
-        if (changed) printRepoList(visible, selected, showingMore ? 0 : overflow.length, showingMore)
-        loop()
-      })
+      // Hint line: always one line so the line count stays constant between renders
+      process.stdout.write(`${ERASE_LINE}${hint ? `${DIM}  💡 ${hint}${RESET}` : ''}\n`)
+      process.stdout.write(`${ERASE_LINE}${DIM}  ↑↓ move · enter confirm${RESET}\n`)
     }
 
-    loop()
+    function cleanup(index: number) {
+      try { process.stdin.setRawMode(false) } catch { /* not raw */ }
+      process.stdin.removeAllListeners('data')
+      process.stdout.write(SHOW_CURSOR)
+      resolve(index)
+    }
+
+    function handleSigint() {
+      cleanup(opts.defaultIndex ?? 0)
+      process.exit(130)
+    }
+
+    process.stdout.write(HIDE_CURSOR)
+    render(true)
+
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding('utf8')
+    process.once('SIGINT', handleSigint)
+
+    process.stdin.on('data', (key: string) => {
+      if (key === '\x03') {
+        process.removeListener('SIGINT', handleSigint)
+        cleanup(opts.defaultIndex ?? 0)
+        process.exit(130)
+      }
+      if (key === '\x1b[A') {
+        cursor = cursor > 0 ? cursor - 1 : items.length - 1
+        render()
+      } else if (key === '\x1b[B') {
+        cursor = cursor < items.length - 1 ? cursor + 1 : 0
+        render()
+      } else if (key === '\r' || key === '\n') {
+        process.removeListener('SIGINT', handleSigint)
+        cleanup(cursor)
+      }
+    })
+
+    process.stdin.on('error', (err) => {
+      process.removeListener('SIGINT', handleSigint)
+      process.stdout.write(SHOW_CURSOR)
+      reject(err)
+    })
   })
 }
 
-function printOrgList(orgs: string[], selected: Set<string>): void {
-  process.stdout.write(chalk.bold('\nWhich orgs should crosscheck monitor?\n'))
-  process.stdout.write(chalk.dim('  Numbers to toggle · Enter to confirm\n\n'))
-  for (let i = 0; i < orgs.length; i++) {
-    const num = chalk.dim(`${i + 1}`.padStart(3))
-    const box = selected.has(orgs[i]) ? chalk.green('[x]') : chalk.dim('[ ]')
-    process.stdout.write(`  ${num} ${box} ${orgs[i]}\n`)
-  }
-  process.stdout.write('\n')
+// ── Multi-select picker ──────────────────────────────────────────────────────
+
+export interface PickerOptions {
+  title?: string
+  initialSelected?: string[]
+  pageSize?: number
+  // Optional: return dim metadata shown after each item label
+  getDescription?: (item: string) => string
 }
 
-// All orgs pre-selected by default; user toggles to deselect.
-export async function promptOrgPicker(orgs: string[], defaults?: string[]): Promise<string[]> {
-  if (orgs.length === 0) return []
-  if (!process.stdin.isTTY) return defaults ?? [...orgs]
+// Arrow-key + space multi-select. Returns selected items.
+// Returns [] when stdin is not a TTY.
+export async function promptRepoPicker(
+  items: string[],
+  opts: PickerOptions = {},
+): Promise<string[]> {
+  if (!process.stdin.isTTY) return []
+  if (items.length === 0) return []
 
-  const selected = new Set<string>(defaults ?? orgs)
-  printOrgList(orgs, selected)
+  const effectivePageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
 
-  return new Promise<string[]>(resolve => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
+  return new Promise<string[]>((resolve, reject) => {
+    let cursor = 0
+    const selected = new Set<number>(
+      opts.initialSelected
+        ? opts.initialSelected.map(s => items.indexOf(s)).filter(i => i !== -1)
+        : [],
+    )
+    let showAll = false
+    // Track how many lines the last render printed so the next re-render moves
+    // the cursor by the right amount even when showAll changes between renders.
+    let lastLineCount = 0
 
-    const loop = (): void => {
-      rl.question(chalk.dim(`  Toggle (1-${orgs.length}) or Enter to confirm: `), ans => {
-        const t = ans.trim()
-        if (t === '') { rl.close(); resolve([...selected]); return }
-
-        let changed = false
-        for (const tok of t.split(/[\s,]+/).filter(Boolean)) {
-          const n = parseInt(tok, 10)
-          if (n >= 1 && n <= orgs.length) {
-            const org = orgs[n - 1]
-            selected.has(org) ? selected.delete(org) : selected.add(org)
-            changed = true
-          }
-        }
-        if (changed) printOrgList(orgs, selected)
-        loop()
-      })
+    function visibleItems(): { item: string; index: number }[] {
+      if (showAll || items.length <= effectivePageSize) {
+        return items.map((item, index) => ({ item, index }))
+      }
+      return items.slice(0, effectivePageSize).map((item, index) => ({ item, index }))
     }
 
-    loop()
+    const visible = () => visibleItems()
+    const hasMore = () => !showAll && items.length > effectivePageSize
+
+    function render(firstRender = false) {
+      const vis = visible()
+
+      if (!firstRender) {
+        process.stdout.write(`\x1b[${lastLineCount}A`)
+      }
+      lastLineCount = (opts.title ? 1 : 0) + vis.length + (hasMore() ? 1 : 0) + 1
+
+      if (opts.title) {
+        process.stdout.write(`${ERASE_LINE}${BOLD}${opts.title}${RESET}\n`)
+      }
+
+      for (const { item, index } of vis) {
+        const isSelected = selected.has(index)
+        const isFocused = cursor === index
+        const checkStr = isSelected ? `${CYAN}[x]${RESET}` : '[ ]'
+        const desc = opts.getDescription ? opts.getDescription(item) : ''
+        const descStr = desc ? `  ${DIM}${desc}${RESET}` : ''
+        if (isFocused) {
+          process.stdout.write(`${ERASE_LINE}  ${checkStr} ${BOLD}${item}${RESET}${descStr}\n`)
+        } else {
+          process.stdout.write(`${ERASE_LINE}  ${checkStr} ${DIM}${item}${RESET}${descStr}\n`)
+        }
+      }
+
+      if (hasMore()) {
+        process.stdout.write(`${ERASE_LINE}${DIM}  ... ${items.length - effectivePageSize} more — press m to show all${RESET}\n`)
+      }
+
+      process.stdout.write(`${ERASE_LINE}${DIM}  ↑↓ move · space select · a all · enter confirm${hasMore() ? ' · m more' : ''}${RESET}\n`)
+    }
+
+    function cleanup(result: string[]) {
+      try {
+        process.stdin.setRawMode(false)
+      } catch { /* not a raw TTY */ }
+      process.stdin.removeAllListeners('data')
+      process.stdout.write(SHOW_CURSOR)
+      resolve(result)
+    }
+
+    function handleSigint() {
+      cleanup([])
+      process.exit(130)
+    }
+
+    process.stdout.write(HIDE_CURSOR)
+    render(true)
+
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding('utf8')
+
+    process.once('SIGINT', handleSigint)
+
+    process.stdin.on('data', (key: string) => {
+      if (key === '\x03') {
+        // Ctrl+C
+        process.removeListener('SIGINT', handleSigint)
+        cleanup([])
+        process.exit(130)
+      }
+
+      const vis = visible()
+      const visIndices = vis.map(v => v.index)
+      const posInVis = visIndices.indexOf(cursor)
+
+      if (key === '\x1b[A') {
+        // up arrow
+        if (posInVis > 0) {
+          cursor = visIndices[posInVis - 1]
+        } else {
+          cursor = visIndices[visIndices.length - 1]
+        }
+        render()
+      } else if (key === '\x1b[B') {
+        // down arrow
+        if (posInVis < vis.length - 1) {
+          cursor = visIndices[posInVis + 1]
+        } else {
+          cursor = visIndices[0]
+        }
+        render()
+      } else if (key === ' ') {
+        if (selected.has(cursor)) {
+          selected.delete(cursor)
+        } else {
+          selected.add(cursor)
+        }
+        render()
+      } else if (key === 'a') {
+        // Toggle only the currently visible set — hidden overflow items are never
+        // touched until the user expands with `m`.
+        const visIndicesAll = visible().map(v => v.index)
+        const allVisSelected = visIndicesAll.every(i => selected.has(i))
+        if (allVisSelected) {
+          for (const i of visIndicesAll) selected.delete(i)
+        } else {
+          for (const i of visIndicesAll) selected.add(i)
+        }
+        render()
+      } else if (key === 'm' && hasMore()) {
+        showAll = true
+        render()
+      } else if (key === '\r' || key === '\n') {
+        process.removeListener('SIGINT', handleSigint)
+        cleanup(Array.from(selected).sort((a, b) => a - b).map(i => items[i]))
+      }
+    })
+
+    process.stdin.on('error', (err) => {
+      process.removeListener('SIGINT', handleSigint)
+      process.stdout.write(SHOW_CURSOR)
+      reject(err)
+    })
   })
 }

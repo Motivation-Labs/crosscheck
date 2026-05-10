@@ -19,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git rev-list can count commits since last tag
 
       - uses: actions/setup-node@v4
         with:
@@ -31,8 +33,17 @@ jobs:
 
       - name: Stamp prerelease version
         run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          npm version prerelease --preid="beta.${SHORT_SHA}" --no-git-tag-version
+          # Strip any existing prerelease suffix so the base is always clean (e.g. 0.7.0)
+          BASE=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
+          # Count commits since the last vX.Y.Z tag; this is the beta counter.
+          # Result: 0.7.0-beta.0, 0.7.0-beta.5, 0.7.0-beta.12 — strictly increasing.
+          LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
+          if [ -n "$LAST_TAG" ]; then
+            COUNT=$(git rev-list --count "${LAST_TAG}..HEAD")
+          else
+            COUNT=$(git rev-list --count HEAD)
+          fi
+          npm version "${BASE}-beta.${COUNT}" --no-git-tag-version
 
       - name: Publish to npm @beta
         run: npm publish --tag beta --access public
@@ -47,6 +58,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git rev-list can count commits since last tag
 
       - uses: actions/setup-node@v4
         with:
@@ -59,8 +72,14 @@ jobs:
 
       - name: Stamp prerelease version
         run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          npm version prerelease --preid="alpha.${SHORT_SHA}" --no-git-tag-version
+          BASE=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
+          LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
+          if [ -n "$LAST_TAG" ]; then
+            COUNT=$(git rev-list --count "${LAST_TAG}..HEAD")
+          else
+            COUNT=$(git rev-list --count HEAD)
+          fi
+          npm version "${BASE}-alpha.${COUNT}" --no-git-tag-version
 
       - name: Publish to npm @alpha
         run: npm publish --tag alpha --access public

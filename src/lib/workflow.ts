@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { homedir } from 'os'
 import yaml from 'js-yaml'
 import { z } from 'zod'
 
@@ -20,7 +21,7 @@ export const WorkflowSchema = z.object({
 
 export type WorkflowStep = z.infer<typeof WorkflowStepSchema>
 
-const DEFAULT_REVIEW_INSTRUCTIONS = [
+export const DEFAULT_REVIEW_INSTRUCTIONS = [
   '## Constraints',
   '- Do not run tsc, ts-node, or build commands — inspect source files directly with git diff/log.',
   '- Do not install packages or modify lock files.',
@@ -31,10 +32,17 @@ const DEFAULT_REVIEW_INSTRUCTIONS = [
   'End with one of: VERDICT: APPROVE | NEEDS WORK | BLOCK',
 ].join('\n')
 
-const DEFAULT_FIX_INSTRUCTIONS = [
+export const DEFAULT_FIX_INSTRUCTIONS = [
   'Only fix issues explicitly called out in the review.',
   'Do not refactor unrelated code, rename variables, or add tests unless specifically requested.',
   'If a comment requires deeper understanding of business logic, skip it.',
+].join('\n')
+
+export const DEFAULT_RECHECK_INSTRUCTIONS = [
+  'Check that every issue flagged in the original review has been addressed.',
+  'If all issues are resolved, output VERDICT: APPROVE.',
+  'If issues remain, repeat the original verdict (NEEDS WORK or BLOCK) and list what is still outstanding.',
+  'Do not flag new issues — focus only on resolution of the originals.',
 ].join('\n')
 
 // Default pipeline: review → fix issues (fix skipped when verdict is APPROVE).
@@ -58,9 +66,13 @@ export const DEFAULT_WORKFLOW: WorkflowStep[] = [
 ]
 
 export function loadWorkflow(operatorDir?: string): WorkflowStep[] {
-  // Only look in the operator's own directory — never inside the PR checkout.
+  // Only look in operator-controlled directories — never inside the PR checkout.
   // Loading workflow config from untrusted PR code would let a PR hijack the runner.
-  const candidates = operatorDir ? [join(operatorDir, '.crosscheck', 'workflow.yml')] : []
+  // Priority: project-local → global user config → DEFAULT_WORKFLOW.
+  const candidates = [
+    ...(operatorDir ? [join(operatorDir, '.crosscheck', 'workflow.yml')] : []),
+    join(homedir(), '.crosscheck', 'workflow.yml'),
+  ]
   for (const path of candidates) {
     if (!existsSync(path)) continue
     try {

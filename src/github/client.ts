@@ -161,19 +161,21 @@ export async function listUserRepos(
 export async function listOrgRepos(
   org: string,
   token: string,
-): Promise<Array<{ owner: string; name: string }>> {
-  const results: Array<{ owner: string; name: string }> = []
+): Promise<Array<{ owner: string; name: string; pushedAt: Date | null }>> {
+  const results: Array<{ owner: string; name: string; pushedAt: Date | null }> = []
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&type=all`,
+      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
     if (!res.ok) break
-    const data = await res.json() as Array<{ name: string; archived: boolean }>
+    const data = await res.json() as Array<{ name: string; archived: boolean; pushed_at: string | null }>
     if (data.length === 0) break
     for (const repo of data) {
-      if (!repo.archived) results.push({ owner: org, name: repo.name })
+      if (!repo.archived) {
+        results.push({ owner: org, name: repo.name, pushedAt: repo.pushed_at ? new Date(repo.pushed_at) : null })
+      }
     }
     if (data.length < 100) break
     page++

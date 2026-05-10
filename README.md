@@ -37,6 +37,16 @@ crosscheck wires that loop:
 
 ---
 
+## Who this is for
+
+**The AI-native developer** — You use Claude Code and Codex to ship features across multiple repos. crosscheck routes every PR to the rival AI, closes the loop with auto-fix PRs, and requires zero new infrastructure beyond your existing subscriptions.
+
+**The solo founder or indie hacker** — You're the only engineer and your agents run around the clock. Without crosscheck, no one reviews what the agent ships. With it, every PR gets a second opinion before it lands — automatically, while you sleep.
+
+**The team scaling AI** — Your org has adopted AI coding tools across multiple repos. crosscheck gives you consistent coverage out of the box, a self-improving instruction set via `crosscheck optimize`, and a quantified ROI story via `crosscheck impact --money` when leadership asks whether the AI investment is paying off.
+
+---
+
 ## Quick start
 
 ```bash
@@ -46,17 +56,14 @@ npm install -g @anthropic-ai/claude-code && claude        # Claude Pro/Max subsc
 npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus/Pro subscription
 brew install gh && gh auth login                          # GitHub CLI
 
-# 2. Check your environment
-crosscheck init
+# 2. Guided setup — auth, repos, review mode, workflow pipeline
+crosscheck onboard
 
-# 3. Test against a single PR
-crosscheck review https://github.com/your-org/repo/pull/42
-
-# 4. Run continuously
+# 3. Run continuously
 crosscheck watch
 ```
 
-`crosscheck watch` opens a `localhost.run` SSH tunnel (no install, no account), auto-registers a GitHub webhook, and starts listening. GitHub delivers PR events; crosscheck routes them to the right reviewer.
+`crosscheck onboard` walks you through seven steps: environment check, deployment mode (personal vs team), repo selection, review mode (cross-vendor or single-vendor), workflow pipeline (review-only / review+fix / review+fix+recheck), connection type (localhost.run vs smee.io), and config write. `crosscheck watch` then opens a tunnel (localhost.run by default, or smee.io if you selected it), auto-registers the webhook, and starts listening.
 
 ---
 
@@ -97,14 +104,13 @@ $ crosscheck watch
 
 crosscheck watch
 
-  repos     your-org/your-repo
-  mode      cross-vendor
-  quality   balanced
+  profile   personal · cross-vendor · balanced
+  users     your-github-login (5 repos)
   auto-fix  on_issues · same-as-author · pull_request
   config    ./crosscheck.config.yml  ← edit to change above
 
-  ✓ tunnel ready: https://abc123.lhr.life
-  ✓ webhook registered for your-org/your-repo
+  9:18:14 AM  ✓ tunnel ready: https://abc123.lhr.life
+  9:18:15 AM  ✓ webhook registered for your-org/your-repo
 Waiting for PR events — Ctrl+C to stop.
 
 PR #47 opened: add retry logic for flaky network calls
@@ -130,13 +136,16 @@ PR #49 opened: implement caching layer
 
 ```bash
 crosscheck init                     # check prerequisites, write starter config
+crosscheck onboard                  # guided setup — pick repos and set deployment mode
 crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # full workflow: review → auto-fix → recheck
 crosscheck watch                    # local dev — tunnel + auto-webhook + listening
 crosscheck serve                    # always-on — fixed port, register webhook once
 crosscheck status                   # auth state, config, log summary, CLI versions
 crosscheck diagnose                 # surface failure patterns from review logs
 crosscheck optimize [--apply]       # update reviewer instructions from diagnose output
 crosscheck impact [--money]         # time saved, issues caught, code quality trends
+crosscheck issue                    # draft and file a bug report from recent error logs
 ```
 
 ---
@@ -186,6 +195,26 @@ Full configuration reference: [get-started.md](./get-started.md)
 
 ---
 
+## Customization home
+
+Everything crosscheck learns and every choice you make persists in `~/.crosscheck/`. Back this directory up and a reinstall is instant — just run `crosscheck onboard` and press Enter through each step to confirm your previous settings.
+
+| File | Written by | Purpose |
+|---|---|---|
+| `config.yml` | `onboard`, `init` | Deployment, repos, mode, vendors, quality tier, tunnel, routing, budget |
+| `workflow.yml` | `onboard` | Global pipeline steps with per-step inline instructions. Written on first onboard, never overwritten — edit freely |
+| `webhook-secret` | auto-generated | HMAC secret for GitHub webhook verification. Reused across restarts |
+| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | Structured review event log — feeds `diagnose`, `optimize`, `impact` |
+
+Per-project overrides (checked before the global files):
+
+| File | Purpose |
+|---|---|
+| `.crosscheck/workflow.yml` *(in repo)* | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/AGENT.md` *(in repo)* | Per-project harness for `crosscheck optimize` — takes priority over bundled `AGENT.md` |
+
+---
+
 ## Self-improving reviews
 
 Every review outcome is logged to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Over time, patterns emerge — which commands the reviewer tries to run (and fails), verdict distributions, review duration trends.
@@ -209,7 +238,7 @@ crosscheck diagnose  (2026-01-01 → 2026-05-08 · 3 log files)
 # Apply the suggested fixes automatically
 $ crosscheck optimize --apply
   agent  claude (lower failure rate: 4% vs codex 12%)
-  writing ~/.crosscheck/instructions.md
+  writing ~/.crosscheck/workflow.yml (review step)
   + Do not run npm, tsc, jest, or any build/test commands.
   + Flag PRs over 400 lines changed as too large to review thoroughly.
   done
@@ -299,6 +328,7 @@ crosscheck registers the webhook automatically on first `watch` start — no man
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all commands and flags, complete config reference, how it works, FAQ |
 | **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config file with every option |
 | **[AGENT.md](./AGENT.md)** | Harness document used by `crosscheck optimize` — how the AI improves reviewer instructions |
+| **[CHANGELOG.md](./CHANGELOG.md)** | Release notes — what's new in each version |
 
 ---
 

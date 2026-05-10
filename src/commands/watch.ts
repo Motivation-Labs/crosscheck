@@ -133,6 +133,7 @@ export interface WatchOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  backtrace?: boolean
 }
 
 export async function runWatch(opts: WatchOpts = {}) {
@@ -321,8 +322,11 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (err.code === 'EADDRINUSE') {
         reject(new Error(
           `Port ${config.server.port} is already in use.\n` +
-          `  Another crosscheck instance may be running. Stop it first, or change the port in config:\n` +
-          `    server:\n      port: 7892`
+          `  Another crosscheck watch instance is likely running on this port.\n` +
+          `  Stop it first — running two instances against the same scopes will\n` +
+          `  register duplicate webhooks and post duplicate reviews.\n` +
+          `  To run intentionally on a different port, change it in config:\n` +
+          `    server:\n      port: ${config.server.port + 1}`
         ))
       } else {
         reject(err)
@@ -489,7 +493,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   board.start()
 
   // ── Backtrace scan ────────────────────────────────────────────────────────
-  if (config.backtrace.enabled) {
+  if (opts.backtrace === false) {
+    cLog(`${chalk.dim('✦')} backtrace skipped (--no-backtrace flag)`)
+  } else if (config.backtrace.enabled) {
     void (async () => {
       try {
         cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)
@@ -524,6 +530,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
     // Register webhooks pointing at the smee channel URL (idempotent — skip if already set).
     // The smee channel URL never changes, so this survives restarts without creating duplicates.
+    let smeeOk = 0, smeeFail = 0
+    const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
     for (const scope of scopes) {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
       try {
@@ -535,24 +543,39 @@ export async function runWatch(opts: WatchOpts = {}) {
           existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
           if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
         }
-        cLog(`${chalk.green('✓')} webhook ${existing ? 'active' : 'registered'}: ${chalk.cyan(label)}`)
+        smeeOk++
         fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         const isCreds = /bad credentials|\[401\]/i.test(msg)
         const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
           || ('org' in scope && /\[404\]/i.test(msg))
-        cLog(`${chalk.yellow('⚠')} webhook failed: ${chalk.yellow(label)}`)
-        if (isCreds) {
-          cLog(`  token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-        } else if (isScope) {
-          cLog(`  missing admin:org_hook scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
-        } else {
-          cLog(`  ${msg}`)
-        }
+        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
+        smeeFail++
+        const bucket = smeeFailuresByReason.get(reason)
+        if (bucket) { bucket.labels.push(label) } else { smeeFailuresByReason.set(reason, { labels: [label], msg }) }
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
       }
     }
+
+    // Grouped failure summary — one block per error type
+    for (const [reason, { labels, msg }] of smeeFailuresByReason) {
+      const count = labels.length
+      const shown = labels.slice(0, 5)
+      const overflow = count - shown.length
+      const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
+      const noun = count === 1 ? 'webhook' : 'webhooks'
+      if (reason === 'creds') {
+        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+      } else if (reason === 'scope') {
+        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+      } else {
+        cLog(`${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
+      }
+      cLog(`  ${chalk.dim(sample)}`)
+    }
+    const smeeTotal = scopes.length
+    cLog(`${smeeFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${smeeOk}/${smeeTotal}${smeeFail > 0 ? ` (${smeeFail} failed)` : ''}`)
 
     let smeeRetryDelay = 5_000
     while (running) {
@@ -621,6 +644,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
     let hookOk = 0, hookFail = 0
+    const failuresByReason = new Map<string, { labels: string[]; msg: string }>()
 
     await Promise.all(scopes.map(async (scope) => {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
@@ -672,17 +696,34 @@ export async function runWatch(opts: WatchOpts = {}) {
         const isCreds = /bad credentials|\[401\]/i.test(lastErr)
         const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(lastErr)
           || ('org' in scope && /\[404\]/i.test(lastErr))
-        if (isCreds) {
-          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): token invalid — run: ${chalk.cyan('gh auth refresh')}`)
-        } else if (isScope) {
-          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${lastErr}`
+        const bucket = failuresByReason.get(reason)
+        if (bucket) {
+          bucket.labels.push(label)
         } else {
-          bLog(`  ${chalk.yellow('⚠')} webhook failed (${label}): ${lastErr}`)
+          failuresByReason.set(reason, { labels: [label], msg: lastErr })
         }
-        bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
       }
     }))
+
+    // Print grouped failure summary — one block per error type, not one line per repo
+    for (const [reason, { labels, msg }] of failuresByReason) {
+      const count = labels.length
+      const shown = labels.slice(0, 5)
+      const overflow = count - shown.length
+      const sample = shown.join(', ') + (overflow > 0 ? ` +${overflow} more` : '')
+      const noun = count === 1 ? 'webhook' : 'webhooks'
+      if (reason === 'creds') {
+        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: token invalid — run: ${chalk.cyan('gh auth refresh')}`)
+      } else if (reason === 'scope') {
+        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: missing scope — run: ${chalk.cyan('gh auth refresh -s admin:org_hook')}`)
+      } else {
+        bLog(`  ${chalk.yellow('⚠')} ${count} ${noun} failed: ${msg}`)
+      }
+      bLog(`    ${chalk.dim(sample)}`)
+      bLog(`  manual Payload URL: ${chalk.cyan(webhookUrl)}`)
+    }
 
     // Single aggregated connectivity line instead of one per repo
     const hookTotal = scopes.length

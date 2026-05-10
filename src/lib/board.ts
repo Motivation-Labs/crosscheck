@@ -249,23 +249,28 @@ export class PRBoard {
       const branch = truncate(slot.branch, 22)
       const line1 = `${t.dim(ts)}  ${badge}  #${slot.prNumber}  ${chalk.dim(slot.repo)}  ${t.dim(branch)}  ${t.dim(elapsed)}  ${t.dim('→')} ${t.accent(data.url)}`
 
-      // line 2 — data summary
-      const parts: string[] = []
-      if (slot.prLoc !== undefined) {
-        parts.push(`PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`)
-      }
-      if (verdict !== null) {
-        const crFill = this.crFillFn(verdict)
-        const crLabel = this.crLabelFn(verdict)
-        parts.push(`CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(verdict)} ·${commentCount}`)
-      }
-      if (fixCount > 0) {
-        parts.push(`FIX ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}`)
-      } else if (verdict !== null && verdict !== 'APPROVE') {
-        parts.push(`FIX ${t.dim('skipped')}`)
-      }
+      // line 2 — PR | CR | Fix pipeline summary
+      const pipe = chalk.dim(' | ')
 
-      const line2 = parts.length > 0 ? indent + parts.join('   ') : ''
+      const prSection = slot.prLoc !== undefined
+        ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
+        : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
+
+      const crSection = verdict !== null
+        ? (() => {
+            const crFill = this.crFillFn(verdict)
+            const crLabel = this.crLabelFn(verdict)
+            return `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(`${commentCount} issues (${verdict})`)}`
+          })()
+        : null
+
+      const fixSection = fixCount > 0
+        ? `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' fixes')}`
+        : `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
+
+      const line2 = crSection !== null
+        ? indent + prSection + pipe + crSection + pipe + fixSection
+        : ''
       this.printStatic(line2 ? `\n${line1}\n${line2}` : line1)
     }
   }
@@ -377,43 +382,35 @@ export class PRBoard {
     const elapsed = Math.floor((Date.now() - slot.startedAt) / 1000)
     const eSuffix = `${elapsed}s`
 
-    // ── Line 1: identity + elapsed ───────────────────────────────────────────
+    // ── Line 1: identity + phase + elapsed ──────────────────────────────────────
     const branch = truncate(slot.branch, 22)
-    const l1Plain = `  ${frame} #${slot.prNumber}  ${slot.repo}  ${branch}  `
+    const l1Plain = `  ${frame} #${slot.prNumber}  ${slot.repo}  ${branch}  · ${slot.label}  `
     const l1Pad = Math.max(1, w - stripAnsi(l1Plain).length - eSuffix.length)
-    const l1 = `  ${t.spinner(frame)} ${chalk.bold(`#${slot.prNumber}`)}  ${chalk.white(slot.repo)}  ${t.dim(branch)}  ` +
+    const l1 = `  ${t.spinner(frame)} ${chalk.bold(`#${slot.prNumber}`)}  ${chalk.white(slot.repo)}  ${t.dim(branch)}  ${t.dim('· ' + slot.label)}  ` +
       ' '.repeat(l1Pad) + t.dim(eSuffix)
 
-    // ── Line 2: data pipeline ─────────────────────────────────────────────────
+    // ── Line 2: PR | CR | Fix pipeline ──────────────────────────────────────────
     const indent = '    '
-    const parts: string[] = []
+    const pipe = t.dim(' | ')
 
-    // PR size bar (shown as soon as loc is known; empty bar while cloning)
-    if (slot.prLoc !== undefined) {
-      parts.push(`PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`)
-    } else {
-      parts.push(`PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)}`)
-    }
+    const prSection = slot.prLoc !== undefined
+      ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
+      : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
-    // CR section — visible once verdict arrives
-    if (slot.verdict !== undefined && slot.verdict !== null) {
-      const crFill = this.crFillFn(slot.verdict)
-      const crLabel = this.crLabelFn(slot.verdict)
-      const count = slot.commentCount ?? 0
-      parts.push(`CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(slot.verdict)} ·${count}`)
-    }
+    const crSection = (slot.verdict !== undefined && slot.verdict !== null)
+      ? (() => {
+          const crFill = this.crFillFn(slot.verdict)
+          const crLabel = this.crLabelFn(slot.verdict)
+          const count = slot.commentCount ?? 0
+          return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(`${count} issues (${slot.verdict})`)}`
+        })()
+      : `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.dim('pending')}`
 
-    // FIX section — visible once fix data arrives or fix is in progress
-    if (slot.fixCount !== undefined) {
-      const n = slot.fixCount
-      parts.push(`FIX ${makeBar(fixCountToFilled(n), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(n) + ' applied')}`)
-    }
+    const fixSection = slot.fixCount !== undefined
+      ? `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(slot.fixCount) + ' fixes')}`
+      : `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('pending')}`
 
-    // Current phase indicator — always rightmost
-    const phaseLabel = `${t.dim(frame)} ${slot.label}`
-    parts.push(phaseLabel)
-
-    const l2 = indent + parts.join('   ')
+    const l2 = indent + prSection + pipe + crSection + pipe + fixSection
 
     return `${l1}\n${l2}`
   }
@@ -426,29 +423,44 @@ export class PRBoard {
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
     const sep = t.separator('─'.repeat(w - 1))
-    const indent = ' '.repeat(14)
 
-    // ── Section 1: status dashboard ──────────────────────────────────────────
+    // ── Section 1 (top): session summary ─────────────────────────────────────
+    const summaryRow = `${this.statsRow()}  │  ${t.dim('↑')} ${this.uptime()}`
+
+    // ── Section 2 (middle): connectivity / status ─────────────────────────────
+    // Two-column fixed-width grid. B1 covers "  ● crosscheck  <label>: <value>"
+    // so the right column always starts at the same position on both rows.
+    // The row-2 indent (16 chars) aligns "workflow:" under "tunnel:" on row 1:
+    //   "  ● crosscheck  " = 2 + 1 + 1 + 10 + 2 = 16 visible chars
+    const CONN_INDENT = ' '.repeat(16)  // aligns row-2 labels under row-1 labels
+    // B1+B2 must equal w-1 (same constraint as the separator) to avoid the
+    // exact-terminal-width cursor wrap that breaks eraseLive() line counting.
+    const B1 = Math.min(52, Math.floor((w - 1) * 0.65))
+    const B2 = (w - 1) - B1
+
+    const lb = (styled: string, width: number): string =>
+      styled + ' '.repeat(Math.max(2, width - stripAnsi(styled).length))
+
     const { type: tunnelType, url, alive } = this.tunnel
     const tunnelLabel = tunnelType === 'serve' ? 'endpoint' : 'tunnel'
     const tunnelDisplay = url
       ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
       : t.dim('connecting...')
-    const row1 = `${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}  │  ${cfg.mode} · ${cfg.quality.tier}  │  ${t.dim('↑')} ${this.uptime()}`
+
+    const connRow1 = lb(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}`, B1) +
+      lb(`${cfg.mode} · ${cfg.quality.tier}`, B2)
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
     const vendors: string[] = []
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
-    const row2 = `${indent}workflow: ${stepFlow}  │  ${vendors.join(' · ')}`
-    const row3 = `${indent}${this.statsRow()}`
 
-    // ── Section 1.5: connectivity log — only rendered when there are active entries.
-    // Empty connLog lines are excluded so the idle state stays compact (no 3 blank rows).
+    const connRow2 = lb(`${CONN_INDENT}workflow: ${stepFlow}`, B1) +
+      lb(vendors.join(' · '), B2)
+
     const activeConn = this.connLog.filter(l => l.trim())
-    const connSection = activeConn.length > 0 ? [sep, ...activeConn] : []
 
-    // ── Section 2: active PR slots ────────────────────────────────────────────
+    // ── Section 3 (bottom): active PR catalog ──────────────────────────────────
     const frame = FRAMES[this.frameIdx]
     const prContent: string[] = []
 
@@ -463,7 +475,7 @@ export class PRBoard {
       }
     }
 
-    return [row1, row2, row3, ...connSection, sep, ...prContent, sep].join('\n')
+    return [summaryRow, sep, connRow1, connRow2, ...activeConn, sep, ...prContent, sep].join('\n')
   }
 
   private redraw(): void {

@@ -13,6 +13,7 @@ import { runDiagnose } from './commands/diagnose.js'
 import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
+import { runRun } from './commands/run.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -35,12 +36,13 @@ program
 
 program
   .command('onboard')
-  .description('Interactive setup — configure deployment persona, scope, and routing')
-  .option('-c, --config <path>', 'config file path')
-  .option('--personal', 'skip questionnaire and write personal-mode config')
-  .option('--team', 'skip questionnaire and write team-mode config')
-  .option('--reconfigure', 're-run setup even if config already exists')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
+  .description('Guided setup — select repos to monitor and write config')
+  .option('-c, --config <path>', 'config file path to write')
+  .option('-y, --yes', 'skip confirmation prompts, accept defaults')
+  .option('--personal', 'pre-select personal deployment mode, skip persona prompt')
+  .option('--team', 'pre-select team deployment mode, skip persona prompt')
+  .option('--reconfigure', 're-run setup (accepted for compatibility; onboard always reconfigures)')
+  .action((opts: { config?: string; yes?: boolean; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runOnboard(opts))
 
 program
   .command('serve')
@@ -49,7 +51,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runServe(opts))
+  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
 
 program
   .command('watch')
@@ -58,7 +61,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean }) => void runWatch(opts))
+  .option('--no-backtrace', 'skip the startup scan for unreviewed open PRs this session')
+  .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program
   .command('review <pr-url>')
@@ -66,6 +70,15 @@ program
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
   .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
+
+program
+  .command('run <pr-url>')
+  .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
+  .option('-c, --config <path>', 'config file path')
+  .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
+  .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
+  .option('--dry-run', 'run the review but do not post a comment or apply fixes')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, opts))
 
 program
   .command('status')
@@ -83,7 +96,7 @@ program
 program
   .command('optimize')
   .description('Use AI to improve review instructions based on diagnose output')
-  .option('--apply', 'write the improved instructions to ~/.crosscheck/instructions.md')
+  .option('--apply', 'write the improved instructions to the review step in ~/.crosscheck/workflow.yml')
   .option('--dry-run', 'show diff without writing (default behavior)')
   .option('--agent <vendor>', 'force a specific agent: claude | codex')
   .option('--since <date>', 'limit the diagnose window (YYYY-MM-DD)')
@@ -106,6 +119,7 @@ program
   .option('--dry-run', 'print the draft without submitting')
   .option('-y, --yes', 'skip interactive questions and confirmation')
   .option('-c, --config <path>', 'config file path')
-  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string }) => void runIssue(opts))
+  .option('--opportunities', 'analyze logs for reliability patterns and improvement opportunities instead of error patterns')
+  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string; opportunities?: boolean }) => void runIssue(opts))
 
 program.parse()

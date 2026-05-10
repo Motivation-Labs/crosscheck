@@ -3,6 +3,7 @@ import { tmpdir, hostname } from 'os'
 import { join } from 'path'
 import { execSync } from 'child_process'
 import chalk from 'chalk'
+import { findAvailablePort } from '../lib/port.js'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import { checkRepoAccessible } from '../github/client.js'
 import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
@@ -144,6 +145,7 @@ export interface ServeOpts {
   personal?: boolean
   team?: boolean
   reconfigure?: boolean
+  backtrace?: boolean
 }
 
 export async function runServe(opts: ServeOpts = {}) {
@@ -218,8 +220,21 @@ export async function runServe(opts: ServeOpts = {}) {
     fileLog,
   )
 
-  server.listen(config.server.port, () => {
-    const webhookUrl = `http://${hostname()}:${config.server.port}${config.server.webhook_path}`
+  let effectivePort: number
+  try {
+    effectivePort = await findAvailablePort(config.server.port)
+  } catch (err) {
+    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
+  }
+
+  if (effectivePort !== config.server.port) {
+    console.log(chalk.yellow(`  ⚠  Port ${config.server.port} in use — using port ${effectivePort} instead`))
+    config = { ...config, server: { ...config.server, port: effectivePort } }
+  }
+
+  server.listen(effectivePort, () => {
+    const webhookUrl = `http://${hostname()}:${effectivePort}${config.server.webhook_path}`
     console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
     console.log(chalk.bold('crosscheck serving\n'))
     console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
@@ -257,7 +272,9 @@ export async function runServe(opts: ServeOpts = {}) {
     console.log(chalk.dim('Listening for pull_request events...\n'))
 
     // Backtrace: find open PRs that haven't been reviewed yet
-    if (config.backtrace.enabled) {
+    if (opts.backtrace === false) {
+      board.log('backtrace skipped (--no-backtrace flag)')
+    } else if (config.backtrace.enabled) {
       void (async () => {
         try {
           board.log('backtrace: scanning open PRs in monitored scope...')

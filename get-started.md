@@ -15,13 +15,16 @@
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
   - [init](#crosscheck-init)
+  - [onboard](#crosscheck-onboard)
   - [review](#crosscheck-review-pr-url)
+  - [run](#crosscheck-run-pr-url)
   - [watch](#crosscheck-watch)
   - [serve](#crosscheck-serve-beta)
   - [status](#crosscheck-status)
   - [diagnose](#crosscheck-diagnose)
   - [optimize](#crosscheck-optimize)
   - [impact](#crosscheck-impact)
+  - [issue](#crosscheck-issue)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
 - [Post-review auto-fix](#post-review-auto-fix)
@@ -140,35 +143,23 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 
 ---
 
-## Step 1 — Check your environment
+## Step 1 — Set up crosscheck
 
 ```bash
-crosscheck init
+crosscheck onboard
 ```
 
-This scans your machine, reports the status of every dependency, writes a starter `crosscheck.config.yml`, and auto-fills `routing.allowed_authors` with your GitHub login.
+`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full six-step walkthrough.
 
-```
-crosscheck — environment check
+Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
 
-  ✓ codex CLI            codex-cli 0.128.0 — authenticated
-  ✓ claude CLI           2.1.x (Claude Code)
-  ✓ gh CLI               gh version 2.65.0
-  ✓ GITHUB_TOKEN         set (gh auth login)
-  ✓ WEBHOOK_SECRET       auto-managed at ~/.crosscheck/webhook-secret
-
-  ✓ allowed_authors set to beingzy (github)
-```
-
-`allowed_authors` is detected from `gh auth login` — crosscheck will only review PRs you open, which is the right default when you're the one running the AI agents. If you run `crosscheck watch` before running `init`, the same detection runs automatically on first launch.
-
-Fix any failures before continuing.
+> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
 
 ---
 
 ## Step 2 — Test with a single PR
 
-The fastest way to verify everything is working end-to-end:
+Before running continuously, verify end-to-end with one PR:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
@@ -361,6 +352,106 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ---
 
+### `crosscheck onboard`
+
+The recommended first-time setup command. Walks through seven steps interactively and writes a ready-to-use config.
+
+```bash
+crosscheck onboard
+crosscheck onboard --yes          # accept all defaults non-interactively
+crosscheck onboard --personal     # force personal mode for this session
+crosscheck onboard --team         # force team mode for this session
+crosscheck onboard --reconfigure  # re-run setup even if config already exists
+```
+
+**The seven steps:**
+
+**Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
+
+**Step 2 — Deployment mode.** Choose how crosscheck scopes itself:
+- `personal` — monitors your personal repos + all orgs you belong to; reviews only PRs you author
+- `team` — monitors org repos only; reviews all PRs from any author
+
+**Step 3 — Repo selection.** Lists accessible repos and orgs; you pick which ones to watch. Org-level selection covers all repos in the org with one webhook.
+
+**Step 4 — Review mode.** If both CLIs are available, choose:
+- `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
+- `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
+
+**Step 5 — Workflow pipeline.** Choose what happens after a review:
+
+```
+  [1] review only              — AI posts a comment; you handle fixes
+  [2] review → fix             — AI reviews, then auto-applies fixes  (recommended)
+  [3] review → fix → re-check  — full loop: review, fix, re-review to confirm
+```
+
+The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
+
+**Step 6 — Connection type.** Choose how GitHub webhooks reach your local server:
+- `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
+- `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
+
+**Step 7 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+
+```
+crosscheck onboard
+
+  Step 1 — environment check
+  ✓ codex CLI            codex-cli 0.128.0 — authenticated
+  ✓ claude CLI           2.1.x (Claude Code)
+  ✓ gh CLI               gh version 2.65.0
+  ✓ GITHUB_TOKEN         set (gh auth login)
+
+  Step 2 — deployment mode
+  [1] personal  [2] team
+  Choice [1]: 1
+
+  Step 3 — select repos to monitor
+  [1] motivation-labs (org · 12 repos)
+  [2] codatta (org · 5 repos)
+  [3] your-github-login (personal · 8 repos)
+  Select [all]: 1,3
+
+  Step 4 — review mode
+  [1] cross-vendor  [2] single-vendor
+  Choice [1]: 1
+
+  Step 5 — workflow pipeline
+  [1] review only  [2] review → fix  [3] review → fix → re-check
+  Choice [2]: 3
+
+  Step 6 — connection type
+  [1] localhost.run  [2] smee.io
+  Choice [1]: 1
+
+  Step 7 — review and write config
+  deployment   personal
+  connection   localhost.run
+  orgs         motivation-labs
+  users        your-github-login (8 repos)
+  mode         cross-vendor
+  pipeline     review-fix-recheck
+  config       ~/.crosscheck/config.yml
+
+  ✓ config written to ~/.crosscheck/config.yml
+  ✓ workflow written to ~/.crosscheck/workflow.yml
+
+  Next: run  crosscheck watch  to start reviewing PRs.
+```
+
+> **`crosscheck init` vs `crosscheck onboard`** — `init` is a lightweight environment check only (no repo selection, no pipeline prompt). Use it for a quick health check or in CI. `onboard` is the full first-time setup wizard.
+
+| Flag | Description |
+|---|---|
+| `-c, --config <path>` | Write the config to a specific path |
+| `-y, --yes` | Accept all defaults without interactive prompts |
+| `--personal` | Use personal deployment mode for this session only |
+| `--team` | Use team deployment mode for this session only |
+| `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+---
+
 ### `crosscheck review <pr-url>`
 
 Manually triggers a review for a single PR.
@@ -374,6 +465,28 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 | Flag | Description |
 |---|---|
 | `-r, --reviewer codex\|claude` | Skip auto-detection and force a specific reviewer |
+| `-c, --config <path>` | Use a specific config file |
+
+---
+
+### `crosscheck run <pr-url>`
+
+Executes the full configured workflow against a single PR: review → auto-fix → recheck. Where `crosscheck review` stops after posting a comment, `crosscheck run` closes the loop — if issues are found, the authoring agent opens a fix PR and crosscheck re-reviews it.
+
+```bash
+crosscheck run https://github.com/owner/repo/pull/123
+crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
+crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
+crosscheck run https://github.com/owner/repo/pull/123 --dry-run
+```
+
+The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
+
+| Flag | Description |
+|---|---|
+| `-r, --reviewer codex\|claude` | Force a specific reviewer; skip auto-detection |
+| `--steps <list>` | Run only the listed step types, comma-separated: `review`, `fix`, `recheck` |
+| `--dry-run` | Run the review but do not post a comment or apply fixes |
 | `-c, --config <path>` | Use a specific config file |
 
 ---
@@ -490,7 +603,7 @@ crosscheck diagnose
 
   Suggestions
     → tsc: command not found ×2 (codex)
-      add to instructions.md: "Do not run tsc, ts-node, or tsx."
+      add to workflow.yml review step instructions: "Do not run tsc, ts-node, or tsx."
     → base branch 'staging' not found ×2 — verify branch is fetched before review
 
   Run `crosscheck optimize` to apply suggestions automatically.
@@ -505,7 +618,7 @@ crosscheck diagnose
 
 ### `crosscheck optimize`
 
-Runs `diagnose` internally, selects the best available AI agent, and generates an improved `~/.crosscheck/instructions.md`. Dry-run by default — shows a diff without writing.
+Runs `diagnose` internally, selects the best available AI agent, and generates improved instructions for the review step in `~/.crosscheck/workflow.yml`. Dry-run by default — shows a diff without writing.
 
 ```bash
 crosscheck optimize             # show diff only
@@ -517,7 +630,7 @@ crosscheck optimize --agent codex --apply
   Running diagnose...
   agent    claude  (default — both enabled, no data)
 
-  diff  /Users/you/.crosscheck/instructions.md
+  diff  /Users/you/.crosscheck/workflow.yml (review step)
 
   +## Constraints
   +
@@ -525,7 +638,7 @@ crosscheck optimize --agent codex --apply
   +- Do not run npm, npx, yarn, or pnpm.
   ...
 
-  Run with --apply to write changes to ~/.crosscheck/instructions.md
+  Run with --apply to write changes to /Users/you/.crosscheck/workflow.yml (review step)
 ```
 
 **Which agent does `optimize` use?**
@@ -539,7 +652,7 @@ crosscheck optimize --agent codex --apply
 
 | Flag | Description |
 |---|---|
-| `--apply` | Write the improved instructions (default is dry-run) |
+| `--apply` | Write the improved instructions to the review step in `~/.crosscheck/workflow.yml` (default is dry-run) |
 | `--dry-run` | Show diff without writing (default behavior, explicit alias) |
 | `--agent <claude\|codex>` | Force a specific agent regardless of config or log data |
 | `--since <YYYY-MM-DD>` | Limit the diagnose window used as input |
@@ -594,6 +707,90 @@ crosscheck impact  (all time · 47 reviews)
 
 The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caught × defect_cost_usd)`. Defaults: `$150/hr`, `$150/issue`. Both configurable in `crosscheck.config.yml` under `impact`.
 
+---
+
+### `crosscheck issue`
+
+Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `Motivation-Labs/crosscheck` after you confirm. No manual log-digging or issue writing required.
+
+```bash
+crosscheck issue               # interactive — review draft before submitting
+crosscheck issue --dry-run     # print draft only, never submit
+crosscheck issue --yes         # submit immediately after displaying draft
+crosscheck issue --since 2026-05-01
+```
+
+```
+crosscheck issue
+
+  Scanning logs (last 3 days)...
+  Found error pattern: command_not_found: tsc  ×4  (codex)
+
+  Can you reproduce this consistently?
+    [1] Every time  [2] Sometimes  [3] Happened once
+  Choice [1]: 1
+
+  Which command triggered this?
+    [1] watch  [2] serve  [3] review  [4] Unknown
+  Choice [1]: 1
+
+  Is this blocking you?
+    [1] Blocked  [2] Degraded  [3] Cosmetic
+  Choice [2]: 2
+
+  Draft issue:
+  ────────────────────────────────────────────────────────
+  TITLE: codex: command not found: tsc during review in temp clone
+
+  ## Description
+  When crosscheck runs a Codex review, the reviewer tries to execute `tsc`
+  ...
+
+  Submit to Motivation-Labs/crosscheck? [y/N]: y
+  ✓ https://github.com/Motivation-Labs/crosscheck/issues/99
+```
+
+If no errors are found in recent logs, crosscheck prints `No errors found in recent logs — nothing to report` and exits cleanly.
+
+| Flag | Description |
+|---|---|
+| `--since <YYYY-MM-DD>` | Limit log scan to this date onward (default: last 3 days) |
+| `--dry-run` | Print the draft without submitting |
+| `-y, --yes` | Submit immediately after displaying the draft (skip confirmation) |
+| `-c, --config <path>` | Config file path |
+
+---
+
+## Customization home
+
+`~/.crosscheck/` is the persistent home for everything crosscheck learns and configures. Back it up before a machine migration and a reinstall is instant — run `crosscheck onboard` and press Enter through each step to confirm your previous settings.
+
+### Files in `~/.crosscheck/`
+
+| File | Written by | Read by | Purpose |
+|---|---|---|---|
+| `config.yml` | `onboard`, `init`, `watch`/`serve` (first run) | all commands | Main config — deployment, repos, mode, vendors, quality, tunnel, routing, budget, branding |
+| `workflow.yml` | `onboard` (first run only) | `watch`, `serve`, `run` | Global pipeline steps with per-step inline instructions. Written once on first onboard; never overwritten on re-runs — edit freely |
+| `webhook-secret` | auto-generated on first use | `watch`, `serve` | HMAC secret for GitHub webhook signature verification — reused across restarts |
+| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | `diagnose`, `optimize`, `impact`, `issue` | Structured review event log, one file per day |
+
+### Per-project overrides (checked before the global files)
+
+| File | Read by | Purpose |
+|---|---|---|
+| `.crosscheck/workflow.yml` *(in repo)* | `watch`, `serve`, `run` | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
+| `.crosscheck/AGENT.md` *(in repo)* | `optimize` | Per-project harness — takes priority over bundled `AGENT.md` |
+| `AGENT.md` *(bundled with crosscheck)* | `optimize` | Default harness — shipped with the package, always available as fallback |
+
+### What `crosscheck onboard` owns vs. preserves
+
+On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
+
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+
+**Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
+
+**Never touched by onboard:** `quality.focus`, `quality.custom_prompt`, `budget.*`, `branding.*`, `server.*`, `logs.*`, `backtrace.*`, `workflow.yml` (after first write), harness files
 
 ---
 
@@ -924,7 +1121,7 @@ agent opens PR #42  →  opposite vendor reviews  →  issues found?
 
 ### How does crosscheck improve over time?
 
-Every review — success or failure — is appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Running `crosscheck diagnose` reads those logs and surfaces patterns: which commands failed, which reviewer is struggling, which language-specific tools were missing. Running `crosscheck optimize` feeds that report into your best-performing AI agent (guided by the bundled `AGENT.md`) and generates an improved `~/.crosscheck/instructions.md`. Both reviewers (claude and codex) read `instructions.md` before every review, so the improvements take effect immediately on the next PR.
+Every review — success or failure — is appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Running `crosscheck diagnose` reads those logs and surfaces patterns: which commands failed, which reviewer is struggling, which language-specific tools were missing. Running `crosscheck optimize` feeds that report into your best-performing AI agent (guided by the bundled `AGENT.md`) and updates the `instructions` field of the review step in `~/.crosscheck/workflow.yml`. The improvements take effect immediately on the next PR.
 
 ### Which agent does `crosscheck optimize` use?
 
@@ -958,12 +1155,9 @@ steps:
     instructions: "Only fix issues explicitly called out. Do not refactor unrelated code."
 ```
 
-`~/.crosscheck/instructions.md` serves as a fallback when a workflow step has no `instructions:` field. `crosscheck optimize --apply` writes to that file to persist learned improvements across sessions.
+`crosscheck optimize --apply` updates the review step's `instructions` field in `~/.crosscheck/workflow.yml` to persist learned improvements across sessions.
 
-To reset instructions.md to defaults, delete the file:
-```bash
-rm ~/.crosscheck/instructions.md
-```
+To reset the review step instructions to defaults, delete `~/.crosscheck/workflow.yml` and re-run `crosscheck onboard` — it will regenerate the file with the built-in defaults.
 
 ### Can I have per-project workflow?
 
@@ -977,7 +1171,7 @@ You can override it by placing an `AGENT.md` at your project root or `.crosschec
 
 ### Why did my review fail with "command not found"?
 
-The reviewer (codex or claude) tried to run a CLI tool (e.g. `tsc`, `pytest`) that isn't available in the temporary clone. The clone is a shallow `git` checkout with no `node_modules` or other installed dependencies. Run `crosscheck diagnose` to see which commands failed, then `crosscheck optimize --apply` to add the appropriate constraints to `instructions.md` so the reviewer stops trying.
+The reviewer (codex or claude) tried to run a CLI tool (e.g. `tsc`, `pytest`) that isn't available in the temporary clone. The clone is a shallow `git` checkout with no `node_modules` or other installed dependencies. Run `crosscheck diagnose` to see which commands failed, then `crosscheck optimize --apply` to add the appropriate constraints to the review step in `~/.crosscheck/workflow.yml` so the reviewer stops trying.
 
 ### Why did my review fail with "no such branch"?
 
@@ -1017,4 +1211,4 @@ The authoring agent has the most context about its own code — the same style, 
 
 ### Does optimize run automatically?
 
-No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `instructions.md`.
+No — `crosscheck optimize` is always user-triggered. You run it when you want to improve instructions. There is no background daemon or scheduled job. A future version may add an optional `--schedule` mode, but the default will always be manual to keep you in control of what gets written to `~/.crosscheck/workflow.yml`.

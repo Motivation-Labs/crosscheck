@@ -177,7 +177,8 @@ export async function runOptimize(opts: {
   const workflowSteps = Array.isArray(workflowRaw.steps)
     ? (workflowRaw.steps as Record<string, unknown>[])
     : []
-  const reviewStepIdx = workflowSteps.findIndex(s => s.name === 'review')
+  // Match by name first, then fall back to type so custom step names still work
+  const reviewStepIdx = workflowSteps.findIndex(s => s.name === 'review' || s.type === 'review')
   const reviewStep = reviewStepIdx >= 0 ? workflowSteps[reviewStepIdx] : null
   const currentInstructions = typeof reviewStep?.instructions === 'string'
     ? reviewStep.instructions
@@ -238,8 +239,12 @@ export async function runOptimize(opts: {
       workflowSteps[reviewStepIdx] = { ...workflowSteps[reviewStepIdx], instructions: newInstructions }
       workflowRaw.steps = workflowSteps
       writeFileSync(workflowPath, yaml.dump(workflowRaw, { lineWidth: -1, noRefs: true }))
+    } else if (existsSync(workflowPath) && workflowSteps.length > 0) {
+      // Existing workflow has no review-type step — append one to preserve all other steps
+      workflowRaw.steps = [...workflowSteps, { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: newInstructions }]
+      writeFileSync(workflowPath, yaml.dump(workflowRaw, { lineWidth: -1, noRefs: true }))
     } else {
-      // No review step found — write a minimal workflow with the new instructions
+      // No workflow.yml at all — write a minimal one
       const workflow = {
         on: ['opened', 'synchronize'],
         steps: [{ name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: newInstructions }],

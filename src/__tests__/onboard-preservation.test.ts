@@ -229,31 +229,45 @@ describe('applyOnboardConfig — users / routing edge cases', () => {
 })
 
 describe('applyOnboardConfig — workflow.yml lifecycle', () => {
-  it('preserves workflow.yml when switching presets (never deleted)', () => {
+  it('preserves workflow.yml on downgrade (all required types already present)', () => {
     // First run: recheck writes a 3-step workflow
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(true)
+    const original = readFileSync(join(workflowDir, 'workflow.yml'), 'utf8')
 
-    // Re-run with review-only — file is preserved, not deleted
+    // Downgrade to review-only — review type is in the 3-step file, so file is preserved
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, workflowDir)
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(true)
+    expect(readFileSync(join(workflowDir, 'workflow.yml'), 'utf8')).toBe(original)
   })
 
-  it('does not overwrite a user-customized workflow.yml on any re-run', () => {
+  it('regenerates workflow.yml when preset upgrade requires new step types', () => {
+    const workflowPath = join(workflowDir, 'workflow.yml')
+
+    // First run: review-only (1 step, no fix or recheck)
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, workflowDir)
+    const oneStepContent = readFileSync(workflowPath, 'utf8')
+
+    // Upgrade to review-fix — fix type is missing, so file is regenerated
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
+    const twoStepContent = readFileSync(workflowPath, 'utf8')
+
+    expect(twoStepContent).not.toBe(oneStepContent)
+    const raw = yaml.load(twoStepContent) as { steps: Array<{ type: string }> }
+    expect(raw.steps.some(s => s.type === 'fix')).toBe(true)
+  })
+
+  it('preserves user-customized workflow.yml on re-run with same preset', () => {
     const workflowPath = join(workflowDir, 'workflow.yml')
 
     // First run: writes template
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
     const templateContent = readFileSync(workflowPath, 'utf8')
 
-    // User customizes the file
+    // User customizes the file (adds a comment but keeps both step types)
     const customContent = templateContent + '\n# my custom step\n'
     writeFileSync(workflowPath, customContent)
 
-    // Re-run with different preset
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
-
-    // Custom content is untouched
+    // Re-run with same preset — both required types (review, fix) present
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
     expect(readFileSync(workflowPath, 'utf8')).toBe(customContent)
   })
 })

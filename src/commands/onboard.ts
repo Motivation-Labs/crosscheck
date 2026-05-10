@@ -455,11 +455,34 @@ export function applyOnboardConfig(
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
   // ── Global workflow.yml ──────────────────────────────────────────────────────
-  // Always written on first onboard. Never overwritten — user may have customized it.
+  // Written on first onboard. On re-runs, only updated when the new preset requires
+  // step types not yet present in the file (explicit preset upgrade) — otherwise preserved.
   const globalWorkflowPath = join(workflowDir, 'workflow.yml')
+  mkdirSync(workflowDir, { recursive: true })
+
+  const presetStepTypes: Record<WorkflowPreset, string[]> = {
+    'review-only': ['review'],
+    'review-fix': ['review', 'fix'],
+    'review-fix-recheck': ['review', 'fix', 'recheck'],
+  }
+  const requiredTypes = presetStepTypes[pipelinePreset]
+
   if (!existsSync(globalWorkflowPath)) {
-    mkdirSync(workflowDir, { recursive: true })
     writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+  } else {
+    try {
+      const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
+      const existingTypes = new Set((existingRaw?.steps ?? []).map(s => s.type))
+      const missingTypes = requiredTypes.filter(t => !existingTypes.has(t))
+      if (missingTypes.length > 0) {
+        // User upgraded preset — regenerate so the new steps are present
+        writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+      }
+      // All required types present — preserve existing file (may be user-customized)
+    } catch {
+      // Malformed workflow file — regenerate
+      writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+    }
   }
 }
 

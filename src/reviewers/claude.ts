@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
+import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 
 const TIER_MODELS: Record<string, string> = {
   fast: 'claude-haiku-4-5-20251001',
@@ -34,7 +35,7 @@ export async function runClaudeReview(
     : ''
   const customLine = quality.custom_prompt ?? ''
 
-  const behaviorInstructions = stepInstructions ?? ''
+  const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,

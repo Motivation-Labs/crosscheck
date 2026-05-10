@@ -493,7 +493,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   board.start()
 
   // ── Backtrace scan ────────────────────────────────────────────────────────
-  if (opts.backtrace === true || (opts.backtrace !== false && config.backtrace.enabled)) {
+  if (opts.backtrace === false) {
+    cLog(`${chalk.dim('✦')} backtrace skipped (--no-backtrace flag)`)
+  } else if (config.backtrace.enabled) {
     void (async () => {
       try {
         cLog(`${chalk.dim('✦')} backtrace: scanning open PRs in monitored scope...`)

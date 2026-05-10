@@ -85,8 +85,7 @@ export const ImpactConfigSchema = z.object({
 
 export const BacktraceConfigSchema = z.object({
   // Scan for open PRs without a [crosscheck] comment on startup.
-  // Off by default — pass --backtrace (watch/serve) or set enabled: true in config to opt in.
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
 })
 
 export const PostReviewDeliverySchema = z.object({

@@ -51,7 +51,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--[no-]backtrace', 'scan for unreviewed open PRs on startup; off by default, use --backtrace to enable; --no-backtrace overrides backtrace.enabled in config')
+  .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
+  .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
   .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runServe(opts))
 
 program
@@ -61,7 +62,8 @@ program
   .option('--personal', 'personal mode this session only (does not save to config)')
   .option('--team', 'team mode this session only (does not save to config)')
   .option('--reconfigure', 're-run deployment setup and save new choice to config')
-  .option('--[no-]backtrace', 'scan for unreviewed open PRs on startup; off by default, use --backtrace to enable; --no-backtrace overrides backtrace.enabled in config')
+  .option('--backtrace', 'enable startup scan for unreviewed open PRs this session (overrides backtrace.enabled: false)')
+  .option('--no-backtrace', 'skip startup scan for unreviewed open PRs this session (overrides backtrace.enabled: true)')
   .action((opts: { config?: string; personal?: boolean; team?: boolean; reconfigure?: boolean; backtrace?: boolean }) => void runWatch(opts))
 
 program

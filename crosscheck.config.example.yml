@@ -166,8 +166,9 @@ post_review:
 # On startup, scan all open PRs in the monitored scope and review any that have
 # never received a [crosscheck] comment. Ensures coverage for PRs opened while
 # crosscheck was offline or before it was first set up.
+# Off by default — enable with the config below or pass --backtrace at startup.
 # backtrace:
-#   enabled: false  # set to true to enable startup scan for unreviewed PRs (or pass --backtrace flag)
+#   enabled: true   # set to true to enable the startup scan (or pass --backtrace)
 
 # ─── Logs ────────────────────────────────────────────────────────────────────
 # Structured debug logs written to ~/.crosscheck/logs/YYYY-MM-DD.ndjson

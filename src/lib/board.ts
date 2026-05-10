@@ -298,6 +298,12 @@ export class PRBoard {
     }
 
     this.printStatic(`\n${line1}\n${indent}${prSection}${pipe}${crSection}${pipe}${fixSection}`)
+
+    // In non-TTY mode render() never runs, so purge the slot here instead of
+    // relying on the render loop's 5-second cleanup.
+    if (!this.isTTY) {
+      this.slots.delete(key)
+    }
   }
 
   failPR(key: string, error: string): void {

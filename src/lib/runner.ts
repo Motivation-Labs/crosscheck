@@ -122,9 +122,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
 
-      // Recheck verdict is stored separately to preserve the original review verdict on the board
+      // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
-        ? { recheckVerdict: verdict, commentCount, phase: donePhase }
+        ? { recheckVerdict: verdict, phase: donePhase }
         : { verdict, commentCount, phase: donePhase }
 
       if (ctx.dryRun) {
@@ -141,46 +141,34 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
     } else if (step.type === 'fix') {
-      if (ctx.dryRun) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'dry_run' })
+      const skipFix = (reason: string) => {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { skipped: true }
-        continue
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
 
+      if (ctx.dryRun) { skipFix('dry_run'); continue }
+
       // Migration gate: honor legacy opt-out fields while users migrate to workflow.yml.
-      // If the config has auto_fix.enabled: false or trigger: never, skip and warn.
       const legacyDisabled = config.post_review.auto_fix.enabled === false
         || config.post_review.auto_fix.trigger === 'never'
       if (legacyDisabled) {
         log(chalk.yellow(`⚠  auto_fix.enabled/trigger are deprecated — remove them from config and add a "when:" condition to the fix step in workflow.yml instead`))
-        fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'legacy_auto_fix_disabled' })
-        results[step.name] = { skipped: true }
+        skipFix('legacy_auto_fix_disabled')
         continue
       }
 
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
-      if (!reviewResult?.commentBody) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_review_comment' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (!reviewResult?.commentBody) { skipFix('no_review_comment'); continue }
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
       const vendor = resolveReviewer(step.reviewer, origin, config)
-      if (!vendor) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_vendor' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (!vendor) { skipFix('no_vendor'); continue }
 
       // Codex fix not yet implemented — skip gracefully
-      if (vendor === 'codex') {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'codex_fix_unsupported' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR
       let existingCount = 0
@@ -191,7 +179,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
-        results[step.name] = { skipped: true }
+        skipFix('commit_limit_reached')
         continue
       }
 
@@ -208,21 +196,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix' }, err)
-        results[step.name] = { skipped: true }
+        skipFix('fix_error')
         continue
       }
 
       if (appliedCount === 0) {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { applied_count: 0 }
         continue
       }
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'fork_pr' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (isFork) { skipFix('fork_pr'); continue }
 
       const deliveryMode = config.post_review.auto_fix.delivery.mode
 

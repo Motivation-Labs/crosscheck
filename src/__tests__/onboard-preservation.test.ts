@@ -159,6 +159,54 @@ describe('applyOnboardConfig — re-run preservation', () => {
   })
 })
 
+describe('applyOnboardConfig — users / routing edge cases', () => {
+  it('clears users when switching to team mode with no scope selected', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      users: ['alice'],
+      routing: { allowed_authors: ['alice'], fallback_reviewer: 'auto' },
+    }))
+
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      deployment: 'team',
+      selectedRepos: [],
+      selectedOrgs: [],
+    }, workflowDir)
+
+    const cfg = readConfig()
+    expect(cfg.users).toBeUndefined()
+  })
+
+  it('initialises allowed_authors when routing exists but allowed_authors is empty', () => {
+    // Simulate an unpatched example config: routing block present but no allowed_authors
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { fallback_reviewer: 'auto' },
+    }))
+
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    const cfg = readConfig()
+    const routing = cfg.routing as Record<string, unknown>
+    expect(routing.allowed_authors).toEqual(['alice'])
+  })
+
+  it('preserves non-empty allowed_authors even if partial routing exists', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { allowed_authors: ['alice', 'bot'], fallback_reviewer: 'claude' },
+    }))
+
+    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
+
+    const cfg = readConfig()
+    const routing = cfg.routing as Record<string, unknown>
+    expect(routing.allowed_authors).toEqual(['alice', 'bot'])
+    expect(routing.fallback_reviewer).toBe('claude')
+  })
+})
+
 describe('applyOnboardConfig — workflow.yml lifecycle', () => {
   it('switches from recheck to review-only: deletes workflow.yml', () => {
     // First run: recheck

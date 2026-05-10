@@ -60,7 +60,7 @@ export interface QuestionAnswers {
   impact: string
 }
 
-export function parseDraft(output: string): { title: string; body: string } | null {
+export function parseDraft(output: string): { title: string; body: string; labels?: string[] } | null {
   const lines = output.split('\n')
   const titleIdx = lines.findIndex(l => l.startsWith('TITLE:'))
   if (titleIdx === -1) return null
@@ -77,7 +77,12 @@ export function parseDraft(output: string): { title: string; body: string } | nu
   const body = lines.slice(sepIdx + 1).join('\n').trim()
   if (!body) return null
 
-  return { title, body }
+  const labelsLine = lines.slice(titleIdx + 1, sepIdx).find(l => l.startsWith('LABELS:'))
+  const labels = labelsLine
+    ? labelsLine.replace(/^LABELS:\s*/, '').split(',').map(l => l.trim()).filter(Boolean)
+    : undefined
+
+  return { title, body, labels }
 }
 
 export function buildIssueContent(
@@ -341,7 +346,7 @@ export async function runIssue(opts: {
       }
     }
 
-    await submitIssue(cleanDraft.title, cleanDraft.body, ['improvement'])
+    await submitIssue(cleanDraft.title, cleanDraft.body, draftParsed.labels ?? ['improvement'])
     return
   }
 

@@ -351,26 +351,35 @@ export function applyOnboardConfig(
     return { owner, name }
   })
 
-  // Users: set in personal mode so the login is captured; clear when scope is covered by repos/orgs
+  // Users: personal mode captures the login; team mode never uses users
   if (deployment === 'personal' && login) {
     raw.users = [login]
+  } else {
+    delete raw.users  // team mode, or personal with no login
   }
+  // Scope covered by repos/orgs — users entry not needed even in personal mode
   if (selectedRepos.length > 0 || selectedOrgs.length > 0) {
     delete raw.users
   }
 
-  // ── Routing: initialise on first run; never overwrite on re-runs ────────────
-  if (!raw.routing || typeof raw.routing !== 'object') {
-    if (deployment === 'personal' && login) {
-      raw.routing = {
-        allowed_authors: [login],
-        author_routes: { [login]: 'claude' },
-        fallback_reviewer: 'auto',
-      }
-    } else {
-      raw.routing = { fallback_reviewer: 'auto' }
+  // ── Routing: initialise missing fields; never overwrite fields that are set ──
+  // Guards on individual fields so a partial routing object (e.g. from an
+  // unpatched example config) still gets the personal-mode defaults filled in.
+  if (!raw.routing || typeof raw.routing !== 'object') raw.routing = {}
+  const routing = raw.routing as Record<string, unknown>
+
+  if (deployment === 'personal' && login) {
+    const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
+    if (currentAuthors.length === 0) routing.allowed_authors = [login]
+
+    const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
+      ? (routing.author_routes as Record<string, string>)
+      : null
+    if (!currentRoutes || Object.keys(currentRoutes).length === 0) {
+      routing.author_routes = { [login]: 'claude' }
     }
   }
+  if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'
 
   // ── Vendors ─────────────────────────────────────────────────────────────────
   if (!raw.vendors || typeof raw.vendors !== 'object') raw.vendors = {}

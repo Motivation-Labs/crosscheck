@@ -1,12 +1,13 @@
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import chalk from 'chalk'
 import { execa } from 'execa'
+import yaml from 'js-yaml'
 import { loadConfig } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
-import { readInstructions, writeInstructions, getInstructionsPath } from '../lib/instructions.js'
+import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { buildDiagnoseReport, type DiagnoseReport } from './diagnose.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -157,7 +158,7 @@ export async function runOptimize(opts: {
 
   console.log(`  agent    ${chalk.cyan(selectedAgent)} ${chalk.dim(`(${agentReason})`)}`)
 
-  // 3. Load AGENT.md and current instructions
+  // 3. Load AGENT.md and current instructions from workflow.yml review step
   let agentMd: string
   try {
     agentMd = findAgentMd(cwd)
@@ -166,8 +167,22 @@ export async function runOptimize(opts: {
     process.exit(1)
   }
 
-  const currentInstructions = readInstructions()
-  const instructionsPath = getInstructionsPath()
+  const workflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+  let workflowRaw: Record<string, unknown> = {}
+  if (existsSync(workflowPath)) {
+    try {
+      workflowRaw = (yaml.load(readFileSync(workflowPath, 'utf8')) ?? {}) as Record<string, unknown>
+    } catch { /* malformed — start fresh */ }
+  }
+  const workflowSteps = Array.isArray(workflowRaw.steps)
+    ? (workflowRaw.steps as Record<string, unknown>[])
+    : []
+  const reviewStepIdx = workflowSteps.findIndex(s => s.name === 'review')
+  const reviewStep = reviewStepIdx >= 0 ? workflowSteps[reviewStepIdx] : null
+  const currentInstructions = typeof reviewStep?.instructions === 'string'
+    ? reviewStep.instructions
+    : DEFAULT_REVIEW_INSTRUCTIONS
+  const instructionsPath = `${workflowPath} (review step)`
 
   // 4. Build prompt
   const prompt = [
@@ -218,8 +233,20 @@ export async function runOptimize(opts: {
   // 7. Apply or exit
   const apply = opts.apply && !opts.dryRun
   if (apply) {
-    writeInstructions(newInstructions)
-    console.log(chalk.green(`  ✓ Written to ${instructionsPath}`))
+    mkdirSync(dirname(workflowPath), { recursive: true })
+    if (reviewStepIdx >= 0) {
+      workflowSteps[reviewStepIdx] = { ...workflowSteps[reviewStepIdx], instructions: newInstructions }
+      workflowRaw.steps = workflowSteps
+      writeFileSync(workflowPath, yaml.dump(workflowRaw, { lineWidth: -1, noRefs: true }))
+    } else {
+      // No review step found — write a minimal workflow with the new instructions
+      const workflow = {
+        on: ['opened', 'synchronize'],
+        steps: [{ name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: newInstructions }],
+      }
+      writeFileSync(workflowPath, yaml.dump(workflow, { lineWidth: -1, noRefs: true }))
+    }
+    console.log(chalk.green(`  ✓ Written to ${workflowPath}`))
     console.log(chalk.dim('  Next reviews will use the updated instructions.'))
   } else {
     console.log(chalk.dim(`  Run with --apply to write changes to ${instructionsPath}`))

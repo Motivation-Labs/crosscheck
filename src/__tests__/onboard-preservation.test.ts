@@ -58,18 +58,39 @@ describe('applyOnboardConfig — first run', () => {
     expect(vendors.codex.model).toBe('o3')
   })
 
-  it('writes workflow.yml when preset is review-fix-recheck', () => {
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
-
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(true)
+  it('writes workflow.yml for all three presets', () => {
+    for (const preset of ['review-only', 'review-fix', 'review-fix-recheck'] as const) {
+      // Fresh workflowDir per preset to test first-write behavior
+      const dir = join(workflowDir, preset)
+      applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: preset }, dir)
+      expect(existsSync(join(dir, 'workflow.yml'))).toBe(true)
+    }
   })
 
-  it('does not write workflow.yml for review-only or review-fix', () => {
-    applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(false)
+  it('workflow.yml has correct step count per preset', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const loadWf = (dir: string) => {
+      const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: unknown[] }
+      return raw.steps.length
+    }
+    const dirA = join(workflowDir, 'a')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, dirA)
+    expect(loadWf(dirA)).toBe(1)
 
+    const dirB = join(workflowDir, 'b')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, dirB)
+    expect(loadWf(dirB)).toBe(2)
+
+    const dirC = join(workflowDir, 'c')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, dirC)
+    expect(loadWf(dirC)).toBe(3)
+  })
+
+  it('workflow.yml steps have inline instructions', () => {
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(false)
+    const raw = yaml.load(readFileSync(join(workflowDir, 'workflow.yml'), 'utf8')) as { steps: Array<{ instructions?: string }> }
+    expect(typeof raw.steps[0].instructions).toBe('string')
+    expect(raw.steps[0].instructions!.length).toBeGreaterThan(10)
   })
 })
 
@@ -208,28 +229,28 @@ describe('applyOnboardConfig — users / routing edge cases', () => {
 })
 
 describe('applyOnboardConfig — workflow.yml lifecycle', () => {
-  it('switches from recheck to review-only: deletes workflow.yml', () => {
-    // First run: recheck
+  it('preserves workflow.yml when switching presets (never deleted)', () => {
+    // First run: recheck writes a 3-step workflow
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
     expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(true)
 
-    // Re-run: review-only
+    // Re-run with review-only — file is preserved, not deleted
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, workflowDir)
-    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(false)
+    expect(existsSync(join(workflowDir, 'workflow.yml'))).toBe(true)
   })
 
-  it('keeps recheck: does not overwrite a user-customized workflow.yml', () => {
+  it('does not overwrite a user-customized workflow.yml on any re-run', () => {
     const workflowPath = join(workflowDir, 'workflow.yml')
 
-    // First run: recheck writes template
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
+    // First run: writes template
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
     const templateContent = readFileSync(workflowPath, 'utf8')
 
     // User customizes the file
     const customContent = templateContent + '\n# my custom step\n'
     writeFileSync(workflowPath, customContent)
 
-    // Re-run with same preset
+    // Re-run with different preset
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
 
     // Custom content is untouched

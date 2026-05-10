@@ -202,8 +202,7 @@ Everything crosscheck learns and every choice you make persists in `~/.crosschec
 | File | Written by | Purpose |
 |---|---|---|
 | `config.yml` | `onboard`, `init` | Deployment, repos, mode, vendors, quality tier, tunnel, routing, budget |
-| `workflow.yml` | `onboard` (recheck preset) | Global pipeline steps — review → fix → recheck. Never overwritten unless you change the pipeline preset |
-| `instructions.md` | `optimize --apply` | Reviewer constraints injected into every review. Grows smarter with each `optimize` run |
+| `workflow.yml` | `onboard` | Global pipeline steps with per-step inline instructions. Written on first onboard, never overwritten — edit freely |
 | `webhook-secret` | auto-generated | HMAC secret for GitHub webhook verification. Reused across restarts |
 | `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | Structured review event log — feeds `diagnose`, `optimize`, `impact` |
 
@@ -239,7 +238,7 @@ crosscheck diagnose  (2026-01-01 → 2026-05-08 · 3 log files)
 # Apply the suggested fixes automatically
 $ crosscheck optimize --apply
   agent  claude (lower failure rate: 4% vs codex 12%)
-  writing ~/.crosscheck/instructions.md
+  writing ~/.crosscheck/workflow.yml (review step)
   + Do not run npm, tsc, jest, or any build/test commands.
   + Flag PRs over 400 lines changed as too large to review thoroughly.
   done

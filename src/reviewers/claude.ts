@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
-import { readInstructions } from '../lib/instructions.js'
 
 const TIER_MODELS: Record<string, string> = {
   fast: 'claude-haiku-4-5-20251001',
@@ -35,8 +34,7 @@ export async function runClaudeReview(
     : ''
   const customLine = quality.custom_prompt ?? ''
 
-  // stepInstructions from workflow step takes precedence; fall back to ~/.crosscheck/instructions.md
-  const behaviorInstructions = stepInstructions !== undefined ? stepInstructions : readInstructions(repoDir)
+  const behaviorInstructions = stepInstructions ?? ''
 
   const prompt = [
     `You are reviewing a pull request titled: "${prTitle}".`,

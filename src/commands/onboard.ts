@@ -462,6 +462,8 @@ export function applyOnboardConfig(
     'review-fix-recheck': ['review', 'fix', 'recheck'],
   }
   const requiredTypes = presetStepTypes[pipelinePreset]
+  // Step types that must NOT be present for this preset (downgrade detection)
+  const forbiddenTypes = ['fix', 'recheck'].filter(t => !requiredTypes.includes(t))
 
   if (!existsSync(globalWorkflowPath)) {
     writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
@@ -470,11 +472,12 @@ export function applyOnboardConfig(
       const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
       const existingTypes = new Set((existingRaw?.steps ?? []).map(s => s.type))
       const missingTypes = requiredTypes.filter(t => !existingTypes.has(t))
-      if (missingTypes.length > 0) {
-        // User upgraded preset — regenerate so the new steps are present
+      const extraTypes = forbiddenTypes.filter(t => existingTypes.has(t))
+      if (missingTypes.length > 0 || extraTypes.length > 0) {
+        // Preset changed (upgrade or downgrade) — regenerate to match selection
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
       }
-      // All required types present — preserve existing file (may be user-customized)
+      // All required types present and no extra types — preserve (may be user-customized)
     } catch {
       // Malformed workflow file — regenerate
       writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))

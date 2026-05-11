@@ -229,14 +229,17 @@ describe('applyOnboardConfig — users / routing edge cases', () => {
 })
 
 describe('applyOnboardConfig — workflow.yml lifecycle', () => {
-  it('preserves workflow.yml on downgrade (all required types already present)', () => {
+  it('regenerates workflow.yml on downgrade (removes extra step types)', () => {
+    const workflowPath = join(workflowDir, 'workflow.yml')
+
     // First run: recheck writes a 3-step workflow
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, workflowDir)
-    const original = readFileSync(join(workflowDir, 'workflow.yml'), 'utf8')
 
-    // Downgrade to review-only — review type is in the 3-step file, so file is preserved
+    // Downgrade to review-only — fix and recheck types are now forbidden, so regenerate
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, workflowDir)
-    expect(readFileSync(join(workflowDir, 'workflow.yml'), 'utf8')).toBe(original)
+    const raw = yaml.load(readFileSync(workflowPath, 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps.every(s => s.type === 'review')).toBe(true)
+    expect(raw.steps.some(s => s.type === 'fix' || s.type === 'recheck')).toBe(false)
   })
 
   it('regenerates workflow.yml when preset upgrade requires new step types', () => {

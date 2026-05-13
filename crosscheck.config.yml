@@ -23,7 +23,6 @@ budget:
 orgs:
   - motivation-labs
   - codatta
-  - Motivation-Labs
 routing:
   allowed_authors:
     - beingzy
@@ -44,32 +43,3 @@ post_review:
 server:
   port: 7891
   webhook_path: /webhook
-deployment: personal
-repos:
-  - owner: codatta
-    name: humanbased-monorepo
-  - owner: codatta
-    name: huge_leap
-  - owner: Motivation-Labs
-    name: motivation-labs-website
-  - owner: Motivation-Labs
-    name: crosscheck
-  - owner: Motivation-Labs
-    name: motivation-form
-  - owner: Motivation-Labs
-    name: motivation-money
-  - owner: Motivation-Labs
-    name: motivation-game
-  - owner: Motivation-Labs
-    name: motivation-team
-  - owner: Motivation-Labs
-    name: motivation-learn
-  - owner: Motivation-Labs
-    name: motivation-labs
-  - owner: Motivation-Labs
-    name: motivate-kids
-  - owner: Motivation-Labs
-    name: motivate-me
-tunnel:
-  backend: smee
-  smee_channel: https://smee.io/M69pJto9rb5pfGj

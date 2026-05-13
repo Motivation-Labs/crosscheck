@@ -14,6 +14,14 @@
 # cross-vendor:  each AI reviews the other's PRs (Claude ↔ Codex)
 mode: cross-vendor
 
+# ─── Clone protocol ──────────────────────────────────────────────────────────
+# How crosscheck clones PR repos for review.
+# ssh   — git@github.com:owner/repo.git (uses your local SSH keys)
+# https — https://github.com/owner/repo.git (uses GitHub token)
+# Pick https if you have a multi-account SSH setup or your default SSH key
+# cannot access target repos. Independent of `gh config get git_protocol`.
+clone_protocol: ssh
+
 # ─── Vendors ─────────────────────────────────────────────────────────────────
 vendors:
   codex:

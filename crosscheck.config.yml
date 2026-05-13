@@ -1,84 +1,75 @@
-# crosscheck.config.yml
-# This file is designed to be easily read and modified by coding agents.
-# All fields are optional — crosscheck uses sensible defaults.
-
-# ─── Mode ────────────────────────────────────────────────────────────────────
-# single-vendor: one AI reviews all PRs
-# cross-vendor:  each AI reviews the other's PRs (Claude ↔ Codex)
 mode: cross-vendor
-
-# ─── Vendors ─────────────────────────────────────────────────────────────────
 vendors:
   codex:
     enabled: true
-    model: o4-mini          # o4-mini | o3 | gpt-4o  (cost/quality tradeoff)
-    auth: subscription      # subscription (device-auth OAuth) | api-key
-
+    model: o4-mini
+    auth: subscription
+    effort: medium
   claude:
     enabled: true
-    model: sonnet           # haiku | sonnet | opus
-    effort: medium          # low | medium | high | max
-
-# ─── Quality & Focus ─────────────────────────────────────────────────────────
+    model: sonnet
+    effort: medium
 quality:
-  tier: balanced            # fast | balanced | thorough
-  # fast      → quick scan, top issues only (~10s, lowest cost)
-  # balanced  → full review, all issues with explanations (~30s)
-  # thorough  → deep multi-pass, security + architecture (~60s+)
-
-  focus:                    # optional — narrows review scope
+  tier: balanced
+  focus:
     - security
     - types
     - performance
-    # - naming
-    # - test-coverage
-    # - documentation
-
-  custom_prompt: |          # optional — appended to every review
+  custom_prompt: |
     Focus on correctness and security. Be concise.
-
-# ─── Budget ──────────────────────────────────────────────────────────────────
 budget:
-  codex_monthly_usd: 20     # null = unlimited (use if on subscription)
-  per_review_usd: 2.00      # hard stop per single review
-
-# ── Orgs — covers all repos in each org with one webhook ─────────────────────
+  codex_monthly_usd: 20
+  per_review_usd: 2
 orgs:
   - motivation-labs
   - codatta
-
-# ─── Routing (cross-vendor mode only) ────────────────────────────────────────
-# Which AI reviews PRs from which author patterns
+  - Motivation-Labs
 routing:
   allowed_authors:
-    - beingzy  # auto-detected from gh auth
+    - beingzy
   codex_reviews_patterns:
-    - "Generated with \\[Claude Code\\]"    # Claude Code attribution footer
+    - Generated with \[Claude Code\]
   claude_reviews_patterns:
-    - "Generated with \\[OpenAI Codex\\]"   # Codex attribution footer
-    - "Co-Authored-By: codex"
-
-# ─── Post-Review Auto-Fix ────────────────────────────────────────────────────
-# Complete loop:
-#   agent opens PR  →  opposite vendor reviews  →  authoring vendor fixes
-#                              ↓
-#              fix PR opened targeting original branch
-#                              ↓
-#              human reviews fix PR → merges → original PR updated
-#
+    - Generated with \[OpenAI Codex\]
+    - 'Co-Authored-By: codex'
+  author_routes:
+    beingzy: claude
+  fallback_reviewer: auto
 post_review:
   auto_fix:
-    enabled: true
-    trigger: on_issues          # only run when reviewer found actionable issues
-    min_severity: warning       # skip info-level / cosmetic findings
-    fixer: same-as-author       # Claude-authored PR → Claude fixes; Codex-authored → Codex fixes
     delivery:
-      mode: pull_request        # opens a fix PR; human approves before merge
-      pr_title: "fix: address CR issues in #{original_pr_title}"
+      mode: pull_request
+      pr_title: 'fix: address CR issues in #{original_pr_title}'
       label: cr-autofix
-
-# ─── Server (serve mode only) ────────────────────────────────────────────────
 server:
   port: 7891
   webhook_path: /webhook
-  # pid_file: ~/.crosscheck/crosscheck.pid  # for daemon management
+deployment: personal
+repos:
+  - owner: codatta
+    name: humanbased-monorepo
+  - owner: codatta
+    name: huge_leap
+  - owner: Motivation-Labs
+    name: motivation-labs-website
+  - owner: Motivation-Labs
+    name: crosscheck
+  - owner: Motivation-Labs
+    name: motivation-form
+  - owner: Motivation-Labs
+    name: motivation-money
+  - owner: Motivation-Labs
+    name: motivation-game
+  - owner: Motivation-Labs
+    name: motivation-team
+  - owner: Motivation-Labs
+    name: motivation-learn
+  - owner: Motivation-Labs
+    name: motivation-labs
+  - owner: Motivation-Labs
+    name: motivate-kids
+  - owner: Motivation-Labs
+    name: motivate-me
+tunnel:
+  backend: smee
+  smee_channel: https://smee.io/M69pJto9rb5pfGj

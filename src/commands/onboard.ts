@@ -297,6 +297,38 @@ async function promptConnectionType(
   return idx === 1 ? 'smee' : 'localhost.run'
 }
 
+async function promptCloneProtocol(
+  currentProtocol: 'ssh' | 'https' | undefined,
+  opts: OnboardOpts,
+): Promise<'ssh' | 'https'> {
+  if (opts.yes) {
+    const protocol = currentProtocol ?? 'ssh'
+    console.log(`  Clone protocol: ${chalk.cyan(protocol)}`)
+    return protocol
+  }
+
+  const items: PickerItem[] = [
+    {
+      label: 'ssh',
+      description: 'git@github.com:owner/repo.git — uses your local SSH keys',
+    },
+    {
+      label: 'https',
+      description: 'https://github.com/owner/repo.git — uses GitHub token',
+      hint: 'Pick this if you have multi-account SSH setup or your default SSH key cannot access target repos',
+    },
+  ]
+  const defaultIdx = currentProtocol === 'https' ? 1 : 0
+
+  const idx = await promptSinglePicker(items, {
+    title: 'How should crosscheck clone PR repos for review?',
+    defaultIndex: defaultIdx,
+  })
+  console.log()
+
+  return idx === 1 ? 'https' : 'ssh'
+}
+
 export interface OnboardDecisions {
   deployment: 'personal' | 'team'
   login: string
@@ -307,6 +339,7 @@ export interface OnboardDecisions {
   pipelinePreset: WorkflowPreset
   tunnelBackend: 'localhost.run' | 'smee'
   smeeChannel: string
+  cloneProtocol: 'ssh' | 'https'
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
@@ -358,7 +391,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, tunnelBackend, smeeChannel } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, tunnelBackend, smeeChannel, cloneProtocol } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -371,6 +404,7 @@ export function applyOnboardConfig(
   raw.deployment = deployment
   raw.orgs = selectedOrgs
   raw.mode = vendorConfig.mode
+  raw.clone_protocol = cloneProtocol
 
   // Repos
   raw.repos = selectedRepos.map(r => {
@@ -725,11 +759,16 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 8: Confirm and write ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — review and write config'))
+  // ── Step 8: Clone protocol ─────────────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — clone protocol'))
+  const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
+
+  // ── Step 9: Confirm and write ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 9 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
+  console.log(`  clone        ${chalk.cyan(cloneProtocol)}`)
   console.log(`  mode         ${chalk.cyan(vendorConfig.mode)}`)
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
@@ -771,6 +810,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     pipelinePreset,
     tunnelBackend,
     smeeChannel,
+    cloneProtocol,
   })
 
   console.log(chalk.green(`  ✓ config written to ${configPath}`))

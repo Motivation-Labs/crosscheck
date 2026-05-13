@@ -786,7 +786,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
 
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
@@ -819,6 +819,13 @@ Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 d
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  Claude ↔ Codex review each other
 mode: cross-vendor
+
+# ── Clone protocol ────────────────────────────────────────────────────────────
+# ssh   — git@github.com:owner/repo.git (uses local SSH keys)
+# https — https://github.com/owner/repo.git (uses GitHub token)
+# Pick https if you have multi-account SSH setup or your default SSH key
+# cannot access target repos. Independent of `gh config get git_protocol`.
+clone_protocol: ssh
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
 vendors:

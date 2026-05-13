@@ -66,7 +66,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   const spinner2 = ora('Cloning repo for review...').start()
 
   try {
-    execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
+    // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
+    // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
+    const cloneUrl = config.clone_protocol === 'https'
+      ? `https://x-access-token:${token}@github.com/${owner}/${repo}.git`
+      : `git@github.com:${owner}/${repo}.git`
+    execSync(`git clone --depth=50 --quiet ${cloneUrl} ${tmpDir}`, { stdio: 'pipe' })
     execSync(`git fetch origin pull/${number}/head:pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
     execSync(`git checkout pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
     try {

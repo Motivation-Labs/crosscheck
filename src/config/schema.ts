@@ -137,6 +137,12 @@ export const ConfigSchema = z.object({
   // Absent = not yet configured; watch/serve will prompt on first run.
   deployment: z.enum(['personal', 'team']).optional(),
   mode: z.enum(['single-vendor', 'cross-vendor']).default('cross-vendor'),
+  // How crosscheck clones PR repos for review.
+  // ssh   — git@github.com:owner/repo.git (uses local SSH keys)
+  // https — https://github.com/owner/repo.git (uses GitHub token via gh credential helper)
+  // Pick https if you have multi-account SSH setup or your default SSH key cannot
+  // access target repos. Independent of `gh config get git_protocol`.
+  clone_protocol: z.enum(['ssh', 'https']).default('ssh'),
   vendors: z.object({
     codex: CodexVendorConfigSchema.default({}),
     claude: VendorConfigSchema.default({}),

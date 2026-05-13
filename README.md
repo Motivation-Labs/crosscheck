@@ -114,6 +114,11 @@ routing:
 quality:
   tier: balanced          # fast | balanced | thorough
 
+# Which protocol crosscheck uses when cloning PR repos for review
+# ssh   — uses your local SSH keys (default)
+# https — uses your GitHub token; pick if SSH cannot reach target repos
+clone_protocol: ssh
+
 post_review:
   auto_fix:
     enabled: true

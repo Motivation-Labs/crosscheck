@@ -6,6 +6,7 @@ import type { DiagnoseReport } from '../commands/diagnose.js'
 function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
   return {
     mode: 'cross-vendor',
+    clone_protocol: 'ssh',
     orgs: [],
     users: [],
     repos: [],

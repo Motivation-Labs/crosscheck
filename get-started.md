@@ -786,7 +786,7 @@ If no errors are found in recent logs, crosscheck prints `No errors found in rec
 
 On re-runs, `onboard` updates only the fields it collected answers for. Everything else survives unchanged.
 
-**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
+**Updated on every run:** `deployment`, `orgs`, `repos`, `mode`, `clone_protocol`, `vendors.*.enabled`, `vendors.*.effort`, `quality.tier`, `tunnel.*`, `post_review.auto_fix.*`
 
 **Initialised on first run, never overwritten:** `routing.allowed_authors`, `routing.author_routes`, `routing.fallback_reviewer`
 
@@ -819,6 +819,13 @@ Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 d
 # single-vendor: one AI reviews all PRs
 # cross-vendor:  Claude ↔ Codex review each other
 mode: cross-vendor
+
+# ── Clone protocol ────────────────────────────────────────────────────────────
+# ssh   — git@github.com:owner/repo.git (uses local SSH keys)
+# https — https://github.com/owner/repo.git (uses GitHub token)
+# Pick https if you have multi-account SSH setup or your default SSH key
+# cannot access target repos. Independent of `gh config get git_protocol`.
+clone_protocol: ssh
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
 vendors:
@@ -1083,7 +1090,7 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 - **Webhook signature** — every request verified with HMAC-SHA256 before parsing
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
-- **No credentials in clones** — `gh repo clone` uses the gh credential helper; no tokens written to disk
+- **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
 
 ---
 

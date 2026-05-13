@@ -23,6 +23,7 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
+import { clonePRForReview } from '../lib/clone.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -105,14 +106,11 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
 
   try {
-    execSync(`gh repo clone ${owner}/${repoName} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
-    execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-    execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-    try {
-      execSync(`git fetch origin ${pr.base.ref}:refs/remotes/origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
-    } catch {
-      fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
-    }
+    clonePRForReview({
+      owner, repo: repoName, prNumber, baseRef: pr.base.ref,
+      tmpDir, token, protocol: config.clone_protocol,
+      onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref }),
+    })
 
     const prLoc = computePRLoc(tmpDir, pr.base.ref)
     board.updatePR(key, { prLoc })

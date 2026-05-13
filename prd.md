@@ -269,9 +269,22 @@ These four items fix the two-phase model described in Design Principles. Any new
     - For a three-step workflow (review → fix → recheck): after the fix step completes and `fix.applied_count > 0`, the recheck step runs the reviewer again on the updated branch.
     - Verdict from the recheck step is posted as a follow-up comment on the original PR.
     - If no fix was applied (reviewer approved or fixer found nothing to change), the recheck step is skipped.
-    - Loop terminates after `max_rounds` per step (default: 1) — no infinite looping.
-  - **Technical Notes:** `src/lib/workflow.ts` has the schema and `loadWorkflow()` but the step execution logic in `watch.ts`/`serve.ts` only runs a single review pass. The fix step (`post_review.auto_fix`) is partially implemented but the recheck step after fix is missing. The `workflow.yml` `when:` condition (`fix.applied_count > 0`) requires a step-result context object to be threaded through the execution loop.
-  - **Tests Required:** mock workflow with review → fix → recheck; assert recheck fires only when `fix.applied_count > 0`; assert loop stops at `max_rounds: 1`; assert recheck is skipped when review verdict is APPROVE.
+    - **One loop by default:** after the recheck step posts its verdict, crosscheck stops. No further automated fix or recheck is triggered regardless of verdict. All follow-up after recheck is manual.
+    - `max_rounds` is configurable — in `crosscheck.config.yml` under `post_review.auto_fix.max_rounds` (integer, default: `1`) and as `--max-rounds <n>` on `ck review` and `ck run`. This lets power users opt into more passes while keeping the safe default.
+    - The recheck step is always terminal — the runner must not enqueue another fix step after recheck regardless of `max_rounds`. `max_rounds` controls how many review→fix iterations run before the final recheck, not how many rechecks run.
+    - Schema: `post_review.auto_fix.max_rounds` is a positive integer, minimum 1. Values below 1 are rejected at config load time with a clear error.
+  - **Technical Notes:** `src/lib/workflow.ts` has the schema and `loadWorkflow()` but the step execution logic in `watch.ts`/`serve.ts` only runs a single review pass. The fix step (`post_review.auto_fix`) is partially implemented but the recheck step after fix is missing. The `workflow.yml` `when:` condition (`fix.applied_count > 0`) requires a step-result context object to be threaded through the execution loop. Add `max_rounds` to `schema.ts` with `z.number().int().min(1).default(1)`; thread it through `runWorkflow()` opts; add `--max-rounds` to `cli.ts` for both `review` and `run` commands.
+  - **Observed bug (Motivation-Labs/motivation-money#229, 2026-05-13):** PR looped through recheck → fix → recheck multiple times, generating 4+ automated comments. Root cause: the recheck step triggered a new webhook event (new commit pushed by the fixer), which was not recognised as a crosscheck-owned commit and re-entered the full pipeline. Fix requires both the `max_rounds` cap and reliable crosscheck-commit filtering (see "crosscheck-commit filter" item below).
+  - **Tests Required:** mock workflow with review → fix → recheck; assert recheck fires only when `fix.applied_count > 0`; assert pipeline halts after recheck regardless of recheck verdict; assert `max_rounds: 2` runs two review→fix iterations then one recheck; assert `max_rounds: 0` is rejected at config load; assert `--max-rounds 2` on `ck review` overrides config value; assert a push from a `[crosscheck]`-prefixed commit does not re-enter the pipeline.
+
+- [ ] **crosscheck-commit filter must be durable across sessions** — the current in-memory `crosscheckShas` set (runner.ts) breaks across process restarts and separate `serve`/`watch` invocations. When a fix commit lands on a branch and the process has restarted (or a new webhook delivery arrives after a cold start), the SHA is no longer in the set and crosscheck re-enters the full pipeline, causing the recheck → fix → recheck loop observed in motivation-money#229.
+  - **User:** Anyone running `serve` or `watch` in a long-lived process or with restarts.
+  - **Acceptance Criteria:**
+    - Commit author identity or commit message prefix `[crosscheck]` is checked in the webhook filter **before** any SHA lookup — no process state required.
+    - Webhook handler skips any push event where every new commit message starts with `[crosscheck]`.
+    - The in-memory `crosscheckShas` set is kept as a secondary fast-path but is not the sole guard.
+  - **Technical Notes:** `src/github/webhook.ts` receives the push/PR event; the filter should live there, not in the runner. The `[crosscheck]` prefix is already used in commit messages (`runner.ts:217,236`).
+  - **Tests Required:** webhook handler receives push with `[crosscheck] fix:` commit → event is dropped; webhook handler receives push with normal commit → event proceeds.
 
 ---
 

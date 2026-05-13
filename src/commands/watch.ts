@@ -31,9 +31,29 @@ import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
+import {
+  getSmartSwitch,
+  isSubscriptionLimitError,
+  detectFailedVendor,
+  triggerSwitch,
+  notifyReviewSuccess,
+  stopSmartSwitch,
+} from '../lib/smart-switch.js'
+import type { Config } from '../config/schema.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+
+function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
+  return {
+    ...config,
+    mode: 'single-vendor',
+    vendors: {
+      codex: { ...config.vendors.codex, enabled: fallbackVendor === 'codex' },
+      claude: { ...config.vendors.claude, enabled: fallbackVendor === 'claude' },
+    },
+  }
+}
 
 // Compute PR diff size in lines, excluding noise (lockfiles, binaries, data files)
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
@@ -210,9 +230,16 @@ export async function runWatch(opts: WatchOpts = {}) {
         owner, repoName, prNumber,
         config, token, params.author,
       )
-      const reviewer = await assignReviewer(origin, config)
 
-      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author })
+      // Smart-switch: when cross-vendor is degraded, override to single-vendor with the healthy vendor
+      const ss = getSmartSwitch()
+      const effectiveConfig = (config.mode === 'cross-vendor' && ss.active && ss.fallbackVendor)
+        ? buildFallbackConfig(config, ss.fallbackVendor)
+        : config
+
+      const reviewer = await assignReviewer(origin, effectiveConfig)
+
+      fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: params.headSha, action: params.action, origin, origin_method: originMethod, author: params.author, smart_switch_active: ss.active })
 
       if (!reviewer) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_reviewer', origin })
@@ -221,9 +248,10 @@ export async function runWatch(opts: WatchOpts = {}) {
 
       const ts = chalk.dim(fmtTime())
       const tsIndent = ' '.repeat(FMT_TIME_WIDTH + 2)
+      const modeNote = ss.active ? chalk.yellow(' [smart-switch]') : ''
       bLog(
         `${ts}  PR #${prNumber} ${params.action}  ${chalk.dim(params.title)}`,
-        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`
+        `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`
       )
 
       const pr: PREvent['pull_request'] = {
@@ -251,7 +279,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const { verdict } = await runWorkflow({
           owner, repoName, prNumber, pr,
-          tmpDir, token, config, origin,
+          tmpDir, token, config: effectiveConfig, origin,
           reviewStart,
           log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
@@ -263,10 +291,19 @@ export async function runWatch(opts: WatchOpts = {}) {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
         })
+        // Smart-switch recovery confirmation: if a restore attempt is pending and
+        // this reviewer matches the previously-degraded vendor, announce full restoration.
+        notifyReviewSuccess(reviewer, bLog)
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err)
         board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+        // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
+        // degrade to single-vendor with the healthy vendor for the next 30 minutes.
+        if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
+          const failedVendor = detectFailedVendor(err)
+          if (failedVendor) triggerSwitch(failedVendor, message, bLog)
+        }
       } finally {
         rmSync(tmpDir, { force: true, recursive: true })
       }
@@ -434,6 +471,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   const cleanup = async () => {
     running = false
     board.stop()
+    stopSmartSwitch()
     console.log('\nCleaning up...')
     currentTunnelProc?.kill()
     await deleteCurrentWebhooks()

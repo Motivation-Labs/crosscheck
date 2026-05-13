@@ -204,6 +204,7 @@ async function runWithClaude(prompt: string): Promise<string> {
   try {
     result = await execa('claude', ['--print', '--bare', prompt], {
       timeout: 120_000,
+      stdin: 'ignore',
       env: { ...process.env },
     })
   } catch (err: unknown) {

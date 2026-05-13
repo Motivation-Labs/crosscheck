@@ -320,8 +320,7 @@ export interface OnboardAnswers {
   repos: Array<{ owner: string; name: string }>
   allowedAuthors: string[]
   authorRoutes: Record<string, 'claude' | 'codex'>
-  autoFix: boolean
-  deliveryMode: 'pull_request' | 'commit'
+  deliveryMode: 'pull_request' | 'commit' | 'comment'
   brand: { service_name: string; comment_header: string; comment_footer: string; reviewer_attribution: string }
 }
 
@@ -353,13 +352,12 @@ export function writeOnboardConfig(configPath: string, answers: OnboardAnswers):
   const postReview = raw.post_review as Record<string, unknown>
   if (typeof postReview.auto_fix !== 'object' || postReview.auto_fix === null) postReview.auto_fix = {}
   const af = postReview.auto_fix as Record<string, unknown>
-  af.enabled = answers.autoFix
-  if (answers.autoFix) {
-    if (!af.trigger) af.trigger = 'on_issues'
-    if (!af.fixer) af.fixer = 'same-as-author'
-    if (typeof af.delivery !== 'object' || af.delivery === null) af.delivery = {}
-    ;(af.delivery as Record<string, unknown>).mode = answers.deliveryMode
-  }
+  // Remove stale fields from old schema — workflow.yml now controls step sequencing
+  delete af.enabled
+  delete af.trigger
+  delete af.fixer
+  if (typeof af.delivery !== 'object' || af.delivery === null) af.delivery = {}
+  ;(af.delivery as Record<string, unknown>).mode = answers.deliveryMode
 
   const { service_name, comment_header, comment_footer, reviewer_attribution } = answers.brand
   const hasBrand = service_name !== 'crosscheck' || comment_header !== '' || comment_footer !== '' || reviewer_attribution !== ''

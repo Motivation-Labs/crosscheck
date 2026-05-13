@@ -85,7 +85,8 @@ export const ImpactConfigSchema = z.object({
 
 export const BacktraceConfigSchema = z.object({
   // Scan for open PRs without a [crosscheck] comment on startup.
-  enabled: z.boolean().default(true),
+  // Off by default — pass --backtrace (watch/serve) or set enabled: true in config to opt in.
+  enabled: z.boolean().default(false),
 })
 
 export const PostReviewDeliverySchema = z.object({
@@ -97,19 +98,15 @@ export const PostReviewDeliverySchema = z.object({
   label: z.string().default('cr-autofix'),
 })
 
+// Trigger conditions, vendor selection, and step sequencing are all defined in
+// workflow.yml (type, when, reviewer). This schema retains only the delivery
+// mechanism — how fixes land on the PR — which is operational config, not pipeline logic.
 export const PostReviewFixSchema = z.object({
-  enabled: z.boolean().default(false),
-  // on_issues → only run when the reviewer found actionable issues
-  // always    → always run after every review
-  // never     → disable (same as enabled: false)
-  trigger: z.enum(['on_issues', 'always', 'never']).default('on_issues'),
-  // minimum severity level that qualifies as "actionable"
-  min_severity: z.enum(['error', 'warning', 'info']).default('warning'),
-  // same-as-author → the vendor that wrote the PR also fixes it (recommended)
-  // same-as-reviewer → the reviewing vendor also proposes fixes
-  // codex / claude  → always use a specific vendor
-  fixer: z.enum(['same-as-author', 'same-as-reviewer', 'codex', 'claude']).default('same-as-author'),
   delivery: PostReviewDeliverySchema.default({}),
+  // Migration compat: honored with a deprecation warning but no longer the control plane.
+  // Remove these from config and use workflow.yml to control when fix steps run.
+  enabled: z.boolean().optional(),
+  trigger: z.enum(['on_issues', 'always', 'never']).optional(),
 })
 
 export const PostReviewConfigSchema = z.object({

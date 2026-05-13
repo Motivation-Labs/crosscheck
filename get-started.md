@@ -922,17 +922,10 @@ impact:
   defect_cost_usd: 150               # per issue caught, for --money estimate
 
 # ── Post-review auto-fix ──────────────────────────────────────────────────────
-# Runs after each review. When issues are found, the authoring vendor opens a
-# fix PR targeting the original branch. You approve and merge it; the original
-# PR updates automatically.
+# Controls HOW fixes are delivered. Step sequencing (which steps run, when,
+# and with which vendor) is configured in ~/.crosscheck/workflow.yml.
 post_review:
   auto_fix:
-    enabled: true
-    trigger: on_issues        # on_issues | always | never
-    min_severity: warning     # error | warning | info — skip cosmetic findings
-    # same-as-author: the vendor that wrote the PR also applies the fix
-    # In cross-vendor mode: Claude-authored → Claude fixes; Codex-authored → Codex fixes
-    fixer: same-as-author     # same-as-author | same-as-reviewer | codex | claude
     delivery:
       mode: pull_request      # pull_request | commit | comment
       # pull_request → fix PR targets original branch; human approves before merge
@@ -940,6 +933,16 @@ post_review:
       # comment      → suggested fixes posted as review comments only
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix       # GitHub label applied to the fix PR
+
+# ── Backtrace ─────────────────────────────────────────────────────────────────
+# On startup, scan all open PRs in the monitored scope and review any that
+# haven't received a [crosscheck] comment yet. Off by default.
+# Enable with:
+#   backtrace.enabled: true  (persistent — runs every startup)
+#   --backtrace flag         (this session only)
+#   --no-backtrace flag      (suppress even when enabled: true)
+# backtrace:
+#   enabled: true
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:

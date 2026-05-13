@@ -269,9 +269,22 @@ These four items fix the two-phase model described in Design Principles. Any new
     - For a three-step workflow (review → fix → recheck): after the fix step completes and `fix.applied_count > 0`, the recheck step runs the reviewer again on the updated branch.
     - Verdict from the recheck step is posted as a follow-up comment on the original PR.
     - If no fix was applied (reviewer approved or fixer found nothing to change), the recheck step is skipped.
-    - Loop terminates after `max_rounds` per step (default: 1) — no infinite looping.
-  - **Technical Notes:** `src/lib/workflow.ts` has the schema and `loadWorkflow()` but the step execution logic in `watch.ts`/`serve.ts` only runs a single review pass. The fix step (`post_review.auto_fix`) is partially implemented but the recheck step after fix is missing. The `workflow.yml` `when:` condition (`fix.applied_count > 0`) requires a step-result context object to be threaded through the execution loop.
-  - **Tests Required:** mock workflow with review → fix → recheck; assert recheck fires only when `fix.applied_count > 0`; assert loop stops at `max_rounds: 1`; assert recheck is skipped when review verdict is APPROVE.
+    - **One loop by default:** after the recheck step posts its verdict, crosscheck stops. No further automated fix or recheck is triggered regardless of verdict. All follow-up after recheck is manual.
+    - `max_rounds` is configurable — in `crosscheck.config.yml` under `post_review.auto_fix.max_rounds` (integer, default: `1`) and as `--max-rounds <n>` on `ck review` and `ck run`. This lets power users opt into more passes while keeping the safe default.
+    - The recheck step is always terminal — the runner must not enqueue another fix step after recheck regardless of `max_rounds`. `max_rounds` controls how many review→fix iterations run before the final recheck, not how many rechecks run.
+    - Schema: `post_review.auto_fix.max_rounds` is a positive integer, minimum 1. Values below 1 are rejected at config load time with a clear error.
+  - **Technical Notes:** `src/lib/workflow.ts` has the schema and `loadWorkflow()` but the step execution logic in `watch.ts`/`serve.ts` only runs a single review pass. The fix step (`post_review.auto_fix`) is partially implemented but the recheck step after fix is missing. The `workflow.yml` `when:` condition (`fix.applied_count > 0`) requires a step-result context object to be threaded through the execution loop. Add `max_rounds` to `schema.ts` with `z.number().int().min(1).default(1)`; thread it through `runWorkflow()` opts; add `--max-rounds` to `cli.ts` for both `review` and `run` commands.
+  - **Observed bug (Motivation-Labs/motivation-money#229, 2026-05-13):** PR looped through recheck → fix → recheck multiple times, generating 4+ automated comments. Root cause: the recheck step triggered a new webhook event (new commit pushed by the fixer), which was not recognised as a crosscheck-owned commit and re-entered the full pipeline. Fix requires both the `max_rounds` cap and reliable crosscheck-commit filtering (see "crosscheck-commit filter" item below).
+  - **Tests Required:** mock workflow with review → fix → recheck; assert recheck fires only when `fix.applied_count > 0`; assert pipeline halts after recheck regardless of recheck verdict; assert `max_rounds: 2` runs two review→fix iterations then one recheck; assert `max_rounds: 0` is rejected at config load; assert `--max-rounds 2` on `ck review` overrides config value; assert a push from a `[crosscheck]`-prefixed commit does not re-enter the pipeline.
+
+- [ ] **crosscheck-commit filter must be durable across sessions** — the current in-memory `crosscheckShas` set (runner.ts) breaks across process restarts and separate `serve`/`watch` invocations. When a fix commit lands on a branch and the process has restarted (or a new webhook delivery arrives after a cold start), the SHA is no longer in the set and crosscheck re-enters the full pipeline, causing the recheck → fix → recheck loop observed in motivation-money#229.
+  - **User:** Anyone running `serve` or `watch` in a long-lived process or with restarts.
+  - **Acceptance Criteria:**
+    - Commit message prefix `[crosscheck]` is checked in the webhook handler **before** dispatching to `onPR` — no process state required.
+    - The webhook handler (`webhook.ts:76`) already only acts on `pull_request` events with action `opened` or `synchronize` — raw `push` events are never dispatched. The filter must therefore target the `synchronize` path: before calling `onPR`, fetch the head commit message of the PR and skip if it starts with `[crosscheck]`.
+    - The in-memory `crosscheckShas` set is kept as a secondary fast-path but is not the sole guard.
+  - **Technical Notes:** `src/github/webhook.ts:76` dispatches `onPR` for `opened | synchronize`. For `synchronize` events, `body.pull_request.head.sha` is available — use it to fetch the commit message via the GitHub API (or pass it through `PREvent`) and short-circuit before `onPR` if the message starts with `[crosscheck]`. The `[crosscheck]` prefix is already used in all fix commit messages (`runner.ts:217,236`).
+  - **Tests Required:** webhook handler receives `synchronize` event where head commit message starts with `[crosscheck]` → `onPR` is not called; webhook handler receives `synchronize` event with normal commit → `onPR` is called; webhook handler receives `opened` event with `[crosscheck]` commit → `onPR` is called (opened events are never crosscheck-originated).
 
 ---
 
@@ -406,7 +419,36 @@ These four items fix the two-phase model described in Design Principles. Any new
   - **Technical Notes:** The description suffix `(current)` is appended in-place in `promptVendorMode`, `promptQualityTier`, `promptWorkflowPipeline`, `promptConnectionType` when the item matches the existing config value. No change to `promptSinglePicker` signature needed — use the `description` field.
   - **Tests Required:** When existing config has `quality.tier: thorough`, the `thorough` item's description includes `(current)`. When no config exists, no `(current)` suffix appears on any item.
 
-- [ ] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
+- [x] **Per-PR status bar — live step states + workflow-aware Fix/Recheck visibility** — the active PR slot's second line (`PR | CR | Fix`) does not accurately reflect real-time step state: CR shows `pending` even while a review is actively running, Fix and Recheck are always rendered as `pending` regardless of whether the workflow is configured to run them, and the per-PR section disappears from the board after completion.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who monitors the terminal during active reviews.
+  - **Problem (observed in screenshot):** While codex is reviewing PR #78, the status bar shows `CR [░░░] pending | Fix [░░░] pending`. Two issues: (1) CR should show an active/in-progress state (e.g. a spinner or `reviewing…` label) rather than `pending` — `pending` implies the step hasn't started; (2) Fix (and Recheck, for review-fix-recheck workflows) should respect the loaded `workflow.yml` — if the step is not in the workflow, the column should show `—` or be omitted rather than implying it is queued. If the step is in the workflow but waiting for the prior step to finish, it should show `queued`; if it ran, it should show its outcome.
+  - **Acceptance Criteria:**
+    - **CR step state transitions (active slot):**
+      - `queued` — PR arrived, review has not started yet (brief gap between event receipt and reviewer launch).
+      - `⠋ reviewing…` (spinner) — reviewer CLI is actively running.
+      - `✓ APPROVE` / `⚠ NEEDS WORK` / `✗ BLOCK` — review completed; colored badge.
+      - `✗ error` — reviewer exited non-zero.
+    - **Fix step state (workflow-aware):**
+      - Not in workflow → column shows `Fix —` (dash, no bar). Column width and separator preserved so layout doesn't shift.
+      - In workflow, waiting for CR to finish → `Fix queued`.
+      - In workflow, running → `Fix ⠋ applying…`.
+      - In workflow, completed → `Fix ✓ N applied` or `Fix — skipped` (when verdict was APPROVE and `when` condition was false).
+      - In workflow, errored → `Fix ✗ error`.
+    - **Recheck step state** — same state machine as Fix, using the same column rules. Shown as a fourth column `| Recheck …` when present in workflow; absent (not even `—`) when not in workflow.
+    - **Per-PR section persists after completion** — after `completePR()` is called, the two-line entry is printed to scrollback (as it is today) AND a "completed" version of the slot remains visible in the live board area until the next render cycle clears it naturally (or for at least 5 seconds). This gives the user a moment to see the final verdict before the slot disappears.
+    - The three columns always align; column widths do not change between state transitions (use fixed-width labels).
+  - **Technical Notes:**
+    - `src/lib/board.ts` (`renderPRSlot()`): add a `phase` field to `PRSlot` to distinguish `queued | reviewing | reviewed | fixing | fixed | rechecking | rechecked | error`. Drive the CR/Fix/Recheck labels from `phase` rather than checking `slot.verdict === undefined`.
+    - `src/commands/watch.ts` (or wherever `updatePR()` is called): emit a `phase` update at each step transition — before launching the reviewer CLI, after it exits, before launching the fixer, after it exits.
+    - Load the active workflow steps at board-init time (via `loadWorkflow()`); pass the step names to `PRBoard` so it knows which columns to render.
+    - For the 5-second completed-slot retention: set a `completedAt` timestamp on the slot in `completePR()`; `render()` includes recently-completed slots (within the retention window) in the live block, rendered with a dim ✓ prefix on line 1 and frozen final state on line 2.
+  - **Tests Required:**
+    - `renderPRSlot()` with `phase: 'reviewing'` renders `⠋ reviewing…` in the CR column, not `pending`.
+    - `renderPRSlot()` with Fix step absent from workflow renders `Fix —`, not `Fix [░] pending`.
+    - `renderPRSlot()` with Fix step present and `phase: 'fixing'` renders `Fix ⠋ applying…`.
+    - Completed slot appears in live block for 5s after `completePR()`, then is absent on the next render after the window expires.
+
+- [x] **Board output redesign — section reorder + unified PR line format** — restructure the `watch`/`serve` live board (`board.ts`) so sections read top-to-bottom in information priority order, and tighten the completed-PR two-line format to a consistent `PR | CR | Fix` pipeline layout.
   - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants a cleaner, scannable terminal output.
   - **Acceptance Criteria:**
     - **Section order (live block, top to bottom):**
@@ -1082,7 +1124,7 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.
 
-- [ ] **Fix `verdict: null` — handle Codex reviews that complete without a parseable verdict line** — when Codex finishes a review but its output contains no `VERDICT: APPROVE|NEEDS WORK|BLOCK` line, the current code logs `verdict: null` and posts the comment without a verdict badge. The missing verdict silently degrades the review experience and breaks downstream features (`diagnose` verdict counts, `impact` BLOCK metrics). This fix adds a fallback extraction pass, a warning comment annotation, and a structured log field so the failure is visible.
+- [x] **Fix `verdict: null` — handle Codex reviews that complete without a parseable verdict line** — when Codex finishes a review but its output contains no `VERDICT: APPROVE|NEEDS WORK|BLOCK` line, the current code logs `verdict: null` and posts the comment without a verdict badge. The missing verdict silently degrades the review experience and breaks downstream features (`diagnose` verdict counts, `impact` BLOCK metrics). This fix adds a fallback extraction pass, a warning comment annotation, and a structured log field so the failure is visible.
   - **User:** Anyone running `crosscheck watch`/`serve` with Codex as the reviewer — especially on large diffs where Codex may truncate or reformat output.
   - **Acceptance Criteria:**
     - Primary extraction: scan the full Codex output for the last line matching `/^VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)/i`. Case-insensitive; tolerate `NEEDS_WORK` and `NEEDS WORK` spellings.

@@ -2,6 +2,17 @@ import chalk from 'chalk'
 import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
 
+// ── Phase state ───────────────────────────────────────────────────────────────
+
+export type PRPhase =
+  | 'queued'      // waiting for review to start
+  | 'reviewing'   // review CLI running
+  | 'reviewed'    // review done, comment posted
+  | 'fixing'      // fix CLI running
+  | 'fixed'       // fix done (or skipped)
+  | 'rechecking'  // recheck CLI running
+  | 'rechecked'   // recheck done (or skipped)
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type ChalkFn = (s: string) => string
@@ -28,18 +39,23 @@ interface PRSlot {
   branch: string
   label: string
   startedAt: number
+  completedAt?: number      // set by completePR — slot kept 5s for live retention
   prLoc?: number
-  verdict?: string | null
+  phase?: PRPhase
+  verdict?: string | null   // review step verdict (undefined = not yet reviewed)
   commentCount?: number
-  fixCount?: number
+  fixCount?: number         // undefined = hasn't run, 0 = skipped, N = applied
+  recheckVerdict?: string | null  // recheck step verdict
 }
 
 export interface PRUpdate {
   label?: string
   prLoc?: number
+  phase?: PRPhase
   verdict?: string | null
   commentCount?: number
-  fixCount?: number  // set via onPhaseChange after address step
+  fixCount?: number
+  recheckVerdict?: string | null
 }
 
 export interface PRCompletionData {
@@ -209,7 +225,7 @@ export class PRBoard {
   }
 
   addPR(key: string, prNumber: number, repo: string, branch: string): void {
-    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now() })
+    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued' })
     this.stats.prsReceived++
   }
 
@@ -218,60 +234,75 @@ export class PRBoard {
     if (!slot) return
     if (updates.label !== undefined) slot.label = updates.label
     if (updates.prLoc !== undefined) slot.prLoc = updates.prLoc
+    if (updates.phase !== undefined) slot.phase = updates.phase
     if (updates.verdict !== undefined) slot.verdict = updates.verdict
     if (updates.commentCount !== undefined) slot.commentCount = updates.commentCount
     if (updates.fixCount !== undefined) slot.fixCount = updates.fixCount
+    if (updates.recheckVerdict !== undefined) slot.recheckVerdict = updates.recheckVerdict
   }
 
   completePR(key: string, data: PRCompletionData): void {
     const slot = this.slots.get(key)
-    this.slots.delete(key)
+    if (!slot) return
 
-    // Pull accumulated data from the slot (set via updatePR/onPhaseChange during workflow)
-    const verdict = slot?.verdict ?? null
-    const commentCount = slot?.commentCount ?? 0
-    const fixCount = slot?.fixCount ?? 0
+    // Mark as completed — kept in slots map for 5-second live-block retention
+    slot.completedAt = Date.now()
+    slot.label = 'done'
 
-    if (verdict !== null) {
+    const verdict = slot.verdict ?? null
+    const commentCount = slot.commentCount ?? 0
+    const fixCount = slot.fixCount
+
+    // Count completed CRs regardless of whether verdict was parseable
+    if (verdict !== null || slot.phase === 'reviewed' || slot.phase === 'rechecked' || slot.phase === 'fixed') {
       this.stats.crsCompleted++
       this.stats.crTotalMs += data.elapsedMs
     }
-    if (fixCount > 0) this.stats.fixesApplied++
+    if (fixCount !== undefined && fixCount > 0) this.stats.fixesApplied++
 
-    if (slot) {
-      const t = this.theme
-      const ts = fmtTime()
-      const indent = ' '.repeat(FMT_TIME_WIDTH + 2)
-      const elapsed = `(${Math.round(data.elapsedMs / 1000)}s)`
+    const t = this.theme
+    const ts = fmtTime()
+    const indent = ' '.repeat(FMT_TIME_WIDTH + 2)
+    const elapsed = `(${Math.round(data.elapsedMs / 1000)}s)`
 
-      // line 1
-      const badge = this.verdictBadge(verdict)
-      const branch = truncate(slot.branch, 22)
-      const line1 = `${t.dim(ts)}  ${badge}  #${slot.prNumber}  ${chalk.dim(slot.repo)}  ${t.dim(branch)}  ${t.dim(elapsed)}  ${t.dim('→')} ${t.accent(data.url)}`
+    // line 1 — use recheck verdict for badge when available
+    const finalVerdict = slot.recheckVerdict !== undefined ? slot.recheckVerdict : verdict
+    const badge = this.verdictBadge(finalVerdict)
+    const branch = truncate(slot.branch, 22)
+    const line1 = `${t.dim(ts)}  ${badge}  #${slot.prNumber}  ${chalk.dim(slot.repo)}  ${t.dim(branch)}  ${t.dim(elapsed)}  ${t.dim('→')} ${t.accent(data.url)}`
 
-      // line 2 — PR | CR | Fix pipeline summary
-      const pipe = chalk.dim(' | ')
+    // line 2 — always shown: PR | CR | Fix pipeline summary
+    const pipe = chalk.dim(' | ')
+    const hasFixStep = this.steps.some(s => s.type === 'fix')
 
-      const prSection = slot.prLoc !== undefined
-        ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
-        : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
+    const prSection = slot.prLoc !== undefined
+      ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
+      : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
-      const crSection = verdict !== null
-        ? (() => {
-            const crFill = this.crFillFn(verdict)
-            const crLabel = this.crLabelFn(verdict)
-            return `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(`${commentCount} issues (${verdict})`)}`
-          })()
-        : null
+    let crSection: string
+    if (verdict !== null) {
+      const crFill = this.crFillFn(verdict)
+      const crLabel = this.crLabelFn(verdict)
+      crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(`${commentCount} issues (${verdict})`)}`
+    } else {
+      crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
+    }
 
-      const fixSection = fixCount > 0
-        ? `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' fixes')}`
-        : `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
+    let fixSection: string
+    if (!hasFixStep) {
+      fixSection = `Fix ${t.dim('—')}`
+    } else if (fixCount !== undefined && fixCount > 0) {
+      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}`
+    } else {
+      fixSection = `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
+    }
 
-      const line2 = crSection !== null
-        ? indent + prSection + pipe + crSection + pipe + fixSection
-        : ''
-      this.printStatic(line2 ? `\n${line1}\n${line2}` : line1)
+    this.printStatic(`\n${line1}\n${indent}${prSection}${pipe}${crSection}${pipe}${fixSection}`)
+
+    // In non-TTY mode render() never runs, so purge the slot here instead of
+    // relying on the render loop's 5-second cleanup.
+    if (!this.isTTY) {
+      this.slots.delete(key)
     }
   }
 
@@ -379,17 +410,25 @@ export class PRBoard {
   private renderPRSlot(slot: PRSlot, frame: string): string {
     const t = this.theme
     const w = process.stdout.columns || 80
-    const elapsed = Math.floor((Date.now() - slot.startedAt) / 1000)
-    const eSuffix = `${elapsed}s`
+    const isCompleted = slot.completedAt !== undefined
+    const totalElapsedMs = isCompleted
+      ? slot.completedAt! - slot.startedAt
+      : Date.now() - slot.startedAt
+    const eSuffix = `${Math.floor(totalElapsedMs / 1000)}s`
 
-    // ── Line 1: identity + phase + elapsed ──────────────────────────────────────
+    // ── Line 1: identity  <pad>  elapsed  phase-label ─────────────────────────
     const branch = truncate(slot.branch, 22)
-    const l1Plain = `  ${frame} #${slot.prNumber}  ${slot.repo}  ${branch}  · ${slot.label}  `
-    const l1Pad = Math.max(1, w - stripAnsi(l1Plain).length - eSuffix.length)
-    const l1 = `  ${t.spinner(frame)} ${chalk.bold(`#${slot.prNumber}`)}  ${chalk.white(slot.repo)}  ${t.dim(branch)}  ${t.dim('· ' + slot.label)}  ` +
-      ' '.repeat(l1Pad) + t.dim(eSuffix)
+    const icon = isCompleted ? t.success('✓') : t.spinner(frame)
+    const phaseLabel = this.phaseLine1Label(slot, frame)
+    const rightPart = `${t.dim(eSuffix)}  ${phaseLabel}`
+    const identityPlain = `   #${slot.prNumber}  ${slot.repo}  ${branch}`
+    const l1Pad = Math.max(2, w - stripAnsi(identityPlain).length - stripAnsi(rightPart).length - 2)
+    const prNum = isCompleted ? t.dim(`#${slot.prNumber}`) : chalk.bold(`#${slot.prNumber}`)
+    const repoStr = isCompleted ? t.dim(slot.repo) : chalk.white(slot.repo)
+    const l1 = `  ${icon} ${prNum}  ${repoStr}  ${t.dim(branch)}` +
+      ' '.repeat(l1Pad) + rightPart
 
-    // ── Line 2: PR | CR | Fix pipeline ──────────────────────────────────────────
+    // ── Line 2: PR | CR | Fix | Recheck pipeline ────────────────────────────────
     const indent = '    '
     const pipe = t.dim(' | ')
 
@@ -397,26 +436,92 @@ export class PRBoard {
       ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
       : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
-    const crSection = (slot.verdict !== undefined && slot.verdict !== null)
-      ? (() => {
-          const crFill = this.crFillFn(slot.verdict)
-          const crLabel = this.crLabelFn(slot.verdict)
-          const count = slot.commentCount ?? 0
-          return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(`${count} issues (${slot.verdict})`)}`
-        })()
-      : `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.dim('pending')}`
+    const crSection = this.renderCRSection(slot, frame)
+    const fixSection = this.renderFixSection(slot, frame)
+    const recheckSection = this.renderRecheckSection(slot, frame)
 
-    const fixSection = slot.fixCount !== undefined
-      ? `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(slot.fixCount) + ' fixes')}`
-      : `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('pending')}`
+    const parts = [prSection, crSection, fixSection]
+    if (recheckSection !== null) parts.push(recheckSection)
 
-    const l2 = indent + prSection + pipe + crSection + pipe + fixSection
+    return `${l1}\n${indent}${parts.join(pipe)}`
+  }
 
-    return `${l1}\n${l2}`
+  private phaseLine1Label(slot: PRSlot, frame: string): string {
+    const t = this.theme
+    if (slot.completedAt !== undefined) return t.dim('done')
+    switch (slot.phase) {
+      case 'reviewing':
+      case 'rechecking':
+      case 'fixing':
+        return `${t.spinner(frame)} ${t.dim(slot.label)}`
+      default:
+        return t.dim(slot.label)
+    }
+  }
+
+  private renderCRSection(slot: PRSlot, frame: string): string {
+    const t = this.theme
+    if (slot.phase === 'reviewing') {
+      return `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim('reviewing…')}`
+    }
+    if (slot.verdict === undefined) {
+      return `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
+    }
+    if (slot.verdict === null) {
+      return `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
+    }
+    const crFill = this.crFillFn(slot.verdict)
+    const crLabel = this.crLabelFn(slot.verdict)
+    const count = slot.commentCount ?? 0
+    return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(`${count} issues (${slot.verdict})`)}`
+  }
+
+  private renderFixSection(slot: PRSlot, frame: string): string {
+    const t = this.theme
+    const hasFixStep = this.steps.some(s => s.type === 'fix')
+    if (!hasFixStep) return `Fix ${t.dim('—')}`
+    if (slot.phase === 'fixing') {
+      return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim('applying…')}`
+    }
+    if (slot.fixCount !== undefined) {
+      if (slot.fixCount === 0) return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('— skipped')}`
+      return `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.success('✓')} ${t.accent(String(slot.fixCount) + ' applied')}`
+    }
+    return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('queued')}`
+  }
+
+  private renderRecheckSection(slot: PRSlot, frame: string): string | null {
+    const t = this.theme
+    const hasRecheckStep = this.steps.some(s => s.type === 'recheck')
+    if (!hasRecheckStep) return null
+    if (slot.phase === 'rechecking') {
+      return `Recheck ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim('reviewing…')}`
+    }
+    if (slot.phase === 'rechecked') {
+      if (slot.recheckVerdict === undefined) {
+        return `Recheck ${makeBar(0, 5, t.barFixFill, t.barEmpty)} ${t.dim('— skipped')}`
+      }
+      if (slot.recheckVerdict === null) {
+        return `Recheck ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
+      }
+      const fill = this.crFillFn(slot.recheckVerdict)
+      const label = this.crLabelFn(slot.recheckVerdict)
+      return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(slot.recheckVerdict)}`
+    }
+    return `Recheck ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
   }
 
   private render(): string {
     if (!this.config) return ''
+
+    // Clean up completed slots past the 5-second retention window
+    const now = Date.now()
+    for (const [key, slot] of this.slots) {
+      if (slot.completedAt !== undefined && now - slot.completedAt > 5000) {
+        this.slots.delete(key)
+      }
+    }
+
     const cfg = this.config
     const t = this.theme
     const w = process.stdout.columns || 80

@@ -64,6 +64,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   const spinner2 = ora('Cloning repo for review...').start()
+  let reviewSpinner: ReturnType<typeof ora> | undefined
 
   try {
     execSync(`gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`, { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } })
@@ -80,8 +81,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
-    const reviewSpinner = ora(`Running ${reviewer} review...`).start()
-    const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
+    reviewSpinner = ora(`Running ${reviewer} review...`).start()
+    const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner!.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
 
     try {
       if (reviewer === 'codex') {
@@ -92,7 +93,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.quality,
           config.vendors.codex,
           undefined,
-          msg => { reviewSpinner.text = msg },
+          msg => { reviewSpinner!.text = msg },
         )
       } else {
         reviewText = await runClaudeReview(
@@ -103,7 +104,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.vendors.claude,
           config.budget.per_review_usd,
           undefined,
-          msg => { reviewSpinner.text = msg },
+          msg => { reviewSpinner!.text = msg },
         )
       }
     } finally {
@@ -125,9 +126,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
   } catch (err: unknown) {
+    spinner2.fail()
+    reviewSpinner?.fail()
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
-    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-    process.exitCode = 2
+    throw err
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

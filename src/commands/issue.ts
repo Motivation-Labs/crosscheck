@@ -199,11 +199,15 @@ function buildOpportunityPrompt(
   ].join('\n')
 }
 
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /[\x1B\x9B][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g
+
 async function runWithClaude(prompt: string): Promise<string> {
   let result
   try {
-    result = await execa('claude', ['--print', '--bare', prompt], {
+    result = await execa('claude', ['--print'], {
       timeout: 120_000,
+      input: prompt,
       env: { ...process.env },
     })
   } catch (err: unknown) {
@@ -213,7 +217,7 @@ async function runWithClaude(prompt: string): Promise<string> {
     }
     throw err
   }
-  return (result.stdout ?? result.stderr ?? '').trim()
+  return (result.stdout ?? result.stderr ?? '').replace(ANSI_RE, '').trim()
 }
 
 async function runWithCodex(prompt: string): Promise<string> {

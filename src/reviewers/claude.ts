@@ -49,7 +49,6 @@ export async function runClaudeReview(
     '--effort', effort,
     '--max-budget-usd', String(perReviewBudget),
     '--allowedTools', 'Bash(git diff),Bash(git log)',
-    prompt,
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
@@ -58,6 +57,7 @@ export async function runClaudeReview(
     const { stdout } = await execa('claude', args, {
       cwd: repoDir,
       timeout: 180_000,
+      input: prompt,
       env: { ...process.env },
     })
     return stdout.trim()

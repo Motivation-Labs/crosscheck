@@ -1087,7 +1087,7 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 - **Webhook signature** — every request verified with HMAC-SHA256 before parsing
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
-- **No credentials in clones** — `gh repo clone` uses the gh credential helper; no tokens written to disk
+- **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
 
 ---
 

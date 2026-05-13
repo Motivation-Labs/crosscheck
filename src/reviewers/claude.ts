@@ -1,7 +1,4 @@
 import { execa } from 'execa'
-import { readFileSync, writeFileSync, mkdtempSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 
@@ -45,28 +42,24 @@ export async function runClaudeReview(
     behaviorInstructions,
   ].filter(Boolean).join('\n')
 
-  const outputFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
-
   const args = [
     '--print',
-    '--bare',
     '--model', model,
     '--effort', effort,
     '--max-budget-usd', String(perReviewBudget),
-    '--output-last-message', outputFile,
     '--allowedTools', 'Bash(git diff),Bash(git log)',
-    prompt,
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
 
   try {
-    await execa('claude', args, {
+    const { stdout } = await execa('claude', args, {
       cwd: repoDir,
       timeout: 180_000,
+      input: prompt,
       env: { ...process.env },
     })
-    return readFileSync(outputFile, 'utf8').trim()
+    return stdout.trim()
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr?.trim() ?? ''

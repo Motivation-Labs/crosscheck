@@ -4,7 +4,6 @@ Focus on correctness and security. Be concise.
 
 
 ## Constraints
-
 - Do not run tsc, ts-node, or tsx.
 - Do not run npm, npx, yarn, or pnpm.
 - Do not run jest, vitest, mocha, or other test runners.
@@ -12,13 +11,11 @@ Focus on correctness and security. Be concise.
 - Base your review solely on reading source files and the diff.
 
 ## Focus
-
 Review for correctness, security, and maintainability. Flag issues that would cause
 bugs in production, expose sensitive data, or make the code significantly harder to
 maintain. Nits and style preferences should be NEEDS WORK, not BLOCK.
 
 ## Verdict format
-
 On the very last line of your response, write exactly one of:
 
 VERDICT: APPROVE

@@ -10,13 +10,16 @@ import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../
 import { createGithubClient, postReviewComment } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
+import type { PRPhase } from '../lib/board.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 
 export interface PRPhaseData {
+  phase?: PRPhase
   verdict?: string | null
   commentCount?: number
   fixCount?: number
+  recheckVerdict?: string | null
 }
 
 export interface WorkflowContext {
@@ -83,10 +86,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     if (step.when && !evaluateWhen(step.when, results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
       results[step.name] = { skipped: true }
+      if (step.type === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+      else if (step.type === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       continue
     }
 
     if (step.type === 'review' || step.type === 'recheck') {
+      const isRecheck = step.type === 'recheck'
       const reviewer = resolveReviewer(step.reviewer, origin, config)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
@@ -96,7 +102,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
 
-      onPhaseChange(`${reviewer} reviewing...`)
+      const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
+      const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
+      onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
       let rawReview: string
       if (reviewer === 'codex') {
         rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions)
@@ -114,12 +122,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
 
+      // Recheck verdict is stored separately to preserve the original review's commentCount on the board
+      const phaseUpdate: PRPhaseData = isRecheck
+        ? { recheckVerdict: verdict, phase: donePhase }
+        : { verdict, commentCount, phase: donePhase }
+
       if (ctx.dryRun) {
-        onPhaseChange('dry-run — comment not posted', { verdict: verdict ?? undefined, commentCount })
+        onPhaseChange('dry-run — comment not posted', phaseUpdate)
         log(chalk.dim(`\n--- dry-run: comment that would be posted ---\n${commentBody}\n--- end ---`))
         results[step.name] = { verdict, commentBody }
       } else {
-        onPhaseChange('posting comment...', { verdict: verdict ?? undefined, commentCount })
+        onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
         await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
@@ -128,62 +141,34 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
     } else if (step.type === 'fix') {
-      if (ctx.dryRun) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'dry_run' })
+      const skipFix = (reason: string) => {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { skipped: true }
-        continue
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
       }
-      // Respect post_review.auto_fix config
-      const autoFix = config.post_review.auto_fix
-      if (!autoFix.enabled || autoFix.trigger === 'never') {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'auto_fix_disabled' })
-        results[step.name] = { skipped: true }
+
+      if (ctx.dryRun) { skipFix('dry_run'); continue }
+
+      // Migration gate: honor legacy opt-out fields while users migrate to workflow.yml.
+      const legacyDisabled = config.post_review.auto_fix.enabled === false
+        || config.post_review.auto_fix.trigger === 'never'
+      if (legacyDisabled) {
+        log(chalk.yellow(`⚠  auto_fix.enabled/trigger are deprecated — remove them from config and add a "when:" condition to the fix step in workflow.yml instead`))
+        skipFix('legacy_auto_fix_disabled')
         continue
       }
 
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
-      if (!reviewResult?.commentBody) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_review_comment' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (!reviewResult?.commentBody) { skipFix('no_review_comment'); continue }
 
-      // min_severity gate: BLOCK=error, NEEDS_WORK=warning, APPROVE=info
-      if (autoFix.trigger === 'on_issues') {
-        const verdictRank: Record<string, number> = { BLOCK: 2, NEEDS_WORK: 1, APPROVE: 0 }
-        const severityRank: Record<string, number> = { error: 2, warning: 1, info: 0 }
-        const minRank = severityRank[autoFix.min_severity] ?? 1
-        const actualRank = verdictRank[reviewResult.verdict ?? ''] ?? 0
-        if (actualRank < minRank) {
-          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'below_min_severity', verdict: reviewResult.verdict })
-          results[step.name] = { skipped: true }
-          continue
-        }
-      }
-
-      // Derive vendor from autoFix.fixer, not from the workflow step's reviewer field
-      let vendor: 'claude' | 'codex' | null
-      if (autoFix.fixer === 'same-as-author') {
-        vendor = resolveReviewer('origin', origin, config)
-      } else if (autoFix.fixer === 'same-as-reviewer') {
-        vendor = resolveReviewer('auto', origin, config)
-      } else {
-        vendor = resolveReviewer(autoFix.fixer, origin, config)
-      }
-
-      if (!vendor) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_vendor' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
+      // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
+      const vendor = resolveReviewer(step.reviewer, origin, config)
+      if (!vendor) { skipFix('no_vendor'); continue }
 
       // Codex fix not yet implemented — skip gracefully
-      if (vendor === 'codex') {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'codex_fix_unsupported' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR
       let existingCount = 0
@@ -194,11 +179,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
-        results[step.name] = { skipped: true }
+        skipFix('commit_limit_reached')
         continue
       }
 
-      onPhaseChange(`${vendor} fixing...`)
+      onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
       let appliedCount = 0
       try {
         ;({ appliedCount } = await runFixStep(
@@ -211,23 +196,20 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix' }, err)
-        results[step.name] = { skipped: true }
+        skipFix('fix_error')
         continue
       }
 
       if (appliedCount === 0) {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { applied_count: 0 }
         continue
       }
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) {
-        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'fork_pr' })
-        results[step.name] = { skipped: true }
-        continue
-      }
+      if (isFork) { skipFix('fork_pr'); continue }
 
-      const deliveryMode = autoFix.delivery.mode
+      const deliveryMode = config.post_review.auto_fix.delivery.mode
 
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
@@ -241,7 +223,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
         results[step.name] = { applied_count: appliedCount }
 
@@ -262,7 +244,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ctx.crosscheckShas.add(newSha)
 
         const octokit = createGithubClient(token)
-        const fixPrTitle = autoFix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
+        const fixPrTitle = config.post_review.auto_fix.delivery.pr_title.replace('#{original_pr_title}', pr.title)
         const { data: fixPr } = await octokit.rest.pulls.create({
           owner,
           repo: repoName,
@@ -271,14 +253,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           title: fixPrTitle,
           body: `Auto-fix by crosscheck for CR issues found in #${prNumber}.\n\nReview: https://github.com/${owner}/${repoName}/pull/${prNumber}`,
         })
-        if (autoFix.delivery.label) {
+        if (config.post_review.auto_fix.delivery.label) {
           try {
             await octokit.rest.issues.addLabels({
-              owner, repo: repoName, issue_number: fixPr.number, labels: [autoFix.delivery.label],
+              owner, repo: repoName, issue_number: fixPr.number, labels: [config.post_review.auto_fix.delivery.label],
             })
           } catch { /* label may not exist in this repo — skip */ }
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
         results[step.name] = { applied_count: appliedCount }
 
@@ -291,7 +273,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
         results[step.name] = { applied_count: appliedCount }
       }

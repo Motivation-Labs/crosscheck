@@ -127,7 +127,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   } catch (err: unknown) {
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
     console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-    process.exit(2)
+    process.exitCode = 2
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

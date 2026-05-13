@@ -798,9 +798,9 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 crosscheck stores its config in `~/.crosscheck/config.yml` by default — persistent across projects, no per-repo file needed. It also looks in these locations (first found wins):
 
-1. `./crosscheck.config.yml`
-2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml` ← **default location**
+1. `~/.crosscheck/config.yml` ← **default location**
+2. `./crosscheck.config.yml`
+3. `./.crosscheck.yml`
 
 Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
 

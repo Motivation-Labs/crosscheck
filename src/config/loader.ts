@@ -11,10 +11,13 @@ import { listUserOrgs } from '../github/client.js'
 const CONFIG_FILENAME = 'crosscheck.config.yml'
 
 function findConfigFile(): string | null {
+  // Home is searched first: crosscheck is a user-level tool (it reviews PRs across
+  // all the user's repos/orgs), so ~/.crosscheck/config.yml is the natural source of
+  // truth. A cwd file is treated as a deliberate per-project override.
   const candidates = [
+    join(homedir(), '.crosscheck', 'config.yml'),
     resolve(process.cwd(), CONFIG_FILENAME),
     resolve(process.cwd(), '.crosscheck.yml'),
-    join(homedir(), '.crosscheck', 'config.yml'),
   ]
   return candidates.find(existsSync) ?? null
 }

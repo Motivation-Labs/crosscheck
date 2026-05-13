@@ -795,9 +795,9 @@ crosscheck issue
 
 crosscheck 默认将配置存储在 `~/.crosscheck/config.yml`——跨项目持久化，无需每个仓库都有配置文件。也会在以下位置查找（找到第一个为止）：
 
-1. `./crosscheck.config.yml`
-2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml` ← **默认位置**
+1. `~/.crosscheck/config.yml` ← **默认位置**
+2. `./crosscheck.config.yml`
+3. `./.crosscheck.yml`
 
 运行 `crosscheck init` 生成带完整注释的 `~/.crosscheck/config.yml`。
 

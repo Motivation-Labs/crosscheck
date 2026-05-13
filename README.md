@@ -174,6 +174,11 @@ budget:
   per_review_usd: 2.0
   codex_monthly_usd: 50
 
+# Which protocol crosscheck uses when cloning PR repos for review
+# ssh   — uses your local SSH keys (default)
+# https — uses your GitHub token; pick if SSH cannot reach target repos
+clone_protocol: ssh
+
 # Tunnel backend (watch mode only)
 # localhost.run — zero install, reconnects automatically (default)
 # smee         — stable channel URL, queues events while offline

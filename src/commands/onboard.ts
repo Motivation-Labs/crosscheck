@@ -223,7 +223,7 @@ async function promptQualityTier(
   return tiers[idx]
 }
 
-function detectCurrentPreset(currentAutoFixEnabled: boolean | undefined): WorkflowPreset {
+function detectCurrentPreset(): WorkflowPreset {
   const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
   if (existsSync(globalWorkflowPath)) {
     try {
@@ -232,18 +232,13 @@ function detectCurrentPreset(currentAutoFixEnabled: boolean | undefined): Workfl
       if (steps.some(s => s.type === 'recheck')) return 'review-fix-recheck'
       if (steps.some(s => s.type === 'fix')) return 'review-fix'
       return 'review-only'
-    } catch {
-      // fallback to config-based detection
-    }
+    } catch { /* malformed — default to review-only */ }
   }
-  return currentAutoFixEnabled === true ? 'review-fix' : 'review-only'
+  return 'review-only'
 }
 
-async function promptWorkflowPipeline(
-  currentAutoFixEnabled: boolean | undefined,
-  opts: OnboardOpts,
-): Promise<WorkflowPreset> {
-  const currentPreset = detectCurrentPreset(currentAutoFixEnabled)
+async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset> {
+  const currentPreset = detectCurrentPreset()
 
   if (opts.yes) {
     console.log(`  Pipeline: ${chalk.cyan(currentPreset)}`)
@@ -437,20 +432,21 @@ export function applyOnboardConfig(
   vendors.codex.model = tierCfg.codex.model
   vendors.codex.effort = tierCfg.codex.effort
 
-  // ── Workflow pipeline ────────────────────────────────────────────────────────
+  // ── Fix delivery mechanism (operational config, not pipeline logic) ──────────
+  // Pipeline steps and trigger conditions live in workflow.yml.
+  // config.yml only retains how fixes land on the PR (commit / pull_request / comment).
   if (!raw.post_review || typeof raw.post_review !== 'object') raw.post_review = {}
   const postReview = raw.post_review as Record<string, unknown>
   if (!postReview.auto_fix || typeof postReview.auto_fix !== 'object') postReview.auto_fix = {}
   const autoFix = postReview.auto_fix as Record<string, unknown>
-  if (pipelinePreset === 'review-only') {
-    autoFix.enabled = false
-  } else {
-    autoFix.enabled = true
-    autoFix.trigger = 'on_issues'
-    if (!autoFix.delivery || typeof autoFix.delivery !== 'object') autoFix.delivery = {}
-    const delivery = autoFix.delivery as Record<string, unknown>
-    if (!delivery.mode) delivery.mode = 'commit'
-  }
+  // Remove stale fields written by pre-refactor onboard runs
+  delete autoFix.enabled
+  delete autoFix.trigger
+  delete autoFix.min_severity
+  delete autoFix.fixer
+  if (!autoFix.delivery || typeof autoFix.delivery !== 'object') autoFix.delivery = {}
+  const delivery = autoFix.delivery as Record<string, unknown>
+  if (!delivery.mode) delivery.mode = 'commit'
 
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
@@ -700,10 +696,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
 
   // ── Step 6: Workflow pipeline ──────────────────────────────────────────────
   console.log(chalk.bold('Step 6 — workflow pipeline'))
-  const pipelinePreset = await promptWorkflowPipeline(
-    existingConfig?.post_review?.auto_fix?.enabled,
-    opts,
-  )
+  const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
   // ── Step 7: Connection type ────────────────────────────────────────────────

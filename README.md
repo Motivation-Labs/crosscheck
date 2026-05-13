@@ -10,40 +10,18 @@
 
 # crosscheck
 
-**A lightweight orchestration layer that makes your AI coding agents review each other's work — then fix it.**
+**Automated AI code review for teams using Claude Code and Codex — configured your way, zero new infrastructure.**
 
-When Claude Code opens a PR, Codex reviews it. When Codex opens a PR, Claude reviews it. If issues are found on a Claude-authored PR, Claude commits fixes and pushes them back. All of this runs on your laptop, against your existing subscriptions, with a single command.
-
-```
-GitHub PR  →  crosscheck watch  →  AI review posted  →  fixes committed
-```
-
-> Inspired by [Symphony](https://github.com/openai/symphony) — OpenAI's spec-driven multi-agent framework. Where Symphony coordinates agents at the product level, crosscheck stays at the level engineers already live in: pull requests, diffs, and code review. No new abstractions — just the CR + fix loop, automated.
+When your AI agent opens a PR, the rival AI reviews it. If issues are found, the original agent fixes them and opens a follow-up PR. The whole loop runs against your existing subscriptions with a single command.
 
 ---
 
-## Why
+## Highlights
 
-Coding agents ship fast. They also make confident, plausible mistakes. The fix isn't a human reviewer on every AI-authored PR — it's the *other* AI reviewing it. Claude and Codex have complementary blind spots; cross-vendor review catches more issues than either model alone, without adding human latency to every commit.
-
-crosscheck wires that loop:
-
-| | |
-|---|---|
-| **Local execution, always listening** | Runs on your machine. `crosscheck watch` opens a tunnel and keeps running. No cloud, no infra, no SaaS. |
-| **Subscription-funded** | Uses `claude` and `codex` CLIs against your existing Claude Pro/Max and ChatGPT Plus/Pro plans. No per-token API billing. Reviews are free once you're subscribed. |
-| **Cross-vendor by default** | Claude reviews Codex PRs; Codex reviews Claude PRs. Each model brings different training and different failure modes. The overlap is where bugs hide. |
-| **Self-improving** | `crosscheck diagnose` surfaces failure patterns from logs. `crosscheck optimize` feeds them to your AI and updates reviewer instructions automatically. |
-
----
-
-## Who this is for
-
-**The AI-native developer** — You use Claude Code and Codex to ship features across multiple repos. crosscheck routes every PR to the rival AI, closes the loop with auto-fix PRs, and requires zero new infrastructure beyond your existing subscriptions.
-
-**The solo founder or indie hacker** — You're the only engineer and your agents run around the clock. Without crosscheck, no one reviews what the agent ships. With it, every PR gets a second opinion before it lands — automatically, while you sleep.
-
-**The team scaling AI** — Your org has adopted AI coding tools across multiple repos. crosscheck gives you consistent coverage out of the box, a self-improving instruction set via `crosscheck optimize`, and a quantified ROI story via `crosscheck impact --money` when leadership asks whether the AI investment is paying off.
+- **Customizable review workflow** — configure the full pipeline: review-only, review + auto-fix, or review + fix + recheck. Per-step instructions let you tune what the reviewer focuses on without editing prompts manually.
+- **Cross-vendor and single-vendor modes** — cross-vendor mode routes each PR to the rival AI for independent review. Single-vendor mode uses whichever AI you have. Switch with one config line.
+- **Subscription-funded, not token-billed** — runs through the `claude` and `codex` CLIs against your Claude Pro/Max and ChatGPT Plus/Pro plans. No API keys, no per-review cost.
+- **`watch` for personal use, `serve` for your team** — `crosscheck watch` runs on your laptop and opens a tunnel automatically, ideal for solo developers. `crosscheck serve` binds to a fixed port on a shared machine so the whole team gets coverage without anyone's laptop staying on.
 
 ---
 
@@ -56,68 +34,37 @@ npm install -g @anthropic-ai/claude-code && claude        # Claude Pro/Max subsc
 npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus/Pro subscription
 brew install gh && gh auth login                          # GitHub CLI
 
-# 2. Guided setup — auth, repos, review mode, workflow pipeline
+# 2. Guided setup — repos, review mode, workflow pipeline
 crosscheck onboard
 
-# 3. Run continuously
-crosscheck watch
+# 3. Start watching
+crosscheck watch        # personal laptop
+crosscheck serve        # always-on team server
 ```
 
-`crosscheck onboard` walks you through seven steps: environment check, deployment mode (personal vs team), repo selection, review mode (cross-vendor or single-vendor), workflow pipeline (review-only / review+fix / review+fix+recheck), connection type (localhost.run vs smee.io), and config write. `crosscheck watch` then opens a tunnel (localhost.run by default, or smee.io if you selected it), auto-registers the webhook, and starts listening.
+`crosscheck onboard` walks you through repo selection, vendor mode, pipeline steps, and tunnel choice. After that, `watch` or `serve` is all you need.
 
 ---
 
-## How it works
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│  Your laptop                                                    │
-│                                                                 │
-│  crosscheck watch                                               │
-│    ├── SSH tunnel (localhost.run)  ◄──── GitHub webhook         │
-│    ├── Webhook server (:7891)                                   │
-│    └── PR handler                                               │
-│         ├── detect origin   (Claude Code? Codex? other?)        │
-│         ├── clone PR branch                                     │
-│         ├── run reviewer    (cross-vendor assignment)           │
-│         ├── post review comment                                 │
-│         └── post-review auto-fix                               │
-│              ├── authoring vendor reads review comment          │
-│              └── opens fix PR targeting original branch         │
-└────────────────────────────────────────────────────────────────┘
-```
-
-**Routing** uses a four-signal chain: PR body patterns → commit `Co-Authored-By:` trailers → branch prefix (`claude/` or `codex/`) → `author_routes` config fallback. `Generated with [Claude Code]` → Codex reviews. `Generated with [OpenAI Codex]` → Claude reviews. `allowed_authors` restricts reviews to your agent accounts.
-
-**Post-review auto-fix** runs after the review when issues are found. The vendor that authored the PR (`fixer: same-as-author`) reads its own review comment and opens a new fix PR targeting the original branch. You review and merge the fix PR — the original PR then updates automatically. Controlled by `post_review.auto_fix` in your config.
-
-**The feedback loop** closes via `crosscheck diagnose` → `crosscheck optimize`. Failure patterns and quality signals from `~/.crosscheck/logs/` feed back into improved reviewer instructions — no manual config editing required.
-
----
-
-## watch output
+## What it looks like
 
 ```
 $ crosscheck watch
 
   "Move fast and review things."
 
-crosscheck watch
-
   profile   personal · cross-vendor · balanced
   users     your-github-login (5 repos)
   auto-fix  on_issues · same-as-author · pull_request
-  config    ./crosscheck.config.yml  ← edit to change above
+  config    ./crosscheck.config.yml
 
-  9:18:14 AM  ✓ tunnel ready: https://abc123.lhr.life
-  9:18:15 AM  ✓ webhook registered for your-org/your-repo
-Waiting for PR events — Ctrl+C to stop.
+  ✓ tunnel ready: https://abc123.lhr.life
+  ✓ webhook registered for your-org/your-repo
+  Waiting for PR events — Ctrl+C to stop.
 
 PR #47 opened: add retry logic for flaky network calls
   origin=claude  reviewer=codex
   codex reviewing... (12s)
-  review complete (12s)
-  posted → github.com/your-org/your-repo/pull/47
   NEEDS WORK
   auto-fix  claude fixing...
   fix PR #48 opened → github.com/your-org/your-repo/pull/48
@@ -125,8 +72,6 @@ PR #47 opened: add retry logic for flaky network calls
 PR #49 opened: implement caching layer
   origin=codex  reviewer=claude
   claude reviewing... (18s)
-  review complete (18s)
-  posted → github.com/your-org/your-repo/pull/49
   APPROVE
 ```
 
@@ -136,14 +81,18 @@ PR #49 opened: implement caching layer
 
 ```bash
 crosscheck init                     # check prerequisites, write starter config
-crosscheck onboard                  # guided setup — pick repos and set deployment mode
+crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
 crosscheck review <pr-url>          # one-shot review of a specific PR
-crosscheck run <pr-url>             # full workflow: review → auto-fix → recheck
-crosscheck watch                    # local dev — tunnel + auto-webhook + listening
-crosscheck serve                    # always-on — fixed port, register webhook once
-crosscheck status                   # auth state, config, log summary, CLI versions
+crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
+crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck status                   # auth state, config summary, CLI versions
+```
+
+**Continuous improvement** *(experimental)*
+
+```bash
 crosscheck diagnose                 # surface failure patterns from review logs
-crosscheck optimize [--apply]       # update reviewer instructions from diagnose output
+crosscheck optimize [--apply]       # rewrite reviewer instructions based on diagnose output
 crosscheck impact [--money]         # time saved, issues caught, code quality trends
 crosscheck issue                    # draft and file a bug report from recent error logs
 ```
@@ -152,159 +101,37 @@ crosscheck issue                    # draft and file a bug report from recent er
 
 ## Configuration
 
-Config lives at `~/.crosscheck/config.yml` by default — persistent across all projects, no per-repo file needed. Run `crosscheck init` to generate it. Project-local `crosscheck.config.yml` overrides the global config when present.
+Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you.
 
 ```yaml
-# Which repos/orgs to watch (at least one required)
 orgs:
-  - your-org                      # covers every repo in the org
+  - your-org
 
-# Only review PRs from these GitHub accounts
-# Auto-filled with your login by `crosscheck init` or first `crosscheck watch`
 routing:
   allowed_authors:
-    - your-github-login  # auto-detected from gh auth
+    - your-github-login
 
-# Review depth
 quality:
-  tier: balanced                  # fast | balanced | thorough
+  tier: balanced          # fast | balanced | thorough
 
-# Optional spend cap
-budget:
-  per_review_usd: 2.0
-  codex_monthly_usd: 50
-
-# Tunnel backend (watch mode only)
-# localhost.run — zero install, reconnects automatically (default)
-# smee         — stable channel URL, queues events while offline
-tunnel:
-  backend: localhost.run
-
-# Post-review auto-fix — opens a fix PR when issues are found
 post_review:
   auto_fix:
     enabled: true
-    trigger: on_issues            # on_issues | always | never
-    min_severity: warning         # error | warning | info
-    fixer: same-as-author         # the vendor that wrote the PR also fixes it
+    trigger: on_issues    # on_issues | always | never
+    fixer: same-as-author
     delivery:
-      mode: pull_request          # pull_request | commit | comment
+      mode: pull_request
 ```
 
-Full configuration reference: [get-started.md](./get-started.md)
-
----
-
-## Customization home
-
-Everything crosscheck learns and every choice you make persists in `~/.crosscheck/`. Back this directory up and a reinstall is instant — just run `crosscheck onboard` and press Enter through each step to confirm your previous settings.
-
-| File | Written by | Purpose |
-|---|---|---|
-| `config.yml` | `onboard`, `init` | Deployment, repos, mode, vendors, quality tier, tunnel, routing, budget |
-| `workflow.yml` | `onboard` | Global pipeline steps with per-step inline instructions. Written on first onboard, never overwritten — edit freely |
-| `webhook-secret` | auto-generated | HMAC secret for GitHub webhook verification. Reused across restarts |
-| `logs/YYYY-MM-DD.ndjson` | `watch`, `serve` | Structured review event log — feeds `diagnose`, `optimize`, `impact` |
-
-Per-project overrides (checked before the global files):
-
-| File | Purpose |
-|---|---|
-| `.crosscheck/workflow.yml` *(in repo)* | Per-project pipeline — takes priority over `~/.crosscheck/workflow.yml` |
-| `.crosscheck/AGENT.md` *(in repo)* | Per-project harness for `crosscheck optimize` — takes priority over bundled `AGENT.md` |
-
----
-
-## Self-improving reviews
-
-Every review outcome is logged to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Over time, patterns emerge — which commands the reviewer tries to run (and fails), verdict distributions, review duration trends.
-
-```bash
-# See what's going wrong
-$ crosscheck diagnose
-
-crosscheck diagnose  (2026-01-01 → 2026-05-08 · 3 log files)
-
-  Reviews       47 total  —  28 APPROVE  14 NEEDS WORK  5 BLOCK
-  Failure rate  codex 12%  /  claude 4%
-
-  Suggestions
-  ─────────────────────────────────────────────────────────────
-  ✦ codex runs `npm test` during review (7 occurrences)
-    → add to instructions: "Do not run npm, tsc, or test commands."
-  ✦ 3 reviews timed out on large PRs (>400 lines changed)
-    → consider quality.tier: fast for PRs above a size threshold
-
-# Apply the suggested fixes automatically
-$ crosscheck optimize --apply
-  agent  claude (lower failure rate: 4% vs codex 12%)
-  writing ~/.crosscheck/workflow.yml (review step)
-  + Do not run npm, tsc, jest, or any build/test commands.
-  + Flag PRs over 400 lines changed as too large to review thoroughly.
-  done
-
-# Measure the compounding value
-$ crosscheck impact --money
-
-crosscheck impact  (all time · 47 reviews)
-
-  Time saved
-  ──────────────────────────────────────────────
-  Reviews run              47
-  Avg AI review time       ~14 min
-  Assumed human time       60 min  ⓘ
-  Total time saved         ~43 h
-
-  Issues caught
-  ──────────────────────────────────────────────
-  APPROVE              28   (60%)
-  NEEDS WORK           14   (30%)  ← actionable feedback
-  BLOCK                 5   (11%)  ← potential bugs / breaking changes
-  Total issues caught  19
-
-  Estimated value: ~$8,450
-  (43h × $150/hr + 19 issues × $150/issue)
-```
+Full reference: [get-started.md](./get-started.md)
 
 ---
 
 ## Deployment
 
-### Laptop — `crosscheck watch`
+**Personal (`crosscheck watch`)** — runs on your laptop. SSH tunnel through `localhost.run` handles everything — no port-forwarding, no cloud account. Health check reconnects automatically if the tunnel drops.
 
-Zero configuration. SSH tunnel through `localhost.run` handles NAT — no port-forwarding, no cloud account. If the tunnel goes silent without exiting, the health check detects it within ~2 minutes and forces a reconnect + webhook re-registration.
-
-```bash
-crosscheck watch
-# → opens tunnel, registers webhook, starts listening
-```
-
-### Server — `crosscheck serve`
-
-Bind to a fixed port on a machine with a public IP. Register the webhook once.
-
-```bash
-crosscheck serve
-# → listens on :7891, you register https://your-server/webhook manually
-```
-
-### smee.io — stable relay (optional)
-
-`localhost.run` drops events if your laptop is offline when a PR opens. [smee.io](https://smee.io) queues them and replays on reconnect — useful when the reviewer machine isn't always on.
-
-```bash
-npm install -g smee-client
-# Visit https://smee.io/new — copy the channel URL
-```
-
-```yaml
-# ~/.crosscheck/config.yml
-tunnel:
-  backend: smee
-  smee_channel: https://smee.io/your-channel-id
-```
-
-crosscheck registers the webhook automatically on first `watch` start — no manual webhook setup needed.
+**Team (`crosscheck serve`)** — bind to a fixed port on a machine with a public IP. Register the webhook once and the whole team is covered without anyone's laptop staying on.
 
 ---
 
@@ -317,7 +144,7 @@ crosscheck registers the webhook automatically on first `watch` start — no man
 | Codex CLI | latest — `npm install -g @openai/codex` |
 | GitHub CLI | 2.65+ — `brew install gh` |
 
-`GITHUB_TOKEN` is derived automatically when `gh auth login` has been run. No manual export required.
+`GITHUB_TOKEN` is derived automatically from `gh auth login`. No manual export needed.
 
 ---
 
@@ -325,10 +152,9 @@ crosscheck registers the webhook automatically on first `watch` start — no man
 
 | | |
 |---|---|
-| **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all commands and flags, complete config reference, how it works, FAQ |
-| **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config file with every option |
-| **[AGENT.md](./AGENT.md)** | Harness document used by `crosscheck optimize` — how the AI improves reviewer instructions |
-| **[CHANGELOG.md](./CHANGELOG.md)** | Release notes — what's new in each version |
+| **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all flags, complete config reference, FAQ |
+| **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config with every option |
+| **[CHANGELOG.md](./CHANGELOG.md)** | Release notes |
 
 ---
 

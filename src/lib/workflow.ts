@@ -28,8 +28,15 @@ export const DEFAULT_REVIEW_INSTRUCTIONS = [
   '## Output format',
   'Structure your output as: ## Summary, ## Critical Issues, ## Warnings, ## Suggestions.',
   'Be concise. Skip praise.',
-  '## Verdict',
-  'End with one of: VERDICT: APPROVE | NEEDS WORK | BLOCK',
+  '## Verdict (required)',
+  'The very last line of your response MUST be exactly one of — no other text after it:',
+  'VERDICT: APPROVE',
+  'VERDICT: NEEDS WORK',
+  'VERDICT: BLOCK',
+  '',
+  'Use APPROVE for no issues or trivial nits only.',
+  'Use NEEDS WORK for addressable issues that are not blocking.',
+  'Use BLOCK for security risks, data loss, broken API contracts, or correctness bugs.',
 ].join('\n')
 
 export const DEFAULT_FIX_INSTRUCTIONS = [

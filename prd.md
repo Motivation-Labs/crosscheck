@@ -280,11 +280,11 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [ ] **crosscheck-commit filter must be durable across sessions** — the current in-memory `crosscheckShas` set (runner.ts) breaks across process restarts and separate `serve`/`watch` invocations. When a fix commit lands on a branch and the process has restarted (or a new webhook delivery arrives after a cold start), the SHA is no longer in the set and crosscheck re-enters the full pipeline, causing the recheck → fix → recheck loop observed in motivation-money#229.
   - **User:** Anyone running `serve` or `watch` in a long-lived process or with restarts.
   - **Acceptance Criteria:**
-    - Commit author identity or commit message prefix `[crosscheck]` is checked in the webhook filter **before** any SHA lookup — no process state required.
-    - Webhook handler skips any push event where every new commit message starts with `[crosscheck]`.
+    - Commit message prefix `[crosscheck]` is checked in the webhook handler **before** dispatching to `onPR` — no process state required.
+    - The webhook handler (`webhook.ts:76`) already only acts on `pull_request` events with action `opened` or `synchronize` — raw `push` events are never dispatched. The filter must therefore target the `synchronize` path: before calling `onPR`, fetch the head commit message of the PR and skip if it starts with `[crosscheck]`.
     - The in-memory `crosscheckShas` set is kept as a secondary fast-path but is not the sole guard.
-  - **Technical Notes:** `src/github/webhook.ts` receives the push/PR event; the filter should live there, not in the runner. The `[crosscheck]` prefix is already used in commit messages (`runner.ts:217,236`).
-  - **Tests Required:** webhook handler receives push with `[crosscheck] fix:` commit → event is dropped; webhook handler receives push with normal commit → event proceeds.
+  - **Technical Notes:** `src/github/webhook.ts:76` dispatches `onPR` for `opened | synchronize`. For `synchronize` events, `body.pull_request.head.sha` is available — use it to fetch the commit message via the GitHub API (or pass it through `PREvent`) and short-circuit before `onPR` if the message starts with `[crosscheck]`. The `[crosscheck]` prefix is already used in all fix commit messages (`runner.ts:217,236`).
+  - **Tests Required:** webhook handler receives `synchronize` event where head commit message starts with `[crosscheck]` → `onPR` is not called; webhook handler receives `synchronize` event with normal commit → `onPR` is called; webhook handler receives `opened` event with `[crosscheck]` commit → `onPR` is called (opened events are never crosscheck-originated).
 
 ---
 

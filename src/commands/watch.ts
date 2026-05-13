@@ -284,6 +284,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           log: (msg: string) => bLog(`${chalk.dim(fmtTime())}  ${msg}`),
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
+          smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
         })
 
         void verdict

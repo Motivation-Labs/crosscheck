@@ -24,6 +24,26 @@ import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
+import {
+  getSmartSwitch,
+  isSubscriptionLimitError,
+  detectFailedVendor,
+  triggerSwitch,
+  notifyReviewSuccess,
+  stopSmartSwitch,
+} from '../lib/smart-switch.js'
+import type { Config } from '../config/schema.js'
+
+function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
+  return {
+    ...config,
+    mode: 'single-vendor',
+    vendors: {
+      codex: { ...config.vendors.codex, enabled: fallbackVendor === 'codex' },
+      claude: { ...config.vendors.claude, enabled: fallbackVendor === 'claude' },
+    },
+  }
+}
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -80,9 +100,17 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     owner, repoName, prNumber,
     config, token, pr.user.login,
   )
-  const reviewer = await assignReviewer(origin, config)
 
-  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author })
+  // Smart-switch: when cross-vendor is degraded, override to single-vendor with the healthy vendor
+  const ss = getSmartSwitch()
+  const announce = (l1: string, l2?: string) => { board.log(l1, l2); fileLog({ level: 'info', event: 'message', message: l2 ? `${l1} ${l2}` : l1 }) }
+  const effectiveConfig = (config.mode === 'cross-vendor' && ss.active && ss.fallbackVendor)
+    ? buildFallbackConfig(config, ss.fallbackVendor)
+    : config
+
+  const reviewer = await assignReviewer(origin, effectiveConfig)
+
+  fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repoName}`, pr: prNumber, sha: pr.head.sha, action: event.action, origin, origin_method: originMethod, author, smart_switch_active: ss.active })
 
   const ts = chalk.dim(fmtTime())
   const tsIndent = ' '.repeat(FMT_TIME_WIDTH + 2)
@@ -96,9 +124,10 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     return
   }
 
+  const modeNote = ss.active ? chalk.yellow(' [smart-switch]') : ''
   board.log(
     `${ts}  PR #${prNumber} ${event.action}  ${chalk.dim(pr.title)}`,
-    `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}`,
+    `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`,
   )
 
   board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
@@ -117,21 +146,27 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
     await runWorkflow({
       owner, repoName, prNumber, pr,
-      tmpDir, token, config, origin,
+      tmpDir, token, config: effectiveConfig, origin,
       reviewStart,
       log: (msg: string) => board.log(`${chalk.dim(fmtTime())}  ${msg}`),
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
+      smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
     })
 
     board.completePR(key, {
       elapsedMs: Date.now() - reviewStart,
       url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
     })
+    notifyReviewSuccess(reviewer, announce)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
     board.failPR(key, message)
     logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+    if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
+      const failedVendor = detectFailedVendor(err)
+      if (failedVendor) triggerSwitch(failedVendor, message, announce)
+    }
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
     inFlight.delete(key)
@@ -318,6 +353,7 @@ export async function runServe(opts: ServeOpts = {}) {
 
   process.on('SIGINT', () => {
     board.stop()
+    stopSmartSwitch()
     console.log('\nShutting down...')
     fileLog({ level: 'info', event: 'session_end', command: 'serve' })
     server.close(() => process.exit(0))

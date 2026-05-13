@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { execSync } from 'child_process'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
@@ -11,6 +10,7 @@ import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
+import { clonePRForReview } from '../lib/clone.js'
 import type { PREvent } from '../github/webhook.js'
 
 export interface RunOpts {
@@ -123,20 +123,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   const cloneSpinner = ora('Cloning repo...').start()
 
   try {
-    execSync(
-      `gh repo clone ${owner}/${repo} ${tmpDir} -- --depth=50 --quiet`,
-      { stdio: 'pipe', env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token } },
-    )
-    execSync(`git fetch origin pull/${number}/head:pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
-    execSync(`git checkout pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
-    try {
-      execSync(
-        `git fetch origin ${prData.base.ref}:refs/remotes/origin/${prData.base.ref}`,
-        { cwd: tmpDir, stdio: 'pipe' },
-      )
-    } catch {
-      fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref })
-    }
+    clonePRForReview({
+      owner, repo, prNumber: number, baseRef: prData.base.ref,
+      tmpDir, token, protocol: config.clone_protocol,
+      onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
+    })
     cloneSpinner.succeed('Repo ready')
 
     let activeSpinner = ora('').start()

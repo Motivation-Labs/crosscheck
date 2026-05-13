@@ -23,6 +23,7 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { PRBoard } from '../lib/board.js'
+import { clonePRForReview } from '../lib/clone.js'
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
@@ -105,19 +106,11 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
 
   try {
-    // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
-    // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
-    const cloneUrl = config.clone_protocol === 'https'
-      ? `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`
-      : `git@github.com:${owner}/${repoName}.git`
-    execSync(`git clone --depth=50 --quiet ${cloneUrl} ${tmpDir}`, { stdio: 'pipe' })
-    execSync(`git fetch origin pull/${prNumber}/head:pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-    execSync(`git checkout pr-${prNumber}`, { cwd: tmpDir, stdio: 'pipe' })
-    try {
-      execSync(`git fetch origin ${pr.base.ref}:refs/remotes/origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
-    } catch {
-      fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref })
-    }
+    clonePRForReview({
+      owner, repo: repoName, prNumber, baseRef: pr.base.ref,
+      tmpDir, token, protocol: config.clone_protocol,
+      onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref }),
+    })
 
     const prLoc = computePRLoc(tmpDir, pr.base.ref)
     board.updatePR(key, { prLoc })

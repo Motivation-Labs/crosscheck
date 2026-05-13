@@ -558,9 +558,9 @@ crosscheck impact  (all time · 47 reviews)
 
 crosscheck 按以下顺序查找配置文件（找到第一个为止）：
 
-1. `./crosscheck.config.yml`
-2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml`
+1. `~/.crosscheck/config.yml` ← **默认位置**
+2. `./crosscheck.config.yml`
+3. `./.crosscheck.yml`
 
 运行 `crosscheck init` 生成注释完整的初始配置文件。
 

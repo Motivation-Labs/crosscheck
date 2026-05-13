@@ -152,7 +152,7 @@ crosscheck issue                    # draft and file a bug report from recent er
 
 ## Configuration
 
-Config lives at `~/.crosscheck/config.yml` by default — persistent across all projects, no per-repo file needed. Run `crosscheck init` to generate it. Project-local `crosscheck.config.yml` overrides the global config when present.
+Config lives at `~/.crosscheck/config.yml` by default — persistent across all projects, no per-repo file needed. Run `crosscheck init` to generate it. A project-local `crosscheck.config.yml` or `.crosscheck.yml` is used only as a fallback when the home config is absent.
 
 ```yaml
 # Which repos/orgs to watch (at least one required)

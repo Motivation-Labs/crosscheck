@@ -136,7 +136,7 @@ crosscheck impact [--money]         # 节省时间、发现问题、代码质量
 
 ## 配置说明
 
-`crosscheck.config.yml` 位于项目根目录，AI 编程助手可以直接读取和修改它。
+配置默认位于 `~/.crosscheck/config.yml`，跨项目持久化保存。项目根目录下的 `crosscheck.config.yml` 仅在 home 配置缺失时作为回退使用。AI 编程助手可以直接读取和修改这些文件。
 
 ```yaml
 # 监听的组织/仓库（至少配置一项）

@@ -4,6 +4,16 @@ import { inferVerdictFromCodexOutput } from '../reviewers/codex.js'
 const CODEX_FOOTER = '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
 
 describe('inferVerdictFromCodexOutput', () => {
+  it('returns BLOCK when P0 is present alone', () => {
+    const text = `Release-blocking issue.\n\n- [P0] Data loss bug — src/db.ts:5\n  Fix this.${CODEX_FOOTER}`
+    expect(inferVerdictFromCodexOutput(text)).toBe('BLOCK')
+  })
+
+  it('returns BLOCK when P0 present alongside lower levels', () => {
+    const text = `Issues found.\n\n- [P0] Critical\n- [P2] Minor${CODEX_FOOTER}`
+    expect(inferVerdictFromCodexOutput(text)).toBe('BLOCK')
+  })
+
   it('returns BLOCK when P1 is present', () => {
     const text = `Critical issue found.\n\n- [P1] Broken auth — src/auth.ts:12\n  Fix this.${CODEX_FOOTER}`
     expect(inferVerdictFromCodexOutput(text)).toBe('BLOCK')

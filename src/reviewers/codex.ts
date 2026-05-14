@@ -6,6 +6,15 @@ import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import type { ReviewResult } from './claude.js'
 
+// Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
+// Infer the verdict from the highest severity present and append it so parseVerdict() can
+// extract it. Only called when the output doesn't already contain a VERDICT: token.
+export function inferVerdictFromCodexOutput(text: string): string {
+  if (/\[P0\]/i.test(text) || /\[P1\]/i.test(text)) return 'BLOCK'
+  if (/\[P2\]/i.test(text) || /\[P3\]/i.test(text)) return 'NEEDS WORK'
+  return 'APPROVE'
+}
+
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
 function extractErrorSummary(stderr: string): string | undefined {
   const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)
@@ -79,9 +88,14 @@ export async function runCodexReview(
       },
     )
 
-    const review = result.stdout.trim() || result.stderr.trim()
+    const rawReview = result.stdout.trim() || result.stderr.trim()
     const tokensMatch = (result.stderr ?? '').match(/\btokens?:\s*([\d,]+)/i)
     const tokensUsed = tokensMatch ? parseInt(tokensMatch[1].replace(/,/g, ''), 10) : undefined
+    // Append inferred VERDICT when Codex didn't include one (its review command
+    // uses [P1]/[P2]/[P3] markers but never emits a VERDICT: line on its own).
+    const review = rawReview.includes('VERDICT:')
+      ? rawReview
+      : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
     return { review, tokensUsed }
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }

@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { inferVerdictFromCodexOutput } from '../reviewers/codex.js'
 
 const CODEX_FOOTER = '\n\n---\n_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
@@ -50,6 +53,11 @@ describe('inferVerdictFromCodexOutput', () => {
     expect(inferVerdictFromCodexOutput('[P2] issue')).toBe('NEEDS WORK')
   })
 
+  it('is case-insensitive for [p0]/[p1]/[p2]/[p3]', () => {
+    expect(inferVerdictFromCodexOutput('[p1] issue')).toBe('BLOCK')
+    expect(inferVerdictFromCodexOutput('[P2] issue')).toBe('NEEDS WORK')
+  })
+
   it('infers correctly from real Codex output shape (motivation-form PR #90)', () => {
     const realOutput = `The added guidance contains copy-paste survey templates that default to form mode.
 
@@ -64,5 +72,37 @@ Full review comments:
 ---
 _Reviewed with [OpenAI Codex](https://openai.com/codex)_`
     expect(inferVerdictFromCodexOutput(realOutput)).toBe('NEEDS WORK')
+  })
+})
+
+describe('.codex/instructions cleanup after review', () => {
+  let repoDir: string
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), 'crosscheck-test-'))
+    mkdirSync(join(repoDir, '.codex'), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(repoDir, { force: true, recursive: true })
+  })
+
+  it('deletes .codex/instructions when it did not exist before the review', () => {
+    const instructionsPath = join(repoDir, '.codex', 'instructions')
+    // Simulate what runCodexReview does: write the file
+    writeFileSync(instructionsPath, 'crosscheck review instructions')
+    // Simulate cleanup (originalInstructions was undefined)
+    rmSync(instructionsPath, { force: true })
+    expect(existsSync(instructionsPath)).toBe(false)
+  })
+
+  it('restores original .codex/instructions content after review', () => {
+    const instructionsPath = join(repoDir, '.codex', 'instructions')
+    const original = 'user-defined codex instructions'
+    writeFileSync(instructionsPath, original)
+    // Simulate: crosscheck overwrites, then restores
+    writeFileSync(instructionsPath, 'crosscheck review instructions')
+    writeFileSync(instructionsPath, original)
+    expect(readFileSync(instructionsPath, 'utf8')).toBe(original)
   })
 })

@@ -1,5 +1,5 @@
 import { execa } from 'execa'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
@@ -66,8 +66,13 @@ export async function runCodexReview(
   const customNote = quality.custom_prompt ?? ''
   const behaviorInstructions = stepInstructions ?? DEFAULT_REVIEW_INSTRUCTIONS
   const instructionsNote = [focusNote, customNote, behaviorInstructions].filter(Boolean).join('\n\n')
+  const instructionsPath = `${repoDir}/.codex/instructions`
+  // Save original content so we can restore it after the review — prevents the
+  // fix step's git add -A from committing crosscheck's instructions as a PR change.
+  let originalInstructions: string | undefined
+  try { originalInstructions = readFileSync(instructionsPath, 'utf8') } catch { /* didn't exist */ }
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
-  writeFileSync(`${repoDir}/.codex/instructions`, instructionsNote)
+  writeFileSync(instructionsPath, instructionsNote)
 
   try {
     const modelArgs = model ? ['-c', `model="${model}"`] : []
@@ -111,6 +116,15 @@ export async function runCodexReview(
     })
     throw thrown
   } finally {
+    // Restore .codex/instructions to its pre-review state so the fix step's
+    // git add -A doesn't commit crosscheck's instructions as a PR file change.
+    try {
+      if (originalInstructions !== undefined) {
+        writeFileSync(instructionsPath, originalInstructions)
+      } else {
+        rmSync(instructionsPath, { force: true })
+      }
+    } catch { /* ignore */ }
     try { rmSync(tmpFile, { force: true, recursive: true }) } catch { /* ignore */ }
   }
 }

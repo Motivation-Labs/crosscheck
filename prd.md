@@ -241,6 +241,12 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ## Build Queue
 
+### ✅ Recently shipped
+
+- [x] **smart-switch** — fault-tolerance for cross-vendor mode when a reviewer hits a subscription limit. Full spec below in Next Up (marked done).
+
+---
+
 ### 🚨 P0 — Structural correctness (fix before next routing/detection work)
 
 These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
@@ -476,6 +482,30 @@ These four items fix the two-phase model described in Design Principles. Any new
     - Pending CR/Fix state: use the existing `undefined` check — `slot.verdict === undefined` means CR hasn't arrived yet; `slot.fixCount === undefined` means fix hasn't run. Render `░` bars + `pending` in those cases.
   - **Tests Required:** No new behavioral logic — pure rendering change. Smoke-test: start `watch` against a real PR; verify (a) stats appear at top, (b) tunnel line appears below stats, (c) completed PR entries print in `PR | CR | Fix` format with `(VERDICT)` suffix.
   - **Decided:** Verdict in parentheses uses the full unabbreviated form: `(APPROVE)`, `(NEEDS WORK)`, `(BLOCK)`. Consistent across active slots and completed entries.
+
+- [ ] **Token usage per workflow step — display in two-line status stripe** — track and display the number of tokens consumed by each AI step (review, fix, recheck) and append a compact count to the step label in the per-PR two-line board entry, e.g. `CR ✓ APPROVE (1.2K)`.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants visibility into how many tokens each review step consumed, to tune quality tiers or spot unexpectedly large reviews.
+  - **Acceptance Criteria:**
+    - Each AI step (review, fix, recheck) captures total tokens used from the CLI subprocess output and stores it on `PRSlot` as `crTokens`, `fixTokens`, `recheckTokens` (all `number | undefined`).
+    - `renderPRSlot()` appends the token count to the step label when present, formatted as a compact human-readable suffix: `< 1 000 → "(900)"`, `≥ 1 000 → "(1.2K)"`, `≥ 1 000 000 → "(1.2M)"`. Suffix is separated from the step label by a single space, e.g. `CR ✓ APPROVE (1.2K)`.
+    - Token count is shown on the completed-PR scrollback line in the same format.
+    - When token count is unavailable (CLI did not emit usage data, or step did not run), the suffix is omitted — no `(—)` placeholder.
+    - Column widths account for the suffix so the layout does not shift mid-session when counts arrive.
+  - **Technical Notes:**
+    - `src/reviewers/claude.ts` and `src/reviewers/codex.ts`: parse token usage from subprocess stdout/stderr. Claude CLI emits usage in JSON on stdout when `--output-format json` is passed (field `usage.input_tokens + usage.output_tokens`); Codex emits a `tokens:` line at the end of stderr. Extract and return `tokensUsed: number | undefined` alongside review text. Both functions change return type from `Promise<string>` to `Promise<{ review: string; tokensUsed?: number }>`.
+    - `src/lib/board.ts` (`PRSlot`): add `crTokens?: number`, `recheckTokens?: number`. Update `renderPRSlot()` to call a `fmtTokens(n?: number): string` helper that returns the compact suffix or `''`.
+    - `fmtTokens` helper: `n == null → ''`, `n < 1000 → \`(${n})\``, `n < 1_000_000 → \`(${(n/1000).toFixed(1).replace(/\.0$/, '')}K)\``, else `(NM)`.
+    - `src/lib/runner.ts`: add `crTokens?: number`, `recheckTokens?: number` to `PRPhaseData`; thread token data from reviewer result to `onPhaseChange`; add `tokens_used` field to the `review_complete` log entry.
+    - `src/lib/logger.ts`: no structural change needed — `tokens_used` is passed as an ad-hoc field on the existing `review_complete` log event (the `[key: string]: unknown` index signature already covers it).
+    - `src/commands/review.ts`: update callers to destructure `{ review }` from the new return type.
+  - **Tests Required:**
+    - `fmtTokens(undefined)` → `''`.
+    - `fmtTokens(900)` → `'(900)'`.
+    - `fmtTokens(1200)` → `'(1.2K)'`.
+    - `fmtTokens(1000)` → `'(1K)'`.
+    - `fmtTokens(1_500_000)` → `'(1.5M)'`.
+    - `renderPRSlot()` with `crTokens: 1200` and `phase: 'reviewed'` includes `(1.2K)` after the verdict badge.
+    - `renderPRSlot()` with `crTokens: undefined` renders no suffix.
 
 - [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
   - **User:** Any developer who wants faster CLI invocations.
@@ -1458,6 +1488,47 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/watch.ts` / `serve.ts`: in the backtrace block, change the condition from `if (config.backtrace.enabled)` to `if (config.backtrace.enabled && opts.backtrace !== false)`. Pass `opts` through the existing opts parameter.
     - Log the skip message via `cLog` (watch) / `board.log` (serve) so it's visible in the connectivity section.
   - **Tests Required:** `--no-backtrace` flag parsed correctly; backtrace block skipped when flag is true; `config.backtrace.enabled: false` still skips regardless of flag; `config.backtrace.enabled: true` without flag runs scan normally; log message emitted when flag skips the scan.
+
+- [x] **smart-switch — subscription-limit fault tolerance for cross-vendor mode** — when a reviewer agent hits a subscription limit in cross-vendor mode, automatically degrade to single-vendor mode using the healthy vendor, announce loudly in the terminal, attempt to restore cross-vendor every 30 minutes, and announce restoration when confirmed.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` in cross-vendor mode whose Claude or Codex subscription can hit rate or usage limits.
+  - **Problem:** In cross-vendor mode a subscription limit on one vendor silently fails the review and drops the PR. There is no recovery — subsequent PRs keep attempting the failed vendor and keep failing. Users have no visibility into the degraded state.
+  - **Solution: runtime smart-switch in `src/lib/smart-switch.ts`**
+    - Module-level singleton tracks `{ active, degradedVendor, fallbackVendor, since, restoreAttemptCount, pendingRecoveryVendor }`.
+    - `isSubscriptionLimitError(err)` — classifies the error via regex: `rate limit`, `subscription limit`, `usage limit`, `quota`, `429`, `too many requests`, `credits exhausted`, `plan limit`, `overloaded`.
+    - `detectFailedVendor(err)` — infers which CLI failed from the error message prefix (`claude:` / `codex:`).
+    - `triggerSwitch(vendor, reason, announce)` — activates degraded mode, announces loudly, arms 30-min restore timer. Idempotent for the same vendor.
+    - `notifyReviewSuccess(reviewer, announce)` — called after every successful review. When the recovering vendor successfully completes a review, announces confirmed restoration.
+    - `stopSmartSwitch()` — clears the restore timer; called on process exit.
+  - **Acceptance Criteria:**
+    - When a review fails with a subscription-limit error in cross-vendor mode, the terminal prints:
+      ```
+      ⚡ SMART-SWITCH  <vendor> hit a subscription limit
+        Switched to single-vendor mode — <fallback> will review all PRs. Restore attempt in 30 min.
+      ```
+    - Subsequent PRs in the same session are reviewed by the healthy vendor only, regardless of origin.
+    - The board's reviewer column appends `[smart-switch]` to indicate degraded routing.
+    - After 30 minutes, the terminal prints:
+      ```
+      ↺  SMART-SWITCH  restore attempt #N — trying <vendor> again
+        <vendor> was degraded for ~30 min. Next PR routed to <vendor> will confirm.
+      ```
+    - Cross-vendor routing resumes (optimistic reset). If the previously-failed vendor successfully completes a review, the terminal prints:
+      ```
+      ✓  SMART-SWITCH  cross-vendor mode confirmed restored
+        <vendor> completed a review — back to full cross-vendor routing.
+      ```
+    - If the vendor fails again after a restore attempt, smart-switch re-activates and the attempt count increments.
+    - All smart-switch events are written to the structured log (`~/.crosscheck/logs/`) with events: `smart_switch_triggered`, `smart_switch_restore_attempt`, `smart_switch_restored`.
+    - Smart-switch only activates in cross-vendor mode. Single-vendor mode is unaffected.
+    - Smart-switch is purely runtime state — no config changes or file writes.
+  - **File ownership:**
+    - `src/lib/smart-switch.ts` — new module; all state and logic
+    - `src/commands/watch.ts` — detects errors in `reviewPR` catch block; calls `triggerSwitch`; builds `effectiveConfig` from smart-switch state; calls `notifyReviewSuccess` after successful reviews; calls `stopSmartSwitch` on cleanup
+  - **Tests Required:**
+    - `isSubscriptionLimitError` matches rate-limit, 429, quota, overloaded, subscription-limit patterns; does not match unrelated errors.
+    - `detectFailedVendor` extracts `claude` / `codex` from prefixed error messages; returns null for unknown prefix.
+    - `triggerSwitch` sets correct state (active, degradedVendor, fallbackVendor); calls announce with SMART-SWITCH message; is idempotent for same vendor.
+    - `notifyReviewSuccess` is a no-op when no recovery is pending; announces restoration when pendingRecoveryVendor matches reviewer.
 
 ---
 

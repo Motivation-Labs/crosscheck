@@ -1,7 +1,13 @@
-import { execSync, execFileSync } from 'child_process'
+import { execSync } from 'child_process'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
+import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
+
+interface ClaudeJsonOutput {
+  result?: unknown
+  usage?: { input_tokens?: unknown; output_tokens?: unknown }
+}
 
 const PROMPT_TEMPLATE = `You opened a pull request that received the following code review.
 
@@ -40,7 +46,7 @@ export async function runFixStep(
   reviewComment: string,
   instructions: string,
   config: Config,
-): Promise<{ appliedCount: number }> {
+): Promise<{ appliedCount: number; tokensUsed?: number }> {
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -57,15 +63,23 @@ export async function runFixStep(
     .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
 
   let output = ''
+  let tokensUsed: number | undefined
   try {
-    // Pass prompt via stdin — same pattern as optimize.ts
-    output = execFileSync('claude', ['--print', '--output-format', 'text'], {
+    const { stdout } = await execa('claude', ['--print', '--output-format', 'json'], {
       input: prompt,
-      encoding: 'utf8',
       timeout: 180_000,
       env: { ...process.env },
-      maxBuffer: 10 * 1024 * 1024,
-    }).trim()
+    })
+    const raw = stdout.trim()
+    try {
+      const parsed: ClaudeJsonOutput = JSON.parse(raw)
+      output = typeof parsed.result === 'string' ? parsed.result : raw
+      const inTok = parsed.usage?.input_tokens
+      const outTok = parsed.usage?.output_tokens
+      tokensUsed = typeof inTok === 'number' && typeof outTok === 'number' ? inTok + outTok : undefined
+    } catch {
+      output = raw
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/not logged in|auth|credential/i.test(msg)) {
@@ -74,7 +88,7 @@ export async function runFixStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0 }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, tokensUsed }
 
   // Parse <file path="...">content</file> blocks
   const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g
@@ -92,5 +106,5 @@ export async function runFixStep(
     } catch { /* skip unwritable paths */ }
   }
 
-  return { appliedCount }
+  return { appliedCount, tokensUsed }
 }

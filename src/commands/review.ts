@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { execSync } from 'child_process'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient, postReviewComment } from '../github/client.js'
@@ -11,6 +10,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
+import { clonePRForReview } from '../lib/clone.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -64,43 +64,37 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   // Clone the repo into a temp dir
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   const spinner2 = ora('Cloning repo for review...').start()
+  let reviewSpinner: ReturnType<typeof ora> | undefined
 
   try {
-    // Bypass `gh repo clone` so gh's keyring auth (which may bridge to VS Code's
-    // GitHub extension) is never invoked. HTTPS embeds the token in the URL.
-    const cloneUrl = config.clone_protocol === 'https'
-      ? `https://x-access-token:${token}@github.com/${owner}/${repo}.git`
-      : `git@github.com:${owner}/${repo}.git`
-    execSync(`git clone --depth=50 --quiet ${cloneUrl} ${tmpDir}`, { stdio: 'pipe' })
-    execSync(`git fetch origin pull/${number}/head:pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
-    execSync(`git checkout pr-${number}`, { cwd: tmpDir, stdio: 'pipe' })
-    try {
-      execSync(`git fetch origin ${pr.base.ref}:${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
-    } catch {
-      fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref })
-    }
+    clonePRForReview({
+      owner, repo, prNumber: number, baseRef: pr.base.ref,
+      tmpDir, token, protocol: config.clone_protocol,
+      onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
+    })
     spinner2.succeed('Repo ready')
 
     let reviewText: string
+    let tokensUsed: number | undefined
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
-    const reviewSpinner = ora(`Running ${reviewer} review...`).start()
-    const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
+    reviewSpinner = ora(`Running ${reviewer} review...`).start()
+    const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner!.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
 
     try {
       if (reviewer === 'codex') {
-        reviewText = await runCodexReview(
+        ;({ review: reviewText, tokensUsed } = await runCodexReview(
           tmpDir,
           pr.base.ref,
           pr.title,
           config.quality,
           config.vendors.codex,
           undefined,
-          msg => { reviewSpinner.text = msg },
-        )
+          msg => { reviewSpinner!.text = msg },
+        ))
       } else {
-        reviewText = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -108,8 +102,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.vendors.claude,
           config.budget.per_review_usd,
           undefined,
-          msg => { reviewSpinner.text = msg },
-        )
+          msg => { reviewSpinner!.text = msg },
+        ))
       }
     } finally {
       clearInterval(elapsedTimer)
@@ -120,7 +114,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
     console.log(`  ${formatVerdict(verdict)}`)
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
@@ -130,9 +124,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 
   } catch (err: unknown) {
+    spinner2.fail()
+    reviewSpinner?.fail()
+    const message = err instanceof Error ? err.message : String(err)
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
-    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-    process.exitCode = 2
+    console.error(chalk.red(`\n✗ ${message}`))
+    process.exit(2)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

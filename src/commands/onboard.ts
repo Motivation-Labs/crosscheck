@@ -315,7 +315,7 @@ async function promptCloneProtocol(
     {
       label: 'https',
       description: 'https://github.com/owner/repo.git — uses GitHub token',
-      hint: 'Pick this if you have multi-account SSH setup or your default SSH key cannot access target repos',
+      hint: 'Pick https if SSH clone fails or you prefer token-based auth',
     },
   ]
   const defaultIdx = currentProtocol === 'https' ? 1 : 0

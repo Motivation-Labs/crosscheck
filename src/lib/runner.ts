@@ -20,6 +20,9 @@ export interface PRPhaseData {
   commentCount?: number
   fixCount?: number
   recheckVerdict?: string | null
+  crTokens?: number
+  recheckTokens?: number
+  fixTokens?: number
 }
 
 export interface WorkflowContext {
@@ -42,6 +45,9 @@ export interface WorkflowContext {
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
+  // When smart-switch is active, route to this vendor if the step's configured
+  // reviewer resolves to a disabled vendor rather than skipping the step.
+  smartSwitchFallback?: 'claude' | 'codex'
 }
 
 export interface WorkflowResult {
@@ -58,11 +64,12 @@ function resolveReviewer(
   reviewer: string,
   origin: PROrigin,
   config: Config,
+  fallback?: 'claude' | 'codex',
 ): 'claude' | 'codex' | null {
   if (reviewer === 'origin') {
     if (origin === 'claude' && config.vendors.claude.enabled) return 'claude'
     if (origin === 'codex' && config.vendors.codex.enabled) return 'codex'
-    return null
+    return fallback && config.vendors[fallback].enabled ? fallback : null
   }
   if (reviewer === 'auto') {
     if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
@@ -71,8 +78,8 @@ function resolveReviewer(
     if (config.vendors.claude.enabled) return 'claude'
     return null
   }
-  if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : null
-  if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : null
+  if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : (fallback && config.vendors[fallback].enabled ? fallback : null)
+  if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   return null
 }
 
@@ -93,7 +100,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (step.type === 'review' || step.type === 'recheck') {
       const isRecheck = step.type === 'recheck'
-      const reviewer = resolveReviewer(step.reviewer, origin, config)
+      const reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true }
@@ -106,10 +113,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
       onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
       let rawReview: string
+      let tokensUsed: number | undefined
       if (reviewer === 'codex') {
-        rawReview = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions)
+        ;({ review: rawReview, tokensUsed } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
       } else {
-        rawReview = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions)
+        ;({ review: rawReview, tokensUsed } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -120,12 +128,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart, tokens_used: tokensUsed })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
-        ? { recheckVerdict: verdict, phase: donePhase }
-        : { verdict, commentCount, phase: donePhase }
+        ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed }
+        : { verdict, commentCount, phase: donePhase, crTokens: tokensUsed }
 
       if (ctx.dryRun) {
         onPhaseChange('dry-run — comment not posted', phaseUpdate)
@@ -164,7 +172,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
-      const vendor = resolveReviewer(step.reviewer, origin, config)
+      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { skipFix('no_vendor'); continue }
 
       // Codex fix not yet implemented — skip gracefully
@@ -185,8 +193,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
       let appliedCount = 0
+      let fixTokensUsed: number | undefined
       try {
-        ;({ appliedCount } = await runFixStep(
+        ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -201,7 +210,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       if (appliedCount === 0) {
-        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+        onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: fixTokensUsed })
         results[step.name] = { applied_count: 0 }
         continue
       }
@@ -223,8 +232,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
@@ -260,8 +269,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             })
           } catch { /* label may not exist in this repo — skip */ }
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -273,8 +282,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
       }
     }

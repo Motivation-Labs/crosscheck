@@ -15,6 +15,19 @@ const EFFORT_MAP: Record<string, string> = {
   max: 'max',
 }
 
+export interface ReviewResult {
+  review: string
+  tokensUsed?: number
+}
+
+interface ClaudeJsonOutput {
+  result?: unknown
+  usage?: {
+    input_tokens?: unknown
+    output_tokens?: unknown
+  }
+}
+
 export async function runClaudeReview(
   repoDir: string,
   baseBranch: string,
@@ -24,7 +37,7 @@ export async function runClaudeReview(
   perReviewBudget: number,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
-): Promise<string> {
+): Promise<ReviewResult> {
   const model = TIER_MODELS[quality.tier] ?? 'claude-sonnet-4-6'
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
   const focusLine = quality.focus.length > 0
@@ -44,12 +57,11 @@ export async function runClaudeReview(
 
   const args = [
     '--print',
-    '--bare',
+    '--output-format', 'json',
     '--model', model,
     '--effort', effort,
     '--max-budget-usd', String(perReviewBudget),
     '--allowedTools', 'Bash(git diff),Bash(git log)',
-    prompt,
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
@@ -58,9 +70,22 @@ export async function runClaudeReview(
     const { stdout } = await execa('claude', args, {
       cwd: repoDir,
       timeout: 180_000,
+      input: prompt,
       env: { ...process.env },
     })
-    return stdout.trim()
+    const raw = stdout.trim()
+    try {
+      const parsed: ClaudeJsonOutput = JSON.parse(raw)
+      const review = typeof parsed.result === 'string' ? parsed.result.trim() : raw
+      const inTok = parsed.usage?.input_tokens
+      const outTok = parsed.usage?.output_tokens
+      const tokensUsed = typeof inTok === 'number' && typeof outTok === 'number'
+        ? inTok + outTok
+        : undefined
+      return { review, tokensUsed }
+    } catch {
+      return { review: raw }
+    }
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr?.trim() ?? ''

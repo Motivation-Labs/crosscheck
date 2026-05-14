@@ -798,9 +798,9 @@ On re-runs, `onboard` updates only the fields it collected answers for. Everythi
 
 crosscheck stores its config in `~/.crosscheck/config.yml` by default — persistent across projects, no per-repo file needed. It also looks in these locations (first found wins):
 
-1. `./crosscheck.config.yml`
-2. `./.crosscheck.yml`
-3. `~/.crosscheck/config.yml` ← **default location**
+1. `~/.crosscheck/config.yml` ← **default location**
+2. `./crosscheck.config.yml`
+3. `./.crosscheck.yml`
 
 Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
 
@@ -1090,7 +1090,7 @@ GitHub can fire both `opened` and `synchronize` events for the same push. crossc
 - **Webhook signature** — every request verified with HMAC-SHA256 before parsing
 - **Temp isolation** — each PR cloned into a fresh temp dir, deleted after review
 - **Read-only tools** — Claude restricted to `git diff` and `git log` only
-- **No credentials in clones** — `gh repo clone` uses the gh credential helper; no tokens written to disk
+- **Temp credential isolation** — with `clone_protocol: ssh` (default) no tokens touch disk; with `clone_protocol: https` a short-lived token is embedded in the temp clone's remote URL and removed when the temp dir is deleted after review
 
 ---
 

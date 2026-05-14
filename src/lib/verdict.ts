@@ -2,14 +2,15 @@ import chalk from 'chalk'
 
 export type Verdict = 'APPROVE' | 'NEEDS WORK' | 'BLOCK'
 
-// Primary: strict line match; handles NEEDS_WORK spelling and markdown bold wrappers.
-// Closing ** after the colon covers **VERDICT:** BLOCK (bold label, plain value).
-const PRIMARY_RE = /^(?:\*{1,2})?VERDICT:(?:\*{1,2})?\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)(?:\*{1,2})?\s*$/im
-// Fallback: VERDICT: token anywhere in the text (e.g. inline prose, blockquote)
-const FALLBACK_RE = /VERDICT:\s*(APPROVE|NEEDS[_ ]WORK|BLOCK)/gi
+// Primary: strict line match.
+// Handles: heading prefix (## VERDICT:), bold label (**VERDICT:**), bold value (VERDICT: **APPROVE**),
+// NEEDS_WORK / NEEDS  WORK spelling variants, trailing period.
+const PRIMARY_RE = /^(?:#{1,6}\s*)?(?:\*{1,2})?VERDICT:(?:\*{1,2})?\s*(?:\*{1,2})?(APPROVE|NEEDS[\s_]+WORK|BLOCK)(?:\*{1,2})?\.?\s*$/im
+// Fallback: VERDICT: token anywhere in the text (inline prose, blockquote, bold value)
+const FALLBACK_RE = /VERDICT:\s*(?:\*{1,2})?(APPROVE|NEEDS[\s_]+WORK|BLOCK)(?:\*{1,2})?/gi
 
 function normalizeVerdict(raw: string): Verdict {
-  return raw.toUpperCase().replace('_', ' ') as Verdict
+  return raw.toUpperCase().replace(/[\s_]+/, ' ').trim() as Verdict
 }
 
 export function parseVerdict(text: string): { verdict: Verdict | null; clean: string } {

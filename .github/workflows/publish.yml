@@ -41,7 +41,7 @@ jobs:
           major_string_token: 'BREAKING CHANGE'
           minor_string_token: 'feat'
           patch_string_token: 'fix,perf,refactor'
-          release_branches: staging
+          release_branches: staging   # include staging so dry-run computes new_version here
 
       - name: Stamp prerelease version
         run: |
@@ -97,7 +97,7 @@ jobs:
           major_string_token: 'BREAKING CHANGE'
           minor_string_token: 'feat'
           patch_string_token: 'fix,perf,refactor'
-          release_branches: alpha
+          release_branches: alpha   # include alpha so dry-run computes new_version here
 
       - name: Stamp prerelease version
         run: |

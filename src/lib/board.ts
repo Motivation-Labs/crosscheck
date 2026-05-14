@@ -46,6 +46,8 @@ interface PRSlot {
   commentCount?: number
   fixCount?: number         // undefined = hasn't run, 0 = skipped, N = applied
   recheckVerdict?: string | null  // recheck step verdict
+  crTokens?: number
+  recheckTokens?: number
 }
 
 export interface PRUpdate {
@@ -56,6 +58,8 @@ export interface PRUpdate {
   commentCount?: number
   fixCount?: number
   recheckVerdict?: string | null
+  crTokens?: number
+  recheckTokens?: number
 }
 
 export interface PRCompletionData {
@@ -87,6 +91,14 @@ export function fmtTime(d = new Date()): string {
 
 // Width of a fmtTime() result — constant regardless of time of day ("01:00:00 AM".length = 11)
 export const FMT_TIME_WIDTH = 11
+
+// Format token count as a compact suffix: "(900)", "(1.2K)", "(1.5M)". Returns '' when undefined.
+export function fmtTokens(n?: number): string {
+  if (n == null) return ''
+  if (n < 1_000) return `(${n})`
+  if (n < 1_000_000) return `(${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K)`
+  return `(${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M)`
+}
 
 // Strip ANSI escape codes for visible-width calculations
 function stripAnsi(s: string): string {
@@ -239,6 +251,8 @@ export class PRBoard {
     if (updates.commentCount !== undefined) slot.commentCount = updates.commentCount
     if (updates.fixCount !== undefined) slot.fixCount = updates.fixCount
     if (updates.recheckVerdict !== undefined) slot.recheckVerdict = updates.recheckVerdict
+    if (updates.crTokens !== undefined) slot.crTokens = updates.crTokens
+    if (updates.recheckTokens !== undefined) slot.recheckTokens = updates.recheckTokens
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -283,7 +297,11 @@ export class PRBoard {
     if (verdict !== null) {
       const crFill = this.crFillFn(verdict)
       const crLabel = this.crLabelFn(verdict)
-      crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(`${commentCount} issues (${verdict})`)}`
+      const tokSuffix = fmtTokens(slot.crTokens)
+      const crLabelStr = tokSuffix
+        ? `${commentCount} issues (${verdict}) ${t.dim(tokSuffix)}`
+        : `${commentCount} issues (${verdict})`
+      crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(crLabelStr)}`
     } else {
       crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
     }
@@ -473,7 +491,11 @@ export class PRBoard {
     const crFill = this.crFillFn(slot.verdict)
     const crLabel = this.crLabelFn(slot.verdict)
     const count = slot.commentCount ?? 0
-    return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(`${count} issues (${slot.verdict})`)}`
+    const tokSuffix = fmtTokens(slot.crTokens)
+    const label = tokSuffix
+      ? `${count} issues (${slot.verdict}) ${t.dim(tokSuffix)}`
+      : `${count} issues (${slot.verdict})`
+    return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(label)}`
   }
 
   private renderFixSection(slot: PRSlot, frame: string): string {
@@ -506,7 +528,9 @@ export class PRBoard {
       }
       const fill = this.crFillFn(slot.recheckVerdict)
       const label = this.crLabelFn(slot.recheckVerdict)
-      return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(slot.recheckVerdict)}`
+      const tokSuffix = fmtTokens(slot.recheckTokens)
+      const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
+      return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
     }
     return `Recheck ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
   }

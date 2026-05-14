@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
+import type { ReviewResult } from './claude.js'
 
 // Scans stderr bottom-up for the first fatal/error line, skipping Codex header boilerplate.
 function extractErrorSummary(stderr: string): string | undefined {
@@ -41,7 +42,7 @@ export async function runCodexReview(
   vendor: CodexVendorConfig,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
-): Promise<string> {
+): Promise<ReviewResult> {
   // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
   const model = vendor.auth === 'api-key'
     ? (vendor.model ?? TIER_MODELS_API[quality.tier] ?? 'o4-mini')
@@ -78,7 +79,10 @@ export async function runCodexReview(
       },
     )
 
-    return result.stdout.trim() || result.stderr.trim()
+    const review = result.stdout.trim() || result.stderr.trim()
+    const tokensMatch = (result.stderr ?? '').match(/\btokens?:\s*([\d,]+)/i)
+    const tokensUsed = tokensMatch ? parseInt(tokensMatch[1].replace(/,/g, ''), 10) : undefined
+    return { review, tokensUsed }
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''

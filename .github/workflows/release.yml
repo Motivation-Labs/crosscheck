@@ -51,6 +51,8 @@ jobs:
 
       - name: Resolve version
         id: ver
+        env:
+          SEMVER_CHANGELOG: ${{ steps.semver.outputs.changelog }}
         run: |
           if [ -n "${{ inputs.exact_version }}" ]; then
             echo "new_version=${{ inputs.exact_version }}" >> $GITHUB_OUTPUT
@@ -59,7 +61,13 @@ jobs:
           else
             echo "new_version=${{ steps.semver.outputs.new_version }}" >> $GITHUB_OUTPUT
             echo "new_tag=${{ steps.semver.outputs.new_tag }}"         >> $GITHUB_OUTPUT
-            echo "changelog=${{ steps.semver.outputs.changelog }}"     >> $GITHUB_OUTPUT
+            # changelog is multiline — use the heredoc form required by GitHub Actions
+            EOF_DELIM=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+            {
+              echo "changelog<<$EOF_DELIM"
+              echo "$SEMVER_CHANGELOG"
+              echo "$EOF_DELIM"
+            } >> $GITHUB_OUTPUT
           fi
 
       - name: No release needed
@@ -100,6 +108,9 @@ jobs:
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$CURRENT" != "${{ needs.compute.outputs.new_version }}" ]; then
             npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
+            git add package.json package-lock.json
+            git commit -m "chore: release ${{ needs.compute.outputs.new_tag }}"
+            git push origin HEAD:main
           fi
           if git rev-parse "${{ needs.compute.outputs.new_tag }}" >/dev/null 2>&1; then
             echo "Tag ${{ needs.compute.outputs.new_tag }} already exists — skipping."

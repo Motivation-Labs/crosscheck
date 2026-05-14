@@ -125,8 +125,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   } catch (err: unknown) {
     spinner2.fail()
     reviewSpinner?.fail()
+    const message = err instanceof Error ? err.message : String(err)
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'review' }, err)
-    throw err
+    console.error(chalk.red(`\n✗ ${message}`))
+    process.exit(2)
   } finally {
     rmSync(tmpDir, { force: true, recursive: true })
   }

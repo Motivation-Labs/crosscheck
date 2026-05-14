@@ -48,6 +48,7 @@ interface PRSlot {
   recheckVerdict?: string | null  // recheck step verdict
   crTokens?: number
   recheckTokens?: number
+  fixTokens?: number
 }
 
 export interface PRUpdate {
@@ -60,6 +61,7 @@ export interface PRUpdate {
   recheckVerdict?: string | null
   crTokens?: number
   recheckTokens?: number
+  fixTokens?: number
 }
 
 export interface PRCompletionData {
@@ -253,6 +255,7 @@ export class PRBoard {
     if (updates.recheckVerdict !== undefined) slot.recheckVerdict = updates.recheckVerdict
     if (updates.crTokens !== undefined) slot.crTokens = updates.crTokens
     if (updates.recheckTokens !== undefined) slot.recheckTokens = updates.recheckTokens
+    if (updates.fixTokens !== undefined) slot.fixTokens = updates.fixTokens
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -310,12 +313,29 @@ export class PRBoard {
     if (!hasFixStep) {
       fixSection = `Fix ${t.dim('—')}`
     } else if (fixCount !== undefined && fixCount > 0) {
-      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}`
+      const fixTokSuffix = fmtTokens(slot.fixTokens)
+      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}${fixTokSuffix ? ' ' + t.dim(fixTokSuffix) : ''}`
     } else {
       fixSection = `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
     }
 
-    this.printStatic(`\n${line1}\n${indent}${prSection}${pipe}${crSection}${pipe}${fixSection}`)
+    const hasRecheckStep = this.steps.some(s => s.type === 'recheck')
+    let recheckSection: string | null = null
+    if (hasRecheckStep) {
+      if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
+        const fill = this.crFillFn(slot.recheckVerdict)
+        const label = this.crLabelFn(slot.recheckVerdict)
+        const tokSuffix = fmtTokens(slot.recheckTokens)
+        const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
+        recheckSection = `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
+      } else {
+        recheckSection = `Recheck ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
+      }
+    }
+
+    const parts = [prSection, crSection, fixSection]
+    if (recheckSection !== null) parts.push(recheckSection)
+    this.printStatic(`\n${line1}\n${indent}${parts.join(pipe)}`)
 
     // In non-TTY mode render() never runs, so purge the slot here instead of
     // relying on the render loop's 5-second cleanup.
@@ -507,7 +527,8 @@ export class PRBoard {
     }
     if (slot.fixCount !== undefined) {
       if (slot.fixCount === 0) return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('— skipped')}`
-      return `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.success('✓')} ${t.accent(String(slot.fixCount) + ' applied')}`
+      const tokSuffix = fmtTokens(slot.fixTokens)
+      return `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.success('✓')} ${t.accent(String(slot.fixCount) + ' applied')}${tokSuffix ? ' ' + t.dim(tokSuffix) : ''}`
     }
     return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('queued')}`
   }

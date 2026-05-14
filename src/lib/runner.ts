@@ -22,6 +22,7 @@ export interface PRPhaseData {
   recheckVerdict?: string | null
   crTokens?: number
   recheckTokens?: number
+  fixTokens?: number
 }
 
 export interface WorkflowContext {
@@ -188,8 +189,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
       let appliedCount = 0
+      let fixTokensUsed: number | undefined
       try {
-        ;({ appliedCount } = await runFixStep(
+        ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -204,7 +206,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       if (appliedCount === 0) {
-        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+        onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: fixTokensUsed })
         results[step.name] = { applied_count: 0 }
         continue
       }
@@ -226,8 +228,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
@@ -263,8 +265,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             })
           } catch { /* label may not exist in this repo — skip */ }
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -276,8 +278,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const body = `### Suggested fixes (crosscheck auto-fix)\n\n\`\`\`diff\n${patch.slice(0, 16000)}\n\`\`\``
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
-        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed' })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment' })
+        onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
       }
     }

@@ -220,11 +220,6 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const deliveryMode = config.post_review.auto_fix.delivery.mode
 
-      // Belt-and-suspenders: even if codex.ts already restored .codex/instructions,
-      // ensure it is never staged — it must never appear in a crosscheck fix commit.
-      try { execSync('git restore --staged .codex/instructions', { cwd: tmpDir, stdio: 'ignore' }) } catch { /* not staged */ }
-      try { execSync('git checkout -- .codex/instructions', { cwd: tmpDir, stdio: 'ignore' }) } catch { /* not modified */ }
-
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
         execSync(

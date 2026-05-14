@@ -15,6 +15,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   pipelinePreset: 'review-only',
   tunnelBackend: 'localhost.run',
   smeeChannel: '',
+  cloneProtocol: 'ssh',
 }
 
 let tmpDir: string

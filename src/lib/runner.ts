@@ -42,6 +42,9 @@ export interface WorkflowContext {
   // Override the steps to execute instead of loading from workflow.yml.
   // Used by `crosscheck run --steps` to run only a subset of the pipeline.
   steps?: import('./workflow.js').WorkflowStep[]
+  // When smart-switch is active, route to this vendor if the step's configured
+  // reviewer resolves to a disabled vendor rather than skipping the step.
+  smartSwitchFallback?: 'claude' | 'codex'
 }
 
 export interface WorkflowResult {
@@ -58,11 +61,12 @@ function resolveReviewer(
   reviewer: string,
   origin: PROrigin,
   config: Config,
+  fallback?: 'claude' | 'codex',
 ): 'claude' | 'codex' | null {
   if (reviewer === 'origin') {
     if (origin === 'claude' && config.vendors.claude.enabled) return 'claude'
     if (origin === 'codex' && config.vendors.codex.enabled) return 'codex'
-    return null
+    return fallback && config.vendors[fallback].enabled ? fallback : null
   }
   if (reviewer === 'auto') {
     if (origin === 'claude' && config.vendors.codex.enabled) return 'codex'
@@ -71,8 +75,8 @@ function resolveReviewer(
     if (config.vendors.claude.enabled) return 'claude'
     return null
   }
-  if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : null
-  if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : null
+  if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : (fallback && config.vendors[fallback].enabled ? fallback : null)
+  if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   return null
 }
 
@@ -93,7 +97,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (step.type === 'review' || step.type === 'recheck') {
       const isRecheck = step.type === 'recheck'
-      const reviewer = resolveReviewer(step.reviewer, origin, config)
+      const reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true }
@@ -164,7 +168,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
-      const vendor = resolveReviewer(step.reviewer, origin, config)
+      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { skipFix('no_vendor'); continue }
 
       // Codex fix not yet implemented — skip gracefully

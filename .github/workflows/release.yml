@@ -110,7 +110,6 @@ jobs:
             npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
             git add package.json package-lock.json
             git commit -m "chore: release ${{ needs.compute.outputs.new_tag }}"
-            git push origin HEAD:main
           fi
           if git rev-parse "${{ needs.compute.outputs.new_tag }}" >/dev/null 2>&1; then
             echo "Tag ${{ needs.compute.outputs.new_tag }} already exists — skipping."
@@ -156,8 +155,9 @@ jobs:
       - name: Sync release version to staging
         run: |
           git fetch origin staging
+          git fetch --tags
           git checkout staging
-          git checkout main -- package.json package-lock.json
+          git checkout "${{ needs.compute.outputs.new_tag }}" -- package.json package-lock.json
           if git diff --cached --quiet; then
             echo "staging already at ${{ needs.compute.outputs.new_tag }} — nothing to sync"
           else

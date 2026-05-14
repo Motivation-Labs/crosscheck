@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so git rev-list can count commits since last tag
+          fetch-depth: 0   # full history for tag detection and commit counting
 
       - uses: actions/setup-node@v4
         with:
@@ -31,19 +31,36 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Compute next stable version (dry run)
+        id: next_ver
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dry_run: true
+          default_bump: patch
+          major_string_token: 'BREAKING CHANGE'
+          minor_string_token: 'feat'
+          patch_string_token: 'fix,perf,refactor'
+          release_branches: staging   # include staging so dry-run computes new_version here
+
       - name: Stamp prerelease version
         run: |
-          # Strip any existing prerelease suffix so the base is always clean (e.g. 0.7.0)
-          BASE=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
-          # Count commits since the last vX.Y.Z tag; this is the beta counter.
-          # Result: 0.7.0-beta.0, 0.7.0-beta.5, 0.7.0-beta.12 — strictly increasing.
+          # Use the computed next stable version so beta always sorts above the current @latest.
+          # Fall back to a patch-bump of the current package.json version if the action returned nothing.
+          NEXT="${{ steps.next_ver.outputs.new_version }}"
+          if [ -z "$NEXT" ]; then
+            CURRENT=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
+            IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+            NEXT="${MAJ}.${MIN}.$((PAT + 1))"
+          fi
+          # Count commits since the last vX.Y.Z tag; this is the monotonically increasing beta counter.
           LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
           if [ -n "$LAST_TAG" ]; then
             COUNT=$(git rev-list --count "${LAST_TAG}..HEAD")
           else
             COUNT=$(git rev-list --count HEAD)
           fi
-          npm version "${BASE}-beta.${COUNT}" --no-git-tag-version
+          npm version "${NEXT}-beta.${COUNT}" --no-git-tag-version
 
       - name: Publish to npm @beta
         run: npm publish --tag beta --access public
@@ -59,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so git rev-list can count commits since last tag
+          fetch-depth: 0   # full history for tag detection and commit counting
 
       - uses: actions/setup-node@v4
         with:
@@ -70,16 +87,33 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Compute next stable version (dry run)
+        id: next_ver
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dry_run: true
+          default_bump: patch
+          major_string_token: 'BREAKING CHANGE'
+          minor_string_token: 'feat'
+          patch_string_token: 'fix,perf,refactor'
+          release_branches: alpha   # include alpha so dry-run computes new_version here
+
       - name: Stamp prerelease version
         run: |
-          BASE=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
+          NEXT="${{ steps.next_ver.outputs.new_version }}"
+          if [ -z "$NEXT" ]; then
+            CURRENT=$(node -p "require('./package.json').version.replace(/-.*$/, '')")
+            IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+            NEXT="${MAJ}.${MIN}.$((PAT + 1))"
+          fi
           LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
           if [ -n "$LAST_TAG" ]; then
             COUNT=$(git rev-list --count "${LAST_TAG}..HEAD")
           else
             COUNT=$(git rev-list --count HEAD)
           fi
-          npm version "${BASE}-alpha.${COUNT}" --no-git-tag-version
+          npm version "${NEXT}-alpha.${COUNT}" --no-git-tag-version
 
       - name: Publish to npm @alpha
         run: npm publish --tag alpha --access public

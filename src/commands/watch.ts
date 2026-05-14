@@ -33,6 +33,7 @@ import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { PersistentShaSet } from '../lib/sha-cache.js'
 
 // Compute PR diff size in lines, excluding noise (lockfiles, binaries, data files)
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
@@ -183,8 +184,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // PR deduplication — skip if already reviewing this PR+SHA
   const inFlight = new Set<string>()
-  // SHAs pushed by the address step — skip synchronize events from our own commits
-  const crosscheckShas = new Set<string>()
+  // SHAs pushed by the fix step — persisted to disk so restarts don't re-review our own commits
+  const crosscheckShas = new PersistentShaSet()
 
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
@@ -300,7 +301,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         return
       }
 
-      // Skip synchronize events triggered by our own address commits
+      // Skip synchronize events triggered by our own address commits.
+      // crosscheckShas is backed by disk so this also covers SHAs from prior sessions.
       if (crosscheckShas.has(pr.head.sha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_sha', sha: pr.head.sha })
         return

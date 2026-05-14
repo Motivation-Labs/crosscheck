@@ -153,6 +153,8 @@ jobs:
             ${{ needs.compute.outputs.changelog }}
 
       - name: Sync release version to staging
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
           git fetch origin staging
           git fetch --tags
@@ -162,7 +164,21 @@ jobs:
             echo "staging already at ${{ needs.compute.outputs.new_tag }} — nothing to sync"
           else
             git commit -m "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging"
-            git push origin staging
+            # Try a direct push first (works when branch protection allows Actions or a PAT is set).
+            # If staging is protected and requires PRs, open a sync PR as fallback.
+            if git push origin staging; then
+              echo "synced directly to staging"
+            else
+              SYNC_BRANCH="ci/sync-${{ needs.compute.outputs.new_tag }}-to-staging"
+              git checkout -b "$SYNC_BRANCH"
+              git push origin "$SYNC_BRANCH"
+              gh pr create \
+                --base staging \
+                --head "$SYNC_BRANCH" \
+                --title "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging" \
+                --body "Automated version sync from release ${{ needs.compute.outputs.new_tag }}. Merge to complete staging sync." \
+              && echo "opened sync PR — merge it to complete staging version sync"
+            fi
           fi
 
       - name: Trigger @beta publish on staging

@@ -483,6 +483,30 @@ These four items fix the two-phase model described in Design Principles. Any new
   - **Tests Required:** No new behavioral logic — pure rendering change. Smoke-test: start `watch` against a real PR; verify (a) stats appear at top, (b) tunnel line appears below stats, (c) completed PR entries print in `PR | CR | Fix` format with `(VERDICT)` suffix.
   - **Decided:** Verdict in parentheses uses the full unabbreviated form: `(APPROVE)`, `(NEEDS WORK)`, `(BLOCK)`. Consistent across active slots and completed entries.
 
+- [ ] **Token usage per workflow step — display in two-line status stripe** — track and display the number of tokens consumed by each AI step (review, fix, recheck) and append a compact count to the step label in the per-PR two-line board entry, e.g. `CR ✓ APPROVE (1.2K)`.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` who wants visibility into how many tokens each review step consumed, to tune quality tiers or spot unexpectedly large reviews.
+  - **Acceptance Criteria:**
+    - Each AI step (review, fix, recheck) captures total tokens used from the CLI subprocess output and stores it on `PRSlot` as `crTokens`, `fixTokens`, `recheckTokens` (all `number | undefined`).
+    - `renderPRSlot()` appends the token count to the step label when present, formatted as a compact human-readable suffix: `< 1 000 → "(900)"`, `≥ 1 000 → "(1.2K)"`, `≥ 1 000 000 → "(1.2M)"`. Suffix is separated from the step label by a single space, e.g. `CR ✓ APPROVE (1.2K)`.
+    - Token count is shown on the completed-PR scrollback line in the same format.
+    - When token count is unavailable (CLI did not emit usage data, or step did not run), the suffix is omitted — no `(—)` placeholder.
+    - Column widths account for the suffix so the layout does not shift mid-session when counts arrive.
+  - **Technical Notes:**
+    - `src/reviewers/claude.ts` and `src/reviewers/codex.ts`: parse token usage from subprocess stdout/stderr. Claude CLI emits usage in JSON on stdout when `--output-format json` is passed (field `usage.input_tokens + usage.output_tokens`); Codex emits a `tokens:` line at the end of stderr. Extract and return `tokensUsed: number | undefined` alongside review text. Both functions change return type from `Promise<string>` to `Promise<{ review: string; tokensUsed?: number }>`.
+    - `src/lib/board.ts` (`PRSlot`): add `crTokens?: number`, `recheckTokens?: number`. Update `renderPRSlot()` to call a `fmtTokens(n?: number): string` helper that returns the compact suffix or `''`.
+    - `fmtTokens` helper: `n == null → ''`, `n < 1000 → \`(${n})\``, `n < 1_000_000 → \`(${(n/1000).toFixed(1).replace(/\.0$/, '')}K)\``, else `(NM)`.
+    - `src/lib/runner.ts`: add `crTokens?: number`, `recheckTokens?: number` to `PRPhaseData`; thread token data from reviewer result to `onPhaseChange`; add `tokens_used` field to the `review_complete` log entry.
+    - `src/lib/logger.ts`: no structural change needed — `tokens_used` is passed as an ad-hoc field on the existing `review_complete` log event (the `[key: string]: unknown` index signature already covers it).
+    - `src/commands/review.ts`: update callers to destructure `{ review }` from the new return type.
+  - **Tests Required:**
+    - `fmtTokens(undefined)` → `''`.
+    - `fmtTokens(900)` → `'(900)'`.
+    - `fmtTokens(1200)` → `'(1.2K)'`.
+    - `fmtTokens(1000)` → `'(1K)'`.
+    - `fmtTokens(1_500_000)` → `'(1.5M)'`.
+    - `renderPRSlot()` with `crTokens: 1200` and `phase: 'reviewed'` includes `(1.2K)` after the verdict badge.
+    - `renderPRSlot()` with `crTokens: undefined` renders no suffix.
+
 - [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
   - **User:** Any developer who wants faster CLI invocations.
   - **Acceptance Criteria:**

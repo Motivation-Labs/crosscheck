@@ -10,18 +10,30 @@
 
 # crosscheck
 
-**Automated AI code review for teams using Claude Code and Codex — configured your way, zero new infrastructure.**
+<p align="center">
+  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+</p>
 
-When your AI agent opens a PR, the rival AI reviews it. If issues are found, the original agent fixes them and opens a follow-up PR. The whole loop runs against your existing subscriptions with a single command.
+<p align="center">
+  <sub>
+    <b>①</b> Session header — profile, orgs, config path, and registered webhooks at a glance. &nbsp;|&nbsp;
+    <b>②</b> Per-PR event row — origin detection (<code>via=commits</code>), assigned reviewer, and elapsed time. &nbsp;|&nbsp;
+    <b>③</b> Live pipeline stripe — PR size · CR verdict · Fix count · Recheck status, updating in real time.
+  </sub>
+</p>
+
+**Auto Code Review Pipeline — customizable PR → Review → Fix → Recheck loop, single-vendor or cross-vendor, zero new infrastructure.**
+
+Define the review pipeline in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
 
 ---
 
 ## Highlights
 
-- **Customizable review workflow** — configure the full pipeline: review-only, review + auto-fix, or review + fix + recheck. Per-step instructions let you tune what the reviewer focuses on without editing prompts manually.
-- **Cross-vendor and single-vendor modes** — cross-vendor mode routes each PR to the rival AI for independent review. Single-vendor mode uses whichever AI you have. Switch with one config line.
+- **Configurable pipeline** — compose steps in `workflow.yml`: a `review` step, an optional `fix` step, and an optional `recheck` step. Add per-step `instructions:` and `when:` conditions to control exactly what runs and when.
+- **Single-vendor and cross-vendor modes** — single-vendor uses whatever AI you have enabled. Cross-vendor routes each PR to the rival AI for an independent review (Claude reviews Codex PRs, Codex reviews Claude PRs). Switch with one config line.
 - **Subscription-funded, not token-billed** — runs through the `claude` and `codex` CLIs against your Claude Pro/Max and ChatGPT Plus/Pro plans. No API keys, no per-review cost.
-- **`watch` for personal use, `serve` for your team** — `crosscheck watch` runs on your laptop and opens a tunnel automatically, ideal for solo developers. `crosscheck serve` binds to a fixed port on a shared machine so the whole team gets coverage without anyone's laptop staying on.
+- **`watch` for personal use, `serve` for your team** — `crosscheck watch` runs on your laptop with an auto-tunnel, ideal for solo use. `crosscheck serve` binds to a fixed port on a shared machine so the whole team is covered.
 
 ---
 
@@ -54,8 +66,8 @@ $ crosscheck watch
   "Move fast and review things."
 
   profile   personal · cross-vendor · balanced
+  pipeline  review → fix → recheck
   users     your-github-login (5 repos)
-  auto-fix  on_issues · same-as-author · pull_request
   config    ./crosscheck.config.yml
 
   ✓ tunnel ready: https://abc123.lhr.life
@@ -64,15 +76,13 @@ $ crosscheck watch
 
 PR #47 opened: add retry logic for flaky network calls
   origin=claude  reviewer=codex
-  codex reviewing... (12s)
-  NEEDS WORK
-  auto-fix  claude fixing...
-  fix PR #48 opened → github.com/your-org/your-repo/pull/48
+  codex reviewing... (12s)       NEEDS WORK   (8.4K)
+  claude fixing...               fixed ✓      (11.2K)
+  codex rechecking... (9s)       APPROVE      (6.1K)
 
 PR #49 opened: implement caching layer
   origin=codex  reviewer=claude
-  claude reviewing... (18s)
-  APPROVE
+  claude reviewing... (18s)      APPROVE      (9.8K)
 ```
 
 ---
@@ -101,7 +111,31 @@ crosscheck issue                    # draft and file a bug report from recent er
 
 ## Configuration
 
-Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you. A project-local `crosscheck.config.yml` or `.crosscheck.yml` is used only as a fallback when the home config is absent.
+### Pipeline (`workflow.yml`)
+
+The pipeline lives in `workflow.yml` alongside your config. Compose `review`, `fix`, and `recheck` steps in any order and add per-step instructions and `when:` conditions.
+
+```yaml
+# workflow.yml — define the review pipeline
+steps:
+  - name: review
+    type: review
+    reviewer: auto          # auto | claude | codex | origin
+
+  - name: fix
+    type: fix
+    reviewer: origin        # fix with the same vendor that wrote the PR
+    when: review.verdict != 'APPROVE'
+
+  - name: recheck
+    type: recheck
+    reviewer: auto
+    when: fix.applied_count > 0
+```
+
+### Config (`crosscheck.config.yml`)
+
+Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you.
 
 ```yaml
 orgs:
@@ -111,21 +145,18 @@ routing:
   allowed_authors:
     - your-github-login
 
-quality:
-  tier: balanced          # fast | balanced | thorough
+mode: cross-vendor          # cross-vendor | single-vendor
 
-# Which protocol crosscheck uses when cloning PR repos for review
-# ssh   — uses your local SSH keys (default)
-# https — uses your GitHub token; pick if SSH cannot reach target repos
-clone_protocol: ssh
-
-post_review:
-  auto_fix:
+vendors:
+  claude:
     enabled: true
-    trigger: on_issues    # on_issues | always | never
-    fixer: same-as-author
-    delivery:
-      mode: pull_request
+  codex:
+    enabled: true
+
+quality:
+  tier: balanced            # fast | balanced | thorough
+
+clone_protocol: ssh         # ssh (default) | https
 ```
 
 Full reference: [get-started.md](./get-started.md)
@@ -134,9 +165,9 @@ Full reference: [get-started.md](./get-started.md)
 
 ## Deployment
 
-**Personal (`crosscheck watch`)** — runs on your laptop. SSH tunnel through `localhost.run` handles everything — no port-forwarding, no cloud account. Health check reconnects automatically if the tunnel drops.
+**Personal (`crosscheck watch`)** — runs on your laptop. An SSH tunnel through `localhost.run` handles GitHub webhook delivery automatically — no port-forwarding, no cloud account needed. Reconnects if the tunnel drops.
 
-**Team (`crosscheck serve`)** — bind to a fixed port on a machine with a public IP. Register the webhook once and the whole team is covered without anyone's laptop staying on.
+**Team (`crosscheck serve`)** — bind to a fixed port on a machine with a public IP or behind a reverse proxy. Register the webhook once; the whole team is covered without anyone's laptop staying on.
 
 ---
 

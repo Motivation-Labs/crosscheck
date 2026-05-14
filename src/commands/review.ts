@@ -75,6 +75,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     spinner2.succeed('Repo ready')
 
     let reviewText: string
+    let tokensUsed: number | undefined
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
@@ -83,7 +84,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     try {
       if (reviewer === 'codex') {
-        reviewText = await runCodexReview(
+        ;({ review: reviewText, tokensUsed } = await runCodexReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -91,9 +92,9 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.vendors.codex,
           undefined,
           msg => { reviewSpinner!.text = msg },
-        )
+        ))
       } else {
-        reviewText = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -102,7 +103,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.budget.per_review_usd,
           undefined,
           msg => { reviewSpinner!.text = msg },
-        )
+        ))
       }
     } finally {
       clearInterval(elapsedTimer)
@@ -113,7 +114,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
     console.log(`  ${formatVerdict(verdict)}`)
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`

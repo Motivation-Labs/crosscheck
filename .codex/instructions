@@ -1,8 +1,3 @@
-Focus areas: security, types, performance. 
-
-Focus on correctness and security. Be concise.
-
-
 ## Constraints
 - Do not run tsc, ts-node, or tsx.
 - Do not run npm, npx, yarn, or pnpm.

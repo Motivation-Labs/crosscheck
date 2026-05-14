@@ -113,7 +113,7 @@ steps:
   - name: fix
     type: fix
     reviewer: origin        # fix with the same vendor that wrote the PR
-    when: review.verdict == "NEEDS_WORK" or review.verdict == "BLOCK"
+    when: review.verdict != 'APPROVE'
 
   - name: recheck
     type: recheck
@@ -133,11 +133,13 @@ routing:
   allowed_authors:
     - your-github-login
 
+mode: cross-vendor          # cross-vendor | single-vendor
+
 vendors:
   claude:
     enabled: true
   codex:
-    enabled: true           # cross-vendor when both enabled; single-vendor otherwise
+    enabled: true
 
 quality:
   tier: balanced            # fast | balanced | thorough

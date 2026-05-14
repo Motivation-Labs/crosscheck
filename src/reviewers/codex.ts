@@ -6,11 +6,11 @@ import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import type { ReviewResult } from './claude.js'
 
-// Codex review command outputs [P1]/[P2]/[P3] priority markers but never a VERDICT line.
+// Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
 // extract it. Only called when the output doesn't already contain a VERDICT: token.
 export function inferVerdictFromCodexOutput(text: string): string {
-  if (/\[P1\]/i.test(text)) return 'BLOCK'
+  if (/\[P0\]/i.test(text) || /\[P1\]/i.test(text)) return 'BLOCK'
   if (/\[P2\]/i.test(text) || /\[P3\]/i.test(text)) return 'NEEDS WORK'
   return 'APPROVE'
 }

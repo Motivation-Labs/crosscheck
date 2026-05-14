@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { filterIndices, adjustWindowStart, resolveViewport } from '../lib/repo-picker.js'
+import { filterIndices, adjustWindowStart, resolveViewport, truncate, advancePageStart } from '../lib/repo-picker.js'
 
 describe('filterIndices', () => {
   it('returns every index when query is empty', () => {
@@ -84,5 +84,60 @@ describe('resolveViewport', () => {
 
   it('treats zero or negative hint as missing', () => {
     expect(resolveViewport(0, 40)).toBe(12)
+  })
+})
+
+describe('truncate', () => {
+  it('returns the input unchanged when it fits', () => {
+    expect(truncate('hello', 10)).toBe('hello')
+    expect(truncate('hello', 5)).toBe('hello')
+  })
+
+  it('appends an ellipsis when truncation is needed', () => {
+    expect(truncate('hello world', 5)).toBe('hell…')
+    expect(truncate('hello', 4)).toBe('hel…')
+  })
+
+  it('returns just the ellipsis when only 1 column is available', () => {
+    expect(truncate('hello', 1)).toBe('…')
+  })
+
+  it('returns the empty string for zero or negative width', () => {
+    expect(truncate('hello', 0)).toBe('')
+    expect(truncate('hello', -3)).toBe('')
+  })
+
+  it('handles empty input safely', () => {
+    expect(truncate('', 10)).toBe('')
+    expect(truncate('', 0)).toBe('')
+  })
+})
+
+describe('advancePageStart', () => {
+  // viewport = 5, total = 20 — typical PgDn / PgUp scenarios
+  it('advances by one full viewport on PageDown', () => {
+    expect(advancePageStart(0, 5, 20, 1)).toBe(5)
+    expect(advancePageStart(5, 5, 20, 1)).toBe(10)
+  })
+
+  it('retreats by one full viewport on PageUp', () => {
+    expect(advancePageStart(10, 5, 20, -1)).toBe(5)
+    expect(advancePageStart(5, 5, 20, -1)).toBe(0)
+  })
+
+  it('clamps at zero on PageUp', () => {
+    expect(advancePageStart(2, 5, 20, -1)).toBe(0)
+    expect(advancePageStart(0, 5, 20, -1)).toBe(0)
+  })
+
+  it('clamps at total - viewport on PageDown', () => {
+    // From windowStart=15, PgDn would land at 20 — clamped to 15 (the last valid start).
+    expect(advancePageStart(15, 5, 20, 1)).toBe(15)
+    expect(advancePageStart(18, 5, 20, 1)).toBe(15)
+  })
+
+  it('returns 0 when total is smaller than the viewport', () => {
+    expect(advancePageStart(0, 10, 4, 1)).toBe(0)
+    expect(advancePageStart(0, 10, 4, -1)).toBe(0)
   })
 })

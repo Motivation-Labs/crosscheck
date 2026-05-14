@@ -55,6 +55,32 @@ export function resolveViewport(hint: number | undefined, termRows: number | und
   return Math.max(3, Math.min(requested, ceiling))
 }
 
+// Truncate a string so its visible width fits within `maxWidth` columns. Appends
+// `…` when truncation happens. ANSI-aware callers must pass plain text — this
+// helper does not parse escape sequences.
+export function truncate(s: string, maxWidth: number): string {
+  if (maxWidth <= 0) return ''
+  if (s.length <= maxWidth) return s
+  if (maxWidth === 1) return '…'
+  return s.slice(0, maxWidth - 1) + '…'
+}
+
+// New windowStart after a PageDown / PageUp jump. The viewport advances by
+// exactly one page so the visible window changes, not just the cursor — without
+// this, PgDn would set cursorPos one viewport ahead but `adjustWindowStart`
+// would only scroll far enough to make it visible (one row), so the picker
+// behaves like a slow ↓ instead of a real page jump.
+export function advancePageStart(
+  windowStart: number,
+  viewport: number,
+  total: number,
+  direction: 1 | -1,
+): number {
+  const next = windowStart + direction * viewport
+  const maxStart = Math.max(0, total - viewport)
+  return Math.max(0, Math.min(maxStart, next))
+}
+
 // ── Single-select picker ─────────────────────────────────────────────────────
 
 export interface PickerItem {
@@ -150,12 +176,18 @@ export async function promptSinglePicker(
         cursor = cursor < items.length - 1 ? cursor + 1 : 0
         render()
       } else if (key === '\x1b[5~') {
-        // PageUp — jump one viewport, clamp at top (no wrap)
-        cursor = Math.max(0, cursor - viewport())
+        // PageUp — advance window AND cursor by one viewport so the page
+        // actually flips. Without the windowStart bump, adjustWindowStart would
+        // only scroll far enough to keep the cursor visible (one row).
+        const vp = viewport()
+        cursor = Math.max(0, cursor - vp)
+        windowStart = advancePageStart(windowStart, vp, items.length, -1)
         render()
       } else if (key === '\x1b[6~') {
-        // PageDown — jump one viewport, clamp at bottom (no wrap)
-        cursor = Math.min(items.length - 1, cursor + viewport())
+        // PageDown — see PageUp comment.
+        const vp = viewport()
+        cursor = Math.min(items.length - 1, cursor + vp)
+        windowStart = advancePageStart(windowStart, vp, items.length, 1)
         render()
       } else if (key === '\r' || key === '\n') {
         process.removeListener('SIGINT', handleSigint)
@@ -240,9 +272,21 @@ export async function promptRepoPicker(
         process.stdout.write(`${ERASE_LINE}${BOLD}${opts.title}${RESET}\n`)
       }
 
+      // All user-controlled / variable-width text is clipped to the live
+      // terminal width before rendering. If a line wrapped, the terminal would
+      // consume an extra row that lastLineCount doesn't know about, and the
+      // next cursor-up would land on the wrong line (re-introducing the
+      // overflow bug this PR set out to fix, just triggered by a wide filter
+      // string instead of a tall list).
+      const cols = process.stdout.columns && process.stdout.columns > 0 ? process.stdout.columns : 80
+      const innerWidth = Math.max(1, cols - 2)  // leading "  "
+
       if (filterMode || filterText) {
         const caret = filterMode ? '█' : ''
-        process.stdout.write(`${ERASE_LINE}  ${CYAN}/${RESET} ${filterText}${caret}\n`)
+        // Visible prefix on this line: "  / " (4 cols). Caret is 1 col when present.
+        const filterMax = Math.max(0, cols - 4 - (caret ? 1 : 0))
+        const filterDisplay = truncate(filterText, filterMax)
+        process.stdout.write(`${ERASE_LINE}  ${CYAN}/${RESET} ${filterDisplay}${caret}\n`)
       } else {
         process.stdout.write(`${ERASE_LINE}\n`)
       }
@@ -258,8 +302,12 @@ export async function promptRepoPicker(
           const isFocused = cursorPos === fi
           const checkStr = isSelected ? `${CYAN}[x]${RESET}` : '[ ]'
           const desc = opts.getDescription ? opts.getDescription(item) : ''
+          // Budget: cols - 2 (indent) - 4 ("[x] ") - (desc.length + 2 spaces if desc).
+          const descBudget = desc ? desc.length + 2 : 0
+          const labelMax = Math.max(1, cols - 6 - descBudget)
+          const itemDisplay = truncate(item, labelMax)
           const descStr = desc ? `  ${DIM}${desc}${RESET}` : ''
-          const labelStr = isFocused ? `${BOLD}${item}${RESET}` : `${DIM}${item}${RESET}`
+          const labelStr = isFocused ? `${BOLD}${itemDisplay}${RESET}` : `${DIM}${itemDisplay}${RESET}`
           process.stdout.write(`${ERASE_LINE}  ${checkStr} ${labelStr}${descStr}\n`)
         }
       }
@@ -269,16 +317,16 @@ export async function promptRepoPicker(
       const selCount = selected.size
       const filterNote = filterText ? ` · filter: "${filterText}"` : ''
       const selNote = selCount > 0 ? ` · ${selCount} selected` : ''
-      process.stdout.write(`${ERASE_LINE}${DIM}  ${pos}/${total}${filterNote}${selNote}${RESET}\n`)
+      const statusLine = truncate(`${pos}/${total}${filterNote}${selNote}`, innerWidth)
+      process.stdout.write(`${ERASE_LINE}${DIM}  ${statusLine}${RESET}\n`)
 
       // PgUp/PgDn only when the *current* visible list overflows the viewport.
       // After a filter narrows the list, the hint shrinks accordingly.
       const navHint = filtered.length > vp ? '↑↓ PgUp/PgDn move' : '↑↓ move'
-      if (filterMode) {
-        process.stdout.write(`${ERASE_LINE}${DIM}  ${navHint} · type to filter · backspace · esc clear · enter done${RESET}\n`)
-      } else {
-        process.stdout.write(`${ERASE_LINE}${DIM}  ${navHint} · space select · a all · / filter · enter confirm${RESET}\n`)
-      }
+      const footerLine = filterMode
+        ? `${navHint} · type to filter · backspace · esc clear · enter done`
+        : `${navHint} · space select · a all · / filter · enter confirm`
+      process.stdout.write(`${ERASE_LINE}${DIM}  ${truncate(footerLine, innerWidth)}${RESET}\n`)
     }
 
     function cleanup(result: string[]) {
@@ -324,16 +372,22 @@ export async function promptRepoPicker(
         return
       }
       if (key === '\x1b[5~') {
-        // PageUp — one viewport, clamp at top (no wrap)
+        // PageUp — advance window AND cursor by one viewport so the page
+        // actually flips. Without the windowStart bump, adjustWindowStart would
+        // only scroll far enough to keep the cursor visible (one row).
         if (filtered.length === 0) return
-        cursorPos = Math.max(0, cursorPos - viewport())
+        const vp = viewport()
+        cursorPos = Math.max(0, cursorPos - vp)
+        windowStart = advancePageStart(windowStart, vp, filtered.length, -1)
         render()
         return
       }
       if (key === '\x1b[6~') {
-        // PageDown — one viewport, clamp at bottom (no wrap)
+        // PageDown — see PageUp comment.
         if (filtered.length === 0) return
-        cursorPos = Math.min(filtered.length - 1, cursorPos + viewport())
+        const vp = viewport()
+        cursorPos = Math.min(filtered.length - 1, cursorPos + vp)
+        windowStart = advancePageStart(windowStart, vp, filtered.length, 1)
         render()
         return
       }

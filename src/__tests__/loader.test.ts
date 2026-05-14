@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { patchAllowedAuthors } from '../config/loader.js'
+import { patchAllowedAuthors, resolveConfigPath } from '../config/loader.js'
 
 let tmpDir: string
 
@@ -148,5 +148,61 @@ describe('patchAllowedAuthors', () => {
     const p = write('login.yml', 'mode: cross-vendor\n')
     patchAllowedAuthors(p, 'mybot')
     expect(read(p)).toContain('    - mybot')
+  })
+})
+
+describe('resolveConfigPath discovery order', () => {
+  // Home is searched first so init/loadConfig never targets a sample file that a
+  // repo happens to ship in cwd. See issue #95.
+
+  let cwdDir: string
+  let homeDir: string
+  let originalCwd: string
+  let originalHome: string | undefined
+
+  beforeEach(() => {
+    // realpathSync resolves /var/... → /private/var/... on macOS so paths returned
+    // by resolveConfigPath (which goes through process.cwd()) compare equal.
+    cwdDir = realpathSync(mkdtempSync(join(tmpdir(), 'crosscheck-cwd-')))
+    homeDir = realpathSync(mkdtempSync(join(tmpdir(), 'crosscheck-home-')))
+    mkdirSync(join(homeDir, '.crosscheck'), { recursive: true })
+    originalCwd = process.cwd()
+    originalHome = process.env.HOME
+    process.chdir(cwdDir)
+    process.env.HOME = homeDir
+  })
+
+  afterEach(() => {
+    process.chdir(originalCwd)
+    if (originalHome === undefined) delete process.env.HOME
+    else process.env.HOME = originalHome
+    rmSync(cwdDir, { recursive: true, force: true })
+    rmSync(homeDir, { recursive: true, force: true })
+  })
+
+  it('prefers ~/.crosscheck/config.yml when both home and cwd configs exist', () => {
+    writeFileSync(join(cwdDir, 'crosscheck.config.yml'), 'mode: cross-vendor\n')
+    writeFileSync(join(homeDir, '.crosscheck', 'config.yml'), 'mode: cross-vendor\n')
+    expect(resolveConfigPath()).toBe(join(homeDir, '.crosscheck', 'config.yml'))
+  })
+
+  it('falls back to cwd/crosscheck.config.yml when home config is absent', () => {
+    writeFileSync(join(cwdDir, 'crosscheck.config.yml'), 'mode: cross-vendor\n')
+    expect(resolveConfigPath()).toBe(join(cwdDir, 'crosscheck.config.yml'))
+  })
+
+  it('falls back to cwd/.crosscheck.yml when neither home nor crosscheck.config.yml exist', () => {
+    writeFileSync(join(cwdDir, '.crosscheck.yml'), 'mode: cross-vendor\n')
+    expect(resolveConfigPath()).toBe(join(cwdDir, '.crosscheck.yml'))
+  })
+
+  it('returns null when no config exists anywhere', () => {
+    expect(resolveConfigPath()).toBeNull()
+  })
+
+  it('honors explicit path regardless of discovery order', () => {
+    writeFileSync(join(homeDir, '.crosscheck', 'config.yml'), 'mode: cross-vendor\n')
+    const explicit = join(cwdDir, 'custom.yml')
+    expect(resolveConfigPath(explicit)).toBe(explicit)
   })
 })

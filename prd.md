@@ -241,6 +241,12 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ## Build Queue
 
+### ✅ Recently shipped
+
+- [x] **smart-switch** — fault-tolerance for cross-vendor mode when a reviewer hits a subscription limit. Full spec below in Next Up (marked done).
+
+---
+
 ### 🚨 P0 — Structural correctness (fix before next routing/detection work)
 
 These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
@@ -1458,6 +1464,47 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/watch.ts` / `serve.ts`: in the backtrace block, change the condition from `if (config.backtrace.enabled)` to `if (config.backtrace.enabled && opts.backtrace !== false)`. Pass `opts` through the existing opts parameter.
     - Log the skip message via `cLog` (watch) / `board.log` (serve) so it's visible in the connectivity section.
   - **Tests Required:** `--no-backtrace` flag parsed correctly; backtrace block skipped when flag is true; `config.backtrace.enabled: false` still skips regardless of flag; `config.backtrace.enabled: true` without flag runs scan normally; log message emitted when flag skips the scan.
+
+- [x] **smart-switch — subscription-limit fault tolerance for cross-vendor mode** — when a reviewer agent hits a subscription limit in cross-vendor mode, automatically degrade to single-vendor mode using the healthy vendor, announce loudly in the terminal, attempt to restore cross-vendor every 30 minutes, and announce restoration when confirmed.
+  - **User:** Anyone running `crosscheck watch` or `crosscheck serve` in cross-vendor mode whose Claude or Codex subscription can hit rate or usage limits.
+  - **Problem:** In cross-vendor mode a subscription limit on one vendor silently fails the review and drops the PR. There is no recovery — subsequent PRs keep attempting the failed vendor and keep failing. Users have no visibility into the degraded state.
+  - **Solution: runtime smart-switch in `src/lib/smart-switch.ts`**
+    - Module-level singleton tracks `{ active, degradedVendor, fallbackVendor, since, restoreAttemptCount, pendingRecoveryVendor }`.
+    - `isSubscriptionLimitError(err)` — classifies the error via regex: `rate limit`, `subscription limit`, `usage limit`, `quota`, `429`, `too many requests`, `credits exhausted`, `plan limit`, `overloaded`.
+    - `detectFailedVendor(err)` — infers which CLI failed from the error message prefix (`claude:` / `codex:`).
+    - `triggerSwitch(vendor, reason, announce)` — activates degraded mode, announces loudly, arms 30-min restore timer. Idempotent for the same vendor.
+    - `notifyReviewSuccess(reviewer, announce)` — called after every successful review. When the recovering vendor successfully completes a review, announces confirmed restoration.
+    - `stopSmartSwitch()` — clears the restore timer; called on process exit.
+  - **Acceptance Criteria:**
+    - When a review fails with a subscription-limit error in cross-vendor mode, the terminal prints:
+      ```
+      ⚡ SMART-SWITCH  <vendor> hit a subscription limit
+        Switched to single-vendor mode — <fallback> will review all PRs. Restore attempt in 30 min.
+      ```
+    - Subsequent PRs in the same session are reviewed by the healthy vendor only, regardless of origin.
+    - The board's reviewer column appends `[smart-switch]` to indicate degraded routing.
+    - After 30 minutes, the terminal prints:
+      ```
+      ↺  SMART-SWITCH  restore attempt #N — trying <vendor> again
+        <vendor> was degraded for ~30 min. Next PR routed to <vendor> will confirm.
+      ```
+    - Cross-vendor routing resumes (optimistic reset). If the previously-failed vendor successfully completes a review, the terminal prints:
+      ```
+      ✓  SMART-SWITCH  cross-vendor mode confirmed restored
+        <vendor> completed a review — back to full cross-vendor routing.
+      ```
+    - If the vendor fails again after a restore attempt, smart-switch re-activates and the attempt count increments.
+    - All smart-switch events are written to the structured log (`~/.crosscheck/logs/`) with events: `smart_switch_triggered`, `smart_switch_restore_attempt`, `smart_switch_restored`.
+    - Smart-switch only activates in cross-vendor mode. Single-vendor mode is unaffected.
+    - Smart-switch is purely runtime state — no config changes or file writes.
+  - **File ownership:**
+    - `src/lib/smart-switch.ts` — new module; all state and logic
+    - `src/commands/watch.ts` — detects errors in `reviewPR` catch block; calls `triggerSwitch`; builds `effectiveConfig` from smart-switch state; calls `notifyReviewSuccess` after successful reviews; calls `stopSmartSwitch` on cleanup
+  - **Tests Required:**
+    - `isSubscriptionLimitError` matches rate-limit, 429, quota, overloaded, subscription-limit patterns; does not match unrelated errors.
+    - `detectFailedVendor` extracts `claude` / `codex` from prefixed error messages; returns null for unknown prefix.
+    - `triggerSwitch` sets correct state (active, degradedVendor, fallbackVendor); calls announce with SMART-SWITCH message; is idempotent for same vendor.
+    - `notifyReviewSuccess` is a no-op when no recovery is pending; announces restoration when pendingRecoveryVendor matches reviewer.
 
 ---
 

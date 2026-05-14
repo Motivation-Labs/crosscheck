@@ -101,7 +101,7 @@ crosscheck issue                    # draft and file a bug report from recent er
 
 ## Configuration
 
-Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you.
+Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you. A project-local `crosscheck.config.yml` or `.crosscheck.yml` is used only as a fallback when the home config is absent.
 
 ```yaml
 orgs:
@@ -113,6 +113,11 @@ routing:
 
 quality:
   tier: balanced          # fast | balanced | thorough
+
+# Which protocol crosscheck uses when cloning PR repos for review
+# ssh   — uses your local SSH keys (default)
+# https — uses your GitHub token; pick if SSH cannot reach target repos
+clone_protocol: ssh
 
 post_review:
   auto_fix:

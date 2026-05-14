@@ -10,6 +10,18 @@
 
 # crosscheck
 
+<p align="center">
+  <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
+</p>
+
+<p align="center">
+  <sub>
+    <b>①</b> Session header — profile, orgs, config path, and registered webhooks at a glance. &nbsp;|&nbsp;
+    <b>②</b> Per-PR event row — origin detection (<code>via=commits</code>), assigned reviewer, and elapsed time. &nbsp;|&nbsp;
+    <b>③</b> Live pipeline stripe — PR size · CR verdict · Fix count · Recheck status, updating in real time.
+  </sub>
+</p>
+
 **Auto Code Review Pipeline — customizable PR → Review → Fix → Recheck loop, single-vendor or cross-vendor, zero new infrastructure.**
 
 Define the review pipeline in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.

@@ -203,7 +203,7 @@ async function promptAuthorVendor(
   const items: PickerItem[] = [
     { label: 'claude', description: 'my PRs without explicit attribution → Codex reviews them' },
     { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
-    { label: 'both',   description: 'let workflow decide, based on routing config' },
+    { label: 'both',   description: 'my PRs without explicit attribution → use fallback_reviewer' },
   ]
   const defaultIdx = current === 'codex' ? 1 : current === 'claude' ? 0 : 2
   const idx = await promptSinglePicker(items, {

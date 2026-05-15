@@ -439,3 +439,47 @@ describe('detectCurrentPreset', () => {
     expect(detectCurrentPreset(workflowDir)).toBe('review-only')
   })
 })
+
+describe('applyOnboardConfig — max_rounds in workflow.yml', () => {
+  it('writes max_rounds: 1 on fix and recheck steps by default', () => {
+    const dir = join(workflowDir, 'maxrounds-default')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const fixStep = raw.steps.find(s => s.type === 'fix')
+    const recheckStep = raw.steps.find(s => s.type === 'recheck')
+    expect(fixStep?.max_rounds).toBe(1)
+    expect(recheckStep?.max_rounds).toBe(1)
+  })
+
+  it('writes custom max_rounds on fix and recheck steps', () => {
+    const dir = join(workflowDir, 'maxrounds-custom')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 3 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const fixStep = raw.steps.find(s => s.type === 'fix')
+    const recheckStep = raw.steps.find(s => s.type === 'recheck')
+    expect(fixStep?.max_rounds).toBe(3)
+    expect(recheckStep?.max_rounds).toBe(3)
+  })
+
+  it('max_rounds does not apply to review-only preset (fix step absent)', () => {
+    const dir = join(workflowDir, 'maxrounds-review-only')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only', maxRounds: 3 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    expect(raw.steps.length).toBe(1)
+    expect(raw.steps[0].type).toBe('review')
+  })
+
+  it('regenerates workflow when max_rounds increases (preset unchanged)', () => {
+    const dir = join(workflowDir, 'maxrounds-regen')
+    // First run with max_rounds: 1
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 1 }, dir)
+    const v1 = readFileSync(join(dir, 'workflow.yml'), 'utf8')
+
+    // Re-run with max_rounds: 2 — must regenerate
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 2 }, dir)
+    const v2 = readFileSync(join(dir, 'workflow.yml'), 'utf8')
+    expect(v2).not.toBe(v1)
+    const raw = yaml.load(v2) as { steps: Array<{ type: string; max_rounds?: number }> }
+    expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(2)
+  })
+})

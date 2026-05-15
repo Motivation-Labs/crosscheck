@@ -205,7 +205,7 @@ async function promptAuthorVendor(
     { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
     { label: 'both',   description: 'let workflow decide, based on routing config' },
   ]
-  const defaultIdx = 2
+  const defaultIdx = current === 'codex' ? 1 : current === 'claude' ? 0 : 2
   const idx = await promptSinglePicker(items, {
     title: 'Which AI do you primarily use to write code?',
     defaultIndex: defaultIdx,
@@ -463,10 +463,10 @@ export function applyOnboardConfig(
     const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
     if (currentAuthors.length === 0) routing.allowed_authors = [login]
 
-    const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
-      ? { ...(routing.author_routes as Record<string, string>) }
-      : {}
     if (decisions.vendorConfig.mode === 'cross-vendor') {
+      const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
+        ? { ...(routing.author_routes as Record<string, string>) }
+        : {}
       if (decisions.authorVendor === 'both') {
         delete currentRoutes[login]
         if (Object.keys(currentRoutes).length > 0) {

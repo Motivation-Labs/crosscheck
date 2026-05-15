@@ -145,6 +145,21 @@ describe('applyOnboardConfig — authorVendor routing', () => {
     const routing = (readConfig().routing as Record<string, unknown>)
     expect(routing.author_routes).toBeUndefined()
   })
+
+  it('single-vendor mode: preserves existing author_routes (step skipped, authorVendor defaults to both)', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false },
+      authorVendor: 'both',  // default when step is skipped
+    }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    // author_routes must be untouched — single-vendor step is not applicable
+    expect(routing.author_routes).toEqual({ alice: 'claude' })
+  })
 })
 
 describe('applyOnboardConfig — re-run preservation', () => {

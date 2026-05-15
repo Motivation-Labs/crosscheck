@@ -16,10 +16,9 @@ describe('applyEdit', () => {
     expect(applyEdit(content, 'return 99', 'return 2')).toBeNull()
   })
 
-  it('replaces first occurrence only', () => {
+  it('returns null when old text is ambiguous (appears more than once)', () => {
     const content = 'a\na\na\n'
-    const result = applyEdit(content, 'a', 'b')
-    expect(result).toBe('b\na\na\n')
+    expect(applyEdit(content, 'a', 'b')).toBeNull()
   })
 
   it('handles multi-line old text', () => {
@@ -34,11 +33,10 @@ describe('applyEdit', () => {
     expect(result).toBe('before\nafter\n')
   })
 
-  it('returns null on empty old text', () => {
-    // empty string matches at position 0; caller should guard, but applyEdit is a utility
-    const result = applyEdit('content', '', 'new')
-    // '' found at index 0 — result is 'new' + 'content'
-    expect(result).toBe('newcontent')
+  it('returns null on empty old text (ambiguous — matches everywhere)', () => {
+    // '' satisfies indexOf !== lastIndexOf, so the ambiguity guard rejects it.
+    // Callers handle new-file creation separately before invoking applyEdit.
+    expect(applyEdit('content', '', 'new')).toBeNull()
   })
 })
 
@@ -106,11 +104,10 @@ describe('fix step <edit> block parsing', () => {
     expect(readFileSync(filePath, 'utf8')).toBe(original)
   })
 
-  it('applyEdit: empty old text matches at position 0 (caller must guard)', () => {
-    // Documents the raw behaviour — the caller (runFixStep) guards against this
-    // for existing files. For new files, empty <old> means "write <new> as content".
-    const result = applyEdit('existing content', '', 'prepended ')
-    expect(result).toBe('prepended existing content')
+  it('applyEdit: empty old text returns null (ambiguity guard catches it)', () => {
+    // Empty string satisfies indexOf('') !== lastIndexOf(''), so applyEdit rejects it.
+    // runFixStep handles new-file creation (empty <old> on missing file) before calling applyEdit.
+    expect(applyEdit('existing content', '', 'prepended ')).toBeNull()
   })
 })
 

@@ -61,10 +61,13 @@ function isSafePath(filePath: string): boolean {
 }
 
 // Apply a single edit: find <old> in fileContent and replace with <new>.
-// Returns the modified content, or null if the old text was not found.
+// Returns null if the old text is not found or appears more than once (ambiguous).
 export function applyEdit(fileContent: string, oldText: string, newText: string): string | null {
   const idx = fileContent.indexOf(oldText)
   if (idx === -1) return null
+  // Reject ambiguous matches — if the snippet appears more than once, indexOf and
+  // lastIndexOf disagree, so we can't know which occurrence Claude intended to edit.
+  if (fileContent.lastIndexOf(oldText) !== idx) return null
   return fileContent.slice(0, idx) + newText + fileContent.slice(idx + oldText.length)
 }
 

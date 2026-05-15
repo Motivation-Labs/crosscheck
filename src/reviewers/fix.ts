@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
-import { readFileSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 
@@ -175,6 +175,7 @@ export async function runFixStep(
   for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
     try {
+      mkdirSync(dirname(absPath), { recursive: true })
       writeFileSync(absPath, content)
       appliedCount++
     } catch { /* skip unwritable paths */ }

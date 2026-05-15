@@ -272,14 +272,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       const isRecheckRun = reviewedPRKeys.has(prKey)
       const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
 
-      if (isRecheckRun) {
-        const maxRounds = workflow.find(s => s.type === 'fix' || s.type === 'recheck')?.max_rounds ?? 1
-        if (round > maxRounds) {
-          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: 'recheck', reason: 'max_rounds_reached' })
-          return
-        }
-      }
-
       board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))

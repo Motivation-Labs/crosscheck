@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { applyEdit } from '../reviewers/fix.js'
@@ -123,8 +123,7 @@ describe('fix step new-file and empty-old guard', () => {
   })
 
   it('empty <old> on existing file is rejected — does not prepend new text', () => {
-    const { mkdirSync: mkdir } = require('fs')
-    mkdir(join(tmpDir, 'src'), { recursive: true })
+    mkdirSync(join(tmpDir, 'src'), { recursive: true })
     const filePath = join(tmpDir, 'src', 'util.ts')
     const original = 'export const x = 1\n'
     writeFileSync(filePath, original)
@@ -140,8 +139,7 @@ describe('fix step new-file and empty-old guard', () => {
   })
 
   it('empty <old> on non-existent file writes <new> as new file content', () => {
-    const { mkdirSync: mkdir } = require('fs')
-    mkdir(join(tmpDir, 'src'), { recursive: true })
+    mkdirSync(join(tmpDir, 'src'), { recursive: true })
     const newFilePath = join(tmpDir, 'src', 'new-module.ts')
 
     // File does not exist — simulate the new-file path: write newText directly

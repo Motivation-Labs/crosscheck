@@ -13,6 +13,13 @@ import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
+const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
+
+// Auth failures are operator issues that won't self-heal — everything else is worth a retry.
+export function isRetryableFixError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return !/auth failure|not logged in|claude auth/i.test(msg)
+}
 
 export interface PRPhaseData {
   phase?: PRPhase
@@ -194,18 +201,48 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
       let appliedCount = 0
       let fixTokensUsed: number | undefined
+      let fixErr: unknown = undefined
+
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir,
-          pr.base.ref,
-          pr.title,
-          reviewResult.commentBody,
-          step.instructions ?? '',
-          config,
+          tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config,
         ))
       } catch (err) {
-        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix' }, err)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
+        fixErr = err
+      }
+
+      if (fixErr !== undefined && isRetryableFixError(fixErr)) {
+        log(chalk.yellow(`⚠  fix step failed — retrying in 2 min...`))
+        onPhaseChange('fix retry in 2 min...', { phase: 'fixing' })
+        fileLog({ level: 'info', event: 'fix_retry_scheduled', repo: `${owner}/${repoName}`, pr: prNumber })
+        await new Promise<void>(resolve => setTimeout(resolve, FIX_RETRY_DELAY_MS))
+        onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
+        try {
+          ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
+            tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config,
+          ))
+          fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
+          fixErr = undefined
+        } catch (retryErr) {
+          logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 2 }, retryErr)
+          fixErr = retryErr
+        }
+      }
+
+      if (fixErr !== undefined) {
         skipFix('fix_error')
+        // Only notify for transient failures — auth errors are operator issues, not PR author issues
+        if (isRetryableFixError(fixErr)) {
+          try {
+            const octokit = createGithubClient(token)
+            await octokit.rest.issues.createComment({
+              owner, repo: repoName, issue_number: prNumber,
+              body: `⚠️ **Auto-fix failed**\n\nThe fix step timed out after retrying. Push a new commit or run \`crosscheck run ${pr.html_url}\` to retry manually.\n\n<!-- crosscheck: fix_failed -->`,
+            })
+            fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
+          } catch { /* best-effort notification */ }
+        }
         continue
       }
 

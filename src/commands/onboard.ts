@@ -203,9 +203,9 @@ async function promptAuthorVendor(
   const items: PickerItem[] = [
     { label: 'claude', description: 'my PRs without explicit attribution → Codex reviews them' },
     { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
-    { label: 'both',   description: 'rely on PR footer / commit trailer only (no per-author override)' },
+    { label: 'both',   description: 'let workflow decide, based on routing config' },
   ]
-  const defaultIdx = current === 'codex' ? 1 : current === 'both' ? 2 : 0
+  const defaultIdx = 2
   const idx = await promptSinglePicker(items, {
     title: 'Which AI do you primarily use to write code?',
     defaultIndex: defaultIdx,

@@ -186,6 +186,35 @@ async function promptVendorMode(
   }
 }
 
+async function promptAuthorVendor(
+  login: string,
+  existingAuthorRoutes: Record<string, string> | null,
+  opts: OnboardOpts,
+): Promise<'claude' | 'codex' | 'both'> {
+  const existing = existingAuthorRoutes?.[login]
+  const current: 'claude' | 'codex' | 'both' =
+    existing === 'codex' ? 'codex' : existing === 'claude' ? 'claude' : 'both'
+
+  if (opts.yes) {
+    console.log(`  Primary author: ${chalk.cyan(current)}`)
+    return current
+  }
+
+  const items: PickerItem[] = [
+    { label: 'claude', description: 'my PRs without explicit attribution → Codex reviews them' },
+    { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
+    { label: 'both',   description: 'rely on PR footer / commit trailer only (no per-author override)' },
+  ]
+  const defaultIdx = current === 'codex' ? 1 : current === 'both' ? 2 : 0
+  const idx = await promptSinglePicker(items, {
+    title: 'Which AI do you primarily use to write code?',
+    defaultIndex: defaultIdx,
+  })
+  console.log()
+
+  return idx === 1 ? 'codex' : idx === 2 ? 'both' : 'claude'
+}
+
 async function promptQualityTier(
   claudeEnabled: boolean,
   codexEnabled: boolean,
@@ -335,6 +364,7 @@ export interface OnboardDecisions {
   selectedRepos: string[]
   selectedOrgs: string[]
   vendorConfig: VendorModeConfig
+  authorVendor: 'claude' | 'codex' | 'both'
   qualityTier: QualityTier
   pipelinePreset: WorkflowPreset
   tunnelBackend: 'localhost.run' | 'smee'
@@ -434,10 +464,17 @@ export function applyOnboardConfig(
     if (currentAuthors.length === 0) routing.allowed_authors = [login]
 
     const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
-      ? (routing.author_routes as Record<string, string>)
-      : null
-    if (!currentRoutes || Object.keys(currentRoutes).length === 0) {
-      routing.author_routes = { [login]: 'claude' }
+      ? { ...(routing.author_routes as Record<string, string>) }
+      : {}
+    if (decisions.authorVendor === 'both') {
+      delete currentRoutes[login]
+      if (Object.keys(currentRoutes).length > 0) {
+        routing.author_routes = currentRoutes
+      } else {
+        delete routing.author_routes
+      }
+    } else {
+      routing.author_routes = { ...currentRoutes, [login]: decisions.authorVendor }
     }
   }
   if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'
@@ -718,8 +755,20 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 5: Review quality ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 5 — review quality'))
+  // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
+  console.log(chalk.bold('Step 5 — primary author'))
+  let authorVendor: 'claude' | 'codex' | 'both' = 'both'
+  if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    const existingRoutes = (existingConfig?.routing?.author_routes as Record<string, string> | undefined) ?? null
+    authorVendor = await promptAuthorVendor(login, existingRoutes, opts)
+  } else {
+    const reason = vendorConfig.mode === 'single-vendor' ? 'single-vendor mode' : 'team mode'
+    console.log(chalk.dim(`  Skipped — not applicable in ${reason}.`))
+    console.log()
+  }
+
+  // ── Step 6: Review quality ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 6 — review quality'))
   const qualityTier = await promptQualityTier(
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
@@ -728,13 +777,13 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 6: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 6 — workflow pipeline'))
+  // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 7 — workflow pipeline'))
   const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
-  // ── Step 7: Connection type ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 7 — connection type'))
+  // ── Step 8: Connection type ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — connection type'))
   const currentTunnel = existingConfig?.tunnel?.backend
   let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
@@ -759,12 +808,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 8: Clone protocol ─────────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — clone protocol'))
+  // ── Step 9: Clone protocol ─────────────────────────────────────────────────
+  console.log(chalk.bold('Step 9 — clone protocol'))
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
-  // ── Step 9: Confirm and write ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 9 — review and write config'))
+  // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
@@ -773,6 +822,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
+  }
+  if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    const routingLabel = authorVendor === 'both'
+      ? 'both (attribution detection only)'
+      : `${authorVendor} → reviewed by ${authorVendor === 'claude' ? 'codex' : 'claude'}`
+    console.log(`  routing      ${chalk.cyan(routingLabel)}`)
   }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
@@ -806,6 +861,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     selectedRepos,
     selectedOrgs,
     vendorConfig,
+    authorVendor,
     qualityTier,
     pipelinePreset,
     tunnelBackend,

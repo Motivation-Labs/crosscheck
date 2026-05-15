@@ -123,7 +123,8 @@ export async function runFixStep(
   // Primary: apply <edit path="..."><old>...</old><new>...</new></edit> blocks.
   // This format only outputs changed sections — structurally prevents truncation.
   const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
-  const fileEdits = new Map<string, string>()
+  const fileEdits = new Map<string, string>()   // files with ≥1 successful edit
+  const fileCache = new Map<string, string>()   // raw disk reads; never written directly
 
   let match: RegExpExecArray | null
   while ((match = editRegex.exec(output)) !== null) {
@@ -139,11 +140,13 @@ export async function runFixStep(
     const newText = newMatch[1].replace(/^\n/, '').replace(/\n$/, '')
 
     const absPath = join(tmpDir, filePath)
-    // Work on the in-memory buffer so multiple edits to the same file compose
-    let current = fileEdits.get(filePath)
+    // fileCache holds disk reads; fileEdits holds files that have at least one
+    // successful edit applied. Keeping them separate prevents a failed <old> match
+    // from adding the unchanged file to fileEdits and inflating appliedCount.
+    let current = fileEdits.get(filePath) ?? fileCache.get(filePath)
     if (current === undefined) {
       try { current = readFileSync(absPath, 'utf8') } catch { continue }
-      fileEdits.set(filePath, current)
+      fileCache.set(filePath, current)
     }
 
     const updated = applyEdit(current, oldText, newText)

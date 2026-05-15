@@ -90,4 +90,19 @@ describe('fix step <edit> block parsing', () => {
     expect(after2).not.toBeNull()
     expect(after2).toBe('a: 10\nb: 20\nc: 3\n')
   })
+
+  it('failed <old> match does not count as applied or write the unchanged file', () => {
+    // Regression for: file added to fileEdits during read step, then applyEdit returns null,
+    // but write loop still writes it and increments appliedCount.
+    const filePath = join(tmpDir, 'src.ts')
+    const original = 'export function foo() {\n  return 1\n}\n'
+    writeFileSync(filePath, original)
+
+    // applyEdit with a non-matching old text returns null — file must not be touched
+    const result = applyEdit(original, 'does not exist in file', 'anything')
+    expect(result).toBeNull()
+
+    // File must be untouched on disk
+    expect(readFileSync(filePath, 'utf8')).toBe(original)
+  })
 })

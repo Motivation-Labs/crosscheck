@@ -21,6 +21,12 @@ export function isRetryableFixError(err: unknown): boolean {
   return !/auth failure|not logged in|claude auth/i.test(msg)
 }
 
+// When a PR has already been reviewed, subsequent webhook runs treat every
+// 'review' step as a 'recheck' so the first review's CR result is preserved.
+export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): string {
+  return stepType === 'review' && isRecheckRun ? 'recheck' : stepType
+}
+
 export interface PRPhaseData {
   phase?: PRPhase
   verdict?: string | null
@@ -46,6 +52,11 @@ export interface WorkflowContext {
   onPhaseChange: (label: string, data?: PRPhaseData) => void
   // SHAs crosscheck pushed — used to skip self-triggered synchronize events
   crosscheckShas: Set<string>
+  // When true, all 'review' steps are coerced to 'recheck' steps — preserving
+  // the first round's CR result on the board while still posting a verdict.
+  isRecheckRun?: boolean
+  // 1-based round counter passed to log events and the board display.
+  round?: number
   // When true, review output is printed but the GitHub comment is not posted
   // and the fix step is skipped. Used by `crosscheck run --dry-run`.
   dryRun?: boolean
@@ -96,17 +107,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const results: Record<string, StepResult> = {}
 
   for (const step of steps) {
+    const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
+
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'when_condition' })
       results[step.name] = { skipped: true }
-      if (step.type === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
-      else if (step.type === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+      else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
       continue
     }
 
-    if (step.type === 'review' || step.type === 'recheck') {
-      const isRecheck = step.type === 'recheck'
+    if (effectiveType === 'review' || effectiveType === 'recheck') {
+      const isRecheck = effectiveType === 'recheck'
       const reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
@@ -114,7 +127,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer })
+      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
@@ -135,7 +148,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart, tokens_used: tokensUsed })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -155,7 +168,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         results[step.name] = { verdict, commentBody, commentUrl }
       }
 
-    } else if (step.type === 'fix') {
+    } else if (effectiveType === 'fix') {
       const skipFix = (reason: string) => {
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { skipped: true }

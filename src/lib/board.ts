@@ -49,6 +49,7 @@ interface PRSlot {
   crTokens?: number
   recheckTokens?: number
   fixTokens?: number
+  round?: number            // 1 = first review, 2+ = subsequent recheck run
 }
 
 export interface PRUpdate {
@@ -62,6 +63,7 @@ export interface PRUpdate {
   crTokens?: number
   recheckTokens?: number
   fixTokens?: number
+  round?: number
 }
 
 export interface PRCompletionData {
@@ -238,8 +240,8 @@ export class PRBoard {
     this.eraseLive()
   }
 
-  addPR(key: string, prNumber: number, repo: string, branch: string): void {
-    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued' })
+  addPR(key: string, prNumber: number, repo: string, branch: string, round?: number): void {
+    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued', round: round ?? 1 })
     this.stats.prsReceived++
   }
 
@@ -256,6 +258,7 @@ export class PRBoard {
     if (updates.crTokens !== undefined) slot.crTokens = updates.crTokens
     if (updates.recheckTokens !== undefined) slot.recheckTokens = updates.recheckTokens
     if (updates.fixTokens !== undefined) slot.fixTokens = updates.fixTokens
+    if (updates.round !== undefined) slot.round = updates.round
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -307,6 +310,26 @@ export class PRBoard {
       crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(crLabelStr)}`
     } else {
       crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
+    }
+
+    const round = slot.round ?? 1
+
+    // Round 2+: collapse Fix + Recheck into a compact "×N rounds" counter
+    if (round >= 2) {
+      const rv = slot.recheckVerdict ?? null
+      let roundSection: string
+      if (rv !== null) {
+        const fill = this.crFillFn(rv)
+        const label = this.crLabelFn(rv)
+        const tokSuffix = fmtTokens(slot.recheckTokens)
+        roundSection = `×${round} rounds ${makeBar(0, 5, fill, t.barEmpty)} ${label(rv)}${tokSuffix ? ' ' + t.dim(tokSuffix) : ''}`
+      } else {
+        roundSection = `×${round} rounds ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
+      }
+      const parts = [prSection, crSection, roundSection]
+      this.printStatic(`\n${line1}\n${indent}${parts.join(pipe)}`)
+      if (!this.isTTY) this.slots.delete(key)
+      return
     }
 
     let fixSection: string
@@ -475,6 +498,16 @@ export class PRBoard {
       : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
     const crSection = this.renderCRSection(slot, frame)
+
+    // Round 2+: skip Fix, collapse into compact recheck display
+    const round = slot.round ?? 1
+    if (round >= 2) {
+      const recheckSection = this.renderRecheckSection(slot, frame)
+      const parts = [prSection, crSection]
+      if (recheckSection !== null) parts.push(recheckSection)
+      return `${l1}\n${indent}${parts.join(pipe)}`
+    }
+
     const fixSection = this.renderFixSection(slot, frame)
     const recheckSection = this.renderRecheckSection(slot, frame)
 
@@ -535,6 +568,23 @@ export class PRBoard {
 
   private renderRecheckSection(slot: PRSlot, frame: string): string | null {
     const t = this.theme
+    const round = slot.round ?? 1
+
+    // Round 2+: compact "×N rounds" display regardless of workflow steps
+    if (round >= 2) {
+      const prefix = `×${round}`
+      if (slot.phase === 'rechecking' || slot.phase === 'reviewing') {
+        return `${prefix} ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim(`round ${round}…`)}`
+      }
+      if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
+        const fill = this.crFillFn(slot.recheckVerdict)
+        const label = this.crLabelFn(slot.recheckVerdict)
+        const tokSuffix = fmtTokens(slot.recheckTokens)
+        return `${prefix} rounds ${makeBar(0, 5, fill, t.barEmpty)} ${label(slot.recheckVerdict)}${tokSuffix ? ' ' + t.dim(tokSuffix) : ''}`
+      }
+      return `${prefix} ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
+    }
+
     const hasRecheckStep = this.steps.some(s => s.type === 'recheck')
     if (!hasRecheckStep) return null
     if (slot.phase === 'rechecking') {

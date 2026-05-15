@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isRetryableFixError } from '../lib/runner.js'
+import { isRetryableFixError, getEffectiveStepType } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -25,5 +25,25 @@ describe('isRetryableFixError', () => {
     expect(isRetryableFixError('timeout string')).toBe(true)
     expect(isRetryableFixError('auth failure: bad token')).toBe(false)
     expect(isRetryableFixError(null)).toBe(true)
+  })
+})
+
+describe('getEffectiveStepType', () => {
+  it('coerces review → recheck when isRecheckRun is true', () => {
+    expect(getEffectiveStepType('review', true)).toBe('recheck')
+  })
+
+  it('preserves review when isRecheckRun is false', () => {
+    expect(getEffectiveStepType('review', false)).toBe('review')
+  })
+
+  it('preserves fix regardless of isRecheckRun', () => {
+    expect(getEffectiveStepType('fix', true)).toBe('fix')
+    expect(getEffectiveStepType('fix', false)).toBe('fix')
+  })
+
+  it('preserves recheck regardless of isRecheckRun', () => {
+    expect(getEffectiveStepType('recheck', true)).toBe('recheck')
+    expect(getEffectiveStepType('recheck', false)).toBe('recheck')
   })
 })

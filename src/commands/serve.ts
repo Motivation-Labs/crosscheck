@@ -49,6 +49,9 @@ function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex')
 const inFlight = new Set<string>()
 // SHAs pushed by the address step — skip synchronize events from our own commits
 const crosscheckShas = new Set<string>()
+// PRs reviewed at least once — synchronize events on these run as recheck rounds
+const reviewedPRKeys = new Set<string>()
+const prRoundCounts = new Map<string, number>()
 
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
 
@@ -130,7 +133,11 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`,
   )
 
-  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
+  const prKey = `${owner}/${repoName}#${prNumber}`
+  const isRecheckRun = reviewedPRKeys.has(prKey)
+  const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+
+  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
 
@@ -152,8 +159,12 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+      isRecheckRun,
+      round,
     })
 
+    reviewedPRKeys.add(prKey)
+    prRoundCounts.set(prKey, round)
     board.completePR(key, {
       elapsedMs: Date.now() - reviewStart,
       url: `github.com/${owner}/${repoName}/pull/${prNumber}`,

@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
-import { writeFileSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
 
@@ -8,6 +8,10 @@ interface ClaudeJsonOutput {
   result?: unknown
   usage?: { input_tokens?: unknown; output_tokens?: unknown }
 }
+
+// Minimum ratio of new lines to original lines before we reject a full-file write.
+// Guards against Claude silently truncating large files.
+const MIN_SIZE_RATIO = 0.6
 
 const PROMPT_TEMPLATE = `You opened a pull request that received the following code review.
 
@@ -31,13 +35,41 @@ Please address the issues raised in the review. Rules:
 - If a comment requires deeper understanding of business logic, skip it
 - If the review has no actionable code changes, output exactly: NO_CHANGES
 
-For each file you need to change, output the complete new file content using this format:
+For each file you need to change, output ONLY the edited sections using this format:
 
-<file path="relative/path/to/file.ext">
-[complete file content]
-</file>
+<edit path="relative/path/to/file.ext">
+<old>
+exact lines from the file that need to be replaced (copy verbatim — must match exactly)
+</old>
+<new>
+replacement lines
+</new>
+</edit>
 
-Output ONLY <file> blocks or NO_CHANGES. No other text.`
+Rules for <edit> blocks:
+- <old> must match the file content EXACTLY (whitespace, indentation, line endings)
+- Include enough surrounding context lines (2–3) so the match is unambiguous
+- One <edit> block per contiguous change; multiple blocks per file are fine
+- Never output the entire file — only the sections that change
+- If a file needs a new section appended, use an <old> that matches the last few lines before the insertion point
+- To create a brand-new file, leave <old> empty and put the complete file content in <new>
+
+Output ONLY <edit> blocks or NO_CHANGES. No other text.`
+
+function isSafePath(filePath: string): boolean {
+  return !filePath.includes('..') && !filePath.startsWith('/')
+}
+
+// Apply a single edit: find <old> in fileContent and replace with <new>.
+// Returns null if the old text is not found or appears more than once (ambiguous).
+export function applyEdit(fileContent: string, oldText: string, newText: string): string | null {
+  const idx = fileContent.indexOf(oldText)
+  if (idx === -1) return null
+  // Reject ambiguous matches — if the snippet appears more than once, indexOf and
+  // lastIndexOf disagree, so we can't know which occurrence Claude intended to edit.
+  if (fileContent.lastIndexOf(oldText) !== idx) return null
+  return fileContent.slice(0, idx) + newText + fileContent.slice(idx + oldText.length)
+}
 
 export async function runFixStep(
   tmpDir: string,
@@ -90,20 +122,88 @@ export async function runFixStep(
 
   if (!output || output === 'NO_CHANGES') return { appliedCount: 0, tokensUsed }
 
-  // Parse <file path="...">content</file> blocks
-  const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g
-  let match: RegExpExecArray | null
   let appliedCount = 0
 
-  while ((match = fileRegex.exec(output)) !== null) {
-    const [, filePath, rawContent] = match
-    // Reject paths that escape the repo (e.g. ../../etc/passwd)
-    if (filePath.includes('..') || filePath.startsWith('/')) continue
+  // Primary: apply <edit path="..."><old>...</old><new>...</new></edit> blocks.
+  // This format only outputs changed sections — structurally prevents truncation.
+  const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
+  const fileEdits = new Map<string, string>()   // files with ≥1 successful edit
+  const fileCache = new Map<string, string>()   // raw disk reads; never written directly
+
+  let match: RegExpExecArray | null
+  while ((match = editRegex.exec(output)) !== null) {
+    const [, filePath, body] = match
+    if (!isSafePath(filePath)) continue
+
+    const oldMatch = body.match(/<old>([\s\S]*?)<\/old>/)
+    const newMatch = body.match(/<new>([\s\S]*?)<\/new>/)
+    if (!oldMatch || !newMatch) continue
+
+    // Strip exactly one leading/trailing newline added by the XML-style tags
+    const oldText = oldMatch[1].replace(/^\n/, '').replace(/\n$/, '')
+    const newText = newMatch[1].replace(/^\n/, '').replace(/\n$/, '')
+
+    const absPath = join(tmpDir, filePath)
+    // fileCache holds disk reads; fileEdits holds files that have at least one
+    // successful edit applied. Keeping them separate prevents a failed <old> match
+    // from adding the unchanged file to fileEdits and inflating appliedCount.
+    let current = fileEdits.get(filePath) ?? fileCache.get(filePath)
+    const alreadyKnown = current !== undefined
+
+    if (!alreadyKnown) {
+      try {
+        current = readFileSync(absPath, 'utf8')
+        fileCache.set(filePath, current)
+      } catch {
+        // File doesn't exist on disk — allow new-file creation only when <old> is empty.
+        // Any non-empty <old> is meaningless against a non-existent file.
+        if (oldText !== '') continue
+        fileEdits.set(filePath, newText)
+        continue
+      }
+    }
+
+    // Guard: empty <old> on an existing file is ambiguous — indexOf('') = 0 would
+    // silently prepend <new> at the top of the file instead of anchoring to content.
+    if (oldText === '') continue
+
+    const updated = applyEdit(current!, oldText, newText)
+    if (updated === null) continue  // <old> not found — skip this edit safely
+    fileEdits.set(filePath, updated)
+  }
+
+  for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
     try {
-      writeFileSync(absPath, rawContent.replace(/^\n/, ''))
+      mkdirSync(dirname(absPath), { recursive: true })
+      writeFileSync(absPath, content)
       appliedCount++
     } catch { /* skip unwritable paths */ }
+  }
+
+  // Fallback: <file path="...">complete content</file> blocks, with size guard.
+  // These are only accepted when the new content is >= MIN_SIZE_RATIO of the original,
+  // preventing silent truncation of large files.
+  if (appliedCount === 0) {
+    const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g
+    while ((match = fileRegex.exec(output)) !== null) {
+      const [, filePath, rawContent] = match
+      if (!isSafePath(filePath)) continue
+      const absPath = join(tmpDir, filePath)
+      const newContent = rawContent.replace(/^\n/, '')
+      try {
+        let originalLineCount = 0
+        try {
+          originalLineCount = readFileSync(absPath, 'utf8').split('\n').length
+        } catch { /* new file — no size guard needed */ }
+        if (originalLineCount > 0) {
+          const newLineCount = newContent.split('\n').length
+          if (newLineCount < originalLineCount * MIN_SIZE_RATIO) continue  // reject — likely truncated
+        }
+        writeFileSync(absPath, newContent)
+        appliedCount++
+      } catch { /* skip unwritable paths */ }
+    }
   }
 
   return { appliedCount, tokensUsed }

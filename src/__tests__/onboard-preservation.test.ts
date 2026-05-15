@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import yaml from 'js-yaml'
-import { applyOnboardConfig, type OnboardDecisions } from '../commands/onboard.js'
+import { applyOnboardConfig, detectCurrentPreset, type OnboardDecisions } from '../commands/onboard.js'
+import { mkdirSync } from 'fs'
 
 const BASE_DECISIONS: OnboardDecisions = {
   deployment: 'personal',
@@ -298,5 +299,52 @@ describe('applyOnboardConfig — workflow.yml lifecycle', () => {
     // Re-run with same preset — both required types (review, fix) present
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
     expect(readFileSync(workflowPath, 'utf8')).toBe(customContent)
+  })
+})
+
+describe('detectCurrentPreset', () => {
+  function seedWorkflow(content: string): void {
+    mkdirSync(workflowDir, { recursive: true })
+    writeFileSync(join(workflowDir, 'workflow.yml'), content)
+  }
+
+  it('returns review-only when no workflow file exists', () => {
+    expect(detectCurrentPreset(workflowDir)).toBe('review-only')
+  })
+
+  it('returns review-fix for a workflow with review + fix steps', () => {
+    seedWorkflow(yaml.dump({
+      on: ['opened'],
+      steps: [{ name: 'review', type: 'review' }, { name: 'fix', type: 'fix' }],
+    }))
+    expect(detectCurrentPreset(workflowDir)).toBe('review-fix')
+  })
+
+  it('returns review-fix-recheck when a recheck step is present', () => {
+    seedWorkflow(yaml.dump({
+      on: ['opened'],
+      steps: [
+        { name: 'review', type: 'review' },
+        { name: 'fix', type: 'fix' },
+        { name: 'recheck', type: 'recheck' },
+      ],
+    }))
+    expect(detectCurrentPreset(workflowDir)).toBe('review-fix-recheck')
+  })
+
+  // Regression: legacy workflows used `type: address` before the rename to `fix`.
+  // detectCurrentPreset must normalize so onboard does not infer review-only and
+  // then silently drop the legacy step on regenerate.
+  it('treats legacy address step as fix when inferring preset', () => {
+    seedWorkflow(yaml.dump({
+      on: ['opened'],
+      steps: [{ name: 'review', type: 'review' }, { name: 'fix', type: 'address' }],
+    }))
+    expect(detectCurrentPreset(workflowDir)).toBe('review-fix')
+  })
+
+  it('returns review-only for malformed workflow', () => {
+    seedWorkflow('not: valid: yaml: at all: [')
+    expect(detectCurrentPreset(workflowDir)).toBe('review-only')
   })
 })

@@ -223,14 +223,18 @@ async function promptQualityTier(
   return tiers[idx]
 }
 
-function detectCurrentPreset(): WorkflowPreset {
-  const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+// Exported for tests; `workflowDir` defaults to the user's ~/.crosscheck for runtime callsites.
+export function detectCurrentPreset(workflowDir: string = join(homedir(), '.crosscheck')): WorkflowPreset {
+  const globalWorkflowPath = join(workflowDir, 'workflow.yml')
   if (existsSync(globalWorkflowPath)) {
     try {
       const raw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
-      const steps = raw?.steps ?? []
-      if (steps.some(s => s.type === 'recheck')) return 'review-fix-recheck'
-      if (steps.some(s => s.type === 'fix')) return 'review-fix'
+      // Normalize legacy 'address' → 'fix' to match the schema-level transform in workflow.ts.
+      // Without this, a legacy workflow with `type: address` is misread as `review-only`,
+      // which then causes applyOnboardConfig to silently drop the fix step on regenerate.
+      const types = (raw?.steps ?? []).map(s => (s.type === 'address' ? 'fix' : s.type))
+      if (types.includes('recheck')) return 'review-fix-recheck'
+      if (types.includes('fix')) return 'review-fix'
       return 'review-only'
     } catch { /* malformed — default to review-only */ }
   }

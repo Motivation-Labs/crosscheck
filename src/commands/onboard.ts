@@ -502,7 +502,7 @@ export function applyOnboardConfig(
     'review-fix': ['review', 'fix'],
     'review-fix-recheck': ['review', 'fix', 'recheck'],
   }
-  const requiredSeq = presetStepTypes[pipelinePreset].join(',')
+  const requiredSet = new Set(presetStepTypes[pipelinePreset])
 
   if (!existsSync(globalWorkflowPath)) {
     writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
@@ -512,17 +512,19 @@ export function applyOnboardConfig(
       // Normalize legacy 'address' → 'fix' so workflow.yml files written by older
       // crosscheck versions are not regenerated solely on the renamed step type
       // (matches the schema-level transform in workflow.ts). Steps without a
-      // type field are filtered out rather than emitted as empty tokens — keeps
-      // sequence-matching tolerant of malformed entries, consistent with how
-      // detectCurrentPreset uses .includes() on the same shape.
-      const existingSeq = (existingRaw?.steps ?? [])
-        .map(s => (s.type === 'address' ? 'fix' : s.type))
-        .filter((t): t is string => Boolean(t))
-        .join(',')
-      if (existingSeq !== requiredSeq) {
+      // type field are filtered out. Set comparison (not sequence) so user-added
+      // duplicate steps or reordered steps are treated as equivalent and preserved.
+      const existingSet = new Set(
+        (existingRaw?.steps ?? [])
+          .map(s => (s.type === 'address' ? 'fix' : s.type))
+          .filter((t): t is string => Boolean(t)),
+      )
+      const setsMatch =
+        requiredSet.size === existingSet.size && [...requiredSet].every(t => existingSet.has(t))
+      if (!setsMatch) {
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
       }
-      // Sequence matches — preserve existing file (may have user-edited instructions)
+      // Sets match — preserve existing file (may have user-edited instructions or structural customizations)
     } catch {
       // Malformed workflow file — regenerate
       writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))

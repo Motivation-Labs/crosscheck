@@ -223,14 +223,18 @@ async function promptQualityTier(
   return tiers[idx]
 }
 
-function detectCurrentPreset(): WorkflowPreset {
-  const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+// Exported for tests; `workflowDir` defaults to the user's ~/.crosscheck for runtime callsites.
+export function detectCurrentPreset(workflowDir: string = join(homedir(), '.crosscheck')): WorkflowPreset {
+  const globalWorkflowPath = join(workflowDir, 'workflow.yml')
   if (existsSync(globalWorkflowPath)) {
     try {
       const raw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
-      const steps = raw?.steps ?? []
-      if (steps.some(s => s.type === 'recheck')) return 'review-fix-recheck'
-      if (steps.some(s => s.type === 'fix')) return 'review-fix'
+      // Normalize legacy 'address' → 'fix' to match the schema-level transform in workflow.ts.
+      // Without this, a legacy workflow with `type: address` is misread as `review-only`,
+      // which then causes applyOnboardConfig to silently drop the fix step on regenerate.
+      const types = (raw?.steps ?? []).map(s => (s.type === 'address' ? 'fix' : s.type))
+      if (types.includes('recheck')) return 'review-fix-recheck'
+      if (types.includes('fix')) return 'review-fix'
       return 'review-only'
     } catch { /* malformed — default to review-only */ }
   }
@@ -343,7 +347,8 @@ export interface OnboardDecisions {
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
-// Written to ~/.crosscheck/workflow.yml on first onboard. Never overwritten on re-runs.
+// Written to ~/.crosscheck/workflow.yml on first onboard. On re-runs, regenerated
+// only when the step-type sequence drifts from the selected preset.
 function buildWorkflowYaml(preset: WorkflowPreset): string {
   const reviewStep = {
     name: 'review',
@@ -485,8 +490,10 @@ export function applyOnboardConfig(
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
   // ── Global workflow.yml ──────────────────────────────────────────────────────
-  // Written on first onboard. On re-runs, only updated when the new preset requires
-  // step types not yet present in the file (explicit preset upgrade) — otherwise preserved.
+  // Written on first onboard. On re-runs, regenerated when the existing step
+  // sequence does not match the selected preset — covers both upgrades (missing
+  // types) and downgrades (extra types). When the sequence matches exactly, the
+  // file is preserved so user edits to instructions survive.
   const globalWorkflowPath = join(workflowDir, 'workflow.yml')
   mkdirSync(workflowDir, { recursive: true })
 
@@ -495,20 +502,27 @@ export function applyOnboardConfig(
     'review-fix': ['review', 'fix'],
     'review-fix-recheck': ['review', 'fix', 'recheck'],
   }
-  const requiredTypes = presetStepTypes[pipelinePreset]
+  const requiredSeq = presetStepTypes[pipelinePreset].join(',')
 
   if (!existsSync(globalWorkflowPath)) {
     writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
   } else {
     try {
       const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
-      const existingTypes = new Set((existingRaw?.steps ?? []).map(s => s.type))
-      const missingTypes = requiredTypes.filter(t => !existingTypes.has(t))
-      if (missingTypes.length > 0) {
-        // User upgraded preset — regenerate so the new steps are present
+      // Normalize legacy 'address' → 'fix' so workflow.yml files written by older
+      // crosscheck versions are not regenerated solely on the renamed step type
+      // (matches the schema-level transform in workflow.ts). Steps without a
+      // type field are filtered out rather than emitted as empty tokens — keeps
+      // sequence-matching tolerant of malformed entries, consistent with how
+      // detectCurrentPreset uses .includes() on the same shape.
+      const existingSeq = (existingRaw?.steps ?? [])
+        .map(s => (s.type === 'address' ? 'fix' : s.type))
+        .filter((t): t is string => Boolean(t))
+        .join(',')
+      if (existingSeq !== requiredSeq) {
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
       }
-      // All required types present — preserve existing file (may be user-customized)
+      // Sequence matches — preserve existing file (may have user-edited instructions)
     } catch {
       // Malformed workflow file — regenerate
       writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))

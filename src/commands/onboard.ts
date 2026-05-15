@@ -40,6 +40,7 @@ type VendorModeConfig = {
 }
 
 type PrimaryAuthorRoute = 'claude' | 'codex' | 'both'
+const DEFAULT_PRIMARY_AUTHOR: Exclude<PrimaryAuthorRoute, 'both'> = 'claude'
 
 // Model and effort settings for each quality tier.
 // These are written directly to vendors.claude / vendors.codex in the config.
@@ -241,6 +242,8 @@ async function promptPrimaryAuthorRoute(
 ): Promise<PrimaryAuthorRoute> {
   const current = detectPrimaryAuthorRoute(login, existingRoute)
 
+  // If GH login can't be resolved in this session, we cannot map a per-author route key.
+  // Default to "both" (no override) and let attribution/fallback routing handle ambiguous PRs.
   if (!login) return 'both'
   if (opts.yes) {
     console.log(`  Primary author: ${chalk.cyan(current)}`)
@@ -500,7 +503,8 @@ export function applyOnboardConfig(
       } else if (primaryAuthorRoute === 'both') {
         delete currentRoutes[login]
       } else if (primaryAuthorRoute === undefined && Object.keys(currentRoutes).length === 0) {
-        currentRoutes[login] = 'claude'
+        // Legacy default for non-interactive or older callsites that don't pass a choice.
+        currentRoutes[login] = DEFAULT_PRIMARY_AUTHOR
       }
 
       if (Object.keys(currentRoutes).length === 0) delete routing.author_routes

@@ -343,7 +343,8 @@ export interface OnboardDecisions {
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
-// Written to ~/.crosscheck/workflow.yml on first onboard. Never overwritten on re-runs.
+// Written to ~/.crosscheck/workflow.yml on first onboard. On re-runs, regenerated
+// only when the step-type sequence drifts from the selected preset.
 function buildWorkflowYaml(preset: WorkflowPreset): string {
   const reviewStep = {
     name: 'review',
@@ -504,7 +505,12 @@ export function applyOnboardConfig(
   } else {
     try {
       const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
-      const existingSeq = (existingRaw?.steps ?? []).map(s => s.type ?? '').join(',')
+      // Normalize legacy 'address' → 'fix' so workflow.yml files written by older
+      // crosscheck versions are not regenerated solely on the renamed step type
+      // (matches the schema-level transform in workflow.ts).
+      const existingSeq = (existingRaw?.steps ?? [])
+        .map(s => (s.type === 'address' ? 'fix' : (s.type ?? '')))
+        .join(',')
       if (existingSeq !== requiredSeq) {
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
       }

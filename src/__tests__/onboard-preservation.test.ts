@@ -261,6 +261,29 @@ describe('applyOnboardConfig — workflow.yml lifecycle', () => {
     expect(raw.steps.some(s => s.type === 'fix')).toBe(true)
   })
 
+  it('preserves workflow.yml with legacy "address" step type on same preset', () => {
+    const workflowPath = join(workflowDir, 'workflow.yml')
+
+    // First run to create the workflow dir, then overwrite with a legacy-shaped file.
+    // workflow.ts schema transforms 'address' → 'fix' at parse time, so semantically
+    // these workflows are equivalent and should not trigger regeneration.
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
+
+    const legacyContent = yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: 'my custom review instructions' },
+        { name: 'fix', type: 'address', reviewer: 'origin', when: "review.verdict != 'APPROVE'", max_rounds: 1, instructions: 'my custom fix instructions' },
+      ],
+    })
+    writeFileSync(workflowPath, legacyContent)
+
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
+
+    // File should be preserved — sequence after legacy normalization matches review-fix
+    expect(readFileSync(workflowPath, 'utf8')).toBe(legacyContent)
+  })
+
   it('preserves user-customized workflow.yml on re-run with same preset', () => {
     const workflowPath = join(workflowDir, 'workflow.yml')
 

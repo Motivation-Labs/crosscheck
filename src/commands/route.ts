@@ -27,7 +27,7 @@ export function resolveRouteLogin(config: Config): string {
   const detected = detectGitHubLogin()
   if (detected) return detected
 
-  const fromConfig = config.users.find((user: string) => user.trim().length > 0)
+  const fromConfig = config.users.find(user => user.trim().length > 0)
   if (fromConfig) return fromConfig
 
   throw new Error('Unable to detect your GitHub login. Run `gh auth login` or set `users:` in config.')

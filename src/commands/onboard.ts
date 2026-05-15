@@ -250,11 +250,11 @@ async function promptPrimaryAuthorRoute(
   const options: Array<{ value: PrimaryAuthorRoute; item: PickerItem }> = [
     {
       value: 'claude',
-      item: { label: 'claude', description: 'PRs without attribution route to codex for review' },
+      item: { label: 'claude', description: 'I primarily use claude (PRs without attribution will be reviewed by codex)' },
     },
     {
       value: 'codex',
-      item: { label: 'codex', description: 'PRs without attribution route to claude for review' },
+      item: { label: 'codex', description: 'I primarily use codex (PRs without attribution will be reviewed by claude)' },
     },
     {
       value: 'both',
@@ -499,7 +499,7 @@ export function applyOnboardConfig(
         currentRoutes[login] = primaryAuthorRoute
       } else if (primaryAuthorRoute === 'both') {
         delete currentRoutes[login]
-      } else if (Object.keys(currentRoutes).length === 0) {
+      } else if (primaryAuthorRoute === undefined && Object.keys(currentRoutes).length === 0) {
         currentRoutes[login] = 'claude'
       }
 
@@ -859,10 +859,9 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
   } else if (primaryAuthorRoute) {
-    const fallbackReviewer = primaryAuthorRoute === 'claude' ? 'codex' : 'claude'
     const routeSummary = primaryAuthorRoute === 'both'
       ? 'both (no per-author override)'
-      : `${primaryAuthorRoute} (fallback review by ${fallbackReviewer})`
+      : `${primaryAuthorRoute} (fallback review by ${primaryAuthorRoute === 'claude' ? 'codex' : 'claude'})`
     console.log(`  primary AI   ${chalk.cyan(routeSummary)}`)
   }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)

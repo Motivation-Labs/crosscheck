@@ -485,8 +485,10 @@ export function applyOnboardConfig(
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
 
   // ── Global workflow.yml ──────────────────────────────────────────────────────
-  // Written on first onboard. On re-runs, only updated when the new preset requires
-  // step types not yet present in the file (explicit preset upgrade) — otherwise preserved.
+  // Written on first onboard. On re-runs, regenerated when the existing step
+  // sequence does not match the selected preset — covers both upgrades (missing
+  // types) and downgrades (extra types). When the sequence matches exactly, the
+  // file is preserved so user edits to instructions survive.
   const globalWorkflowPath = join(workflowDir, 'workflow.yml')
   mkdirSync(workflowDir, { recursive: true })
 
@@ -495,20 +497,18 @@ export function applyOnboardConfig(
     'review-fix': ['review', 'fix'],
     'review-fix-recheck': ['review', 'fix', 'recheck'],
   }
-  const requiredTypes = presetStepTypes[pipelinePreset]
+  const requiredSeq = presetStepTypes[pipelinePreset].join(',')
 
   if (!existsSync(globalWorkflowPath)) {
     writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
   } else {
     try {
       const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
-      const existingTypes = new Set((existingRaw?.steps ?? []).map(s => s.type))
-      const missingTypes = requiredTypes.filter(t => !existingTypes.has(t))
-      if (missingTypes.length > 0) {
-        // User upgraded preset — regenerate so the new steps are present
+      const existingSeq = (existingRaw?.steps ?? []).map(s => s.type ?? '').join(',')
+      if (existingSeq !== requiredSeq) {
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
       }
-      // All required types present — preserve existing file (may be user-customized)
+      // Sequence matches — preserve existing file (may have user-edited instructions)
     } catch {
       // Malformed workflow file — regenerate
       writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))

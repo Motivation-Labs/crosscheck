@@ -466,15 +466,17 @@ export function applyOnboardConfig(
     const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
       ? { ...(routing.author_routes as Record<string, string>) }
       : {}
-    if (decisions.authorVendor === 'both') {
-      delete currentRoutes[login]
-      if (Object.keys(currentRoutes).length > 0) {
-        routing.author_routes = currentRoutes
+    if (decisions.vendorConfig.mode === 'cross-vendor') {
+      if (decisions.authorVendor === 'both') {
+        delete currentRoutes[login]
+        if (Object.keys(currentRoutes).length > 0) {
+          routing.author_routes = currentRoutes
+        } else {
+          delete routing.author_routes
+        }
       } else {
-        delete routing.author_routes
+        routing.author_routes = { ...currentRoutes, [login]: decisions.authorVendor }
       }
-    } else {
-      routing.author_routes = { ...currentRoutes, [login]: decisions.authorVendor }
     }
   }
   if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'

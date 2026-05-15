@@ -149,7 +149,7 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 crosscheck onboard
 ```
 
-`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full six-step walkthrough.
+`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, primary author routing, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full walkthrough.
 
 Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
 
@@ -354,7 +354,7 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ### `crosscheck onboard`
 
-The recommended first-time setup command. Walks through seven steps interactively and writes a ready-to-use config.
+The recommended first-time setup command. Walks through the full setup interactively and writes a ready-to-use config.
 
 ```bash
 crosscheck onboard
@@ -364,7 +364,7 @@ crosscheck onboard --team         # force team mode for this session
 crosscheck onboard --reconfigure  # re-run setup even if config already exists
 ```
 
-**The seven steps:**
+**Onboard steps:**
 
 **Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
 
@@ -378,7 +378,12 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 - `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
 - `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
 
-**Step 5 — Workflow pipeline.** Choose what happens after a review:
+**Step 5 — Primary code author (cross-vendor mode only).** Choose your default author route when attribution fingerprints are missing:
+- `claude` — PRs without attribution route to codex for review
+- `codex` — PRs without attribution route to claude for review
+- `both` — no per-author override; rely on attribution/footer detection first
+
+**Step 6 — Workflow pipeline.** Choose what happens after a review:
 
 ```
   [1] review only              — AI posts a comment; you handle fixes
@@ -388,11 +393,11 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 6 — Connection type.** Choose how GitHub webhooks reach your local server:
+**Step 7 — Connection type.** Choose how GitHub webhooks reach your local server:
 - `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
 - `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
 
-**Step 7 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+**Step 8 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
 
 ```
 crosscheck onboard
@@ -449,6 +454,27 @@ crosscheck onboard
 | `--personal` | Use personal deployment mode for this session only |
 | `--team` | Use team deployment mode for this session only |
 | `--reconfigure` | Re-run setup even if `deployment` is already set in config |
+
+---
+
+### `crosscheck route`
+
+Adjust routing defaults without re-running the full onboarding wizard.
+
+```bash
+crosscheck route show
+crosscheck route set claude
+crosscheck route set codex
+crosscheck route set both
+crosscheck route fallback auto
+crosscheck route fallback claude
+crosscheck route fallback codex
+crosscheck route fallback skip
+```
+
+- `show` prints your detected login, your current `author_routes` entry, and `fallback_reviewer`.
+- `set both` removes your per-author override so routing relies on explicit attribution signals.
+- `fallback skip` writes `routing.fallback_reviewer: null`.
 
 ---
 

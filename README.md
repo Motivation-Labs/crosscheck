@@ -54,7 +54,7 @@ crosscheck watch        # personal laptop
 crosscheck serve        # always-on team server
 ```
 
-`crosscheck onboard` walks you through repo selection, vendor mode, pipeline steps, and tunnel choice. After that, `watch` or `serve` is all you need.
+`crosscheck onboard` walks you through repo selection, vendor mode, primary author routing, pipeline steps, and tunnel choice. After that, `watch` or `serve` is all you need.
 
 ---
 
@@ -92,6 +92,9 @@ PR #49 opened: implement caching layer
 ```bash
 crosscheck init                     # check prerequisites, write starter config
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
+crosscheck route show               # inspect current author_routes and fallback reviewer
+crosscheck route set <vendor>       # set your primary author AI: claude | codex | both
+crosscheck route fallback <reviewer># set fallback reviewer: auto | claude | codex | skip
 crosscheck review <pr-url>          # one-shot review of a specific PR
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once

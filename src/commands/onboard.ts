@@ -39,6 +39,8 @@ type VendorModeConfig = {
   codexEnabled: boolean
 }
 
+type PrimaryAuthorRoute = 'claude' | 'codex' | 'both'
+
 // Model and effort settings for each quality tier.
 // These are written directly to vendors.claude / vendors.codex in the config.
 const QUALITY_TIERS = {
@@ -223,6 +225,52 @@ async function promptQualityTier(
   return tiers[idx]
 }
 
+function detectPrimaryAuthorRoute(
+  login: string,
+  existingRoute: unknown,
+): PrimaryAuthorRoute {
+  if (!login || typeof existingRoute !== 'object' || existingRoute === null) return 'both'
+  const entry = (existingRoute as Record<string, unknown>)[login]
+  return entry === 'claude' || entry === 'codex' ? entry : 'both'
+}
+
+async function promptPrimaryAuthorRoute(
+  login: string,
+  existingRoute: unknown,
+  opts: OnboardOpts,
+): Promise<PrimaryAuthorRoute> {
+  const current = detectPrimaryAuthorRoute(login, existingRoute)
+
+  if (!login) return 'both'
+  if (opts.yes) {
+    console.log(`  Primary author: ${chalk.cyan(current)}`)
+    return current
+  }
+
+  const options: Array<{ value: PrimaryAuthorRoute; item: PickerItem }> = [
+    {
+      value: 'claude',
+      item: { label: 'claude', description: 'PRs without attribution route to codex for review' },
+    },
+    {
+      value: 'codex',
+      item: { label: 'codex', description: 'PRs without attribution route to claude for review' },
+    },
+    {
+      value: 'both',
+      item: { label: 'both', description: 'rely on PR footer / commit trailer only (no per-author override)' },
+    },
+  ]
+
+  const defaultIndex = options.findIndex(option => option.value === current)
+  const idx = await promptSinglePicker(options.map(option => option.item), {
+    title: 'Which AI do you primarily use to write code?',
+    defaultIndex: defaultIndex >= 0 ? defaultIndex : 0,
+  })
+  console.log()
+  return options[idx]?.value ?? 'claude'
+}
+
 // Exported for tests; `workflowDir` defaults to the user's ~/.crosscheck for runtime callsites.
 export function detectCurrentPreset(workflowDir: string = join(homedir(), '.crosscheck')): WorkflowPreset {
   const globalWorkflowPath = join(workflowDir, 'workflow.yml')
@@ -344,6 +392,7 @@ export interface OnboardDecisions {
   tunnelBackend: 'localhost.run' | 'smee'
   smeeChannel: string
   cloneProtocol: 'ssh' | 'https'
+  primaryAuthorRoute?: PrimaryAuthorRoute
 }
 
 // Build the workflow YAML for the given preset, with inline per-step instructions.
@@ -396,7 +445,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, tunnelBackend, smeeChannel, cloneProtocol } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, tunnelBackend, smeeChannel, cloneProtocol, primaryAuthorRoute } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -438,11 +487,21 @@ export function applyOnboardConfig(
     const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
     if (currentAuthors.length === 0) routing.allowed_authors = [login]
 
-    const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
-      ? (routing.author_routes as Record<string, string>)
-      : null
-    if (!currentRoutes || Object.keys(currentRoutes).length === 0) {
-      routing.author_routes = { [login]: 'claude' }
+    if (vendorConfig.mode === 'cross-vendor') {
+      const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
+        ? { ...(routing.author_routes as Record<string, string>) }
+        : {}
+
+      if (primaryAuthorRoute === 'claude' || primaryAuthorRoute === 'codex') {
+        currentRoutes[login] = primaryAuthorRoute
+      } else if (primaryAuthorRoute === 'both') {
+        delete currentRoutes[login]
+      } else if (Object.keys(currentRoutes).length === 0) {
+        currentRoutes[login] = 'claude'
+      }
+
+      if (Object.keys(currentRoutes).length === 0) delete routing.author_routes
+      else routing.author_routes = currentRoutes
     }
   }
   if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'
@@ -734,8 +793,15 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 5: Review quality ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 5 — review quality'))
+  let primaryAuthorRoute: PrimaryAuthorRoute | undefined
+  if (vendorConfig.mode === 'cross-vendor') {
+    console.log(chalk.bold('Step 5 — primary code author'))
+    primaryAuthorRoute = await promptPrimaryAuthorRoute(login, existingConfig?.routing?.author_routes, opts)
+    console.log()
+  }
+
+  // ── Step 6: Review quality ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 6 — review quality'))
   const qualityTier = await promptQualityTier(
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
@@ -744,13 +810,13 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 6: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 6 — workflow pipeline'))
+  // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 7 — workflow pipeline'))
   const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
-  // ── Step 7: Connection type ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 7 — connection type'))
+  // ── Step 8: Connection type ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — connection type'))
   const currentTunnel = existingConfig?.tunnel?.backend
   let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
@@ -775,12 +841,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 8: Clone protocol ─────────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — clone protocol'))
+  // ── Step 9: Clone protocol ─────────────────────────────────────────────────
+  console.log(chalk.bold('Step 9 — clone protocol'))
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
-  // ── Step 9: Confirm and write ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 9 — review and write config'))
+  // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
@@ -789,6 +855,11 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   if (vendorConfig.mode === 'single-vendor') {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
+  } else if (primaryAuthorRoute) {
+    const routeSummary = primaryAuthorRoute === 'both'
+      ? 'both (no per-author override)'
+      : `${primaryAuthorRoute} (fallback review by ${primaryAuthorRoute === 'claude' ? 'codex' : 'claude'})`
+    console.log(`  primary AI   ${chalk.cyan(routeSummary)}`)
   }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
@@ -827,6 +898,7 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     tunnelBackend,
     smeeChannel,
     cloneProtocol,
+    primaryAuthorRoute,
   })
 
   console.log(chalk.green(`  ✓ config written to ${configPath}`))

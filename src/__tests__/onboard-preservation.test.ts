@@ -183,6 +183,38 @@ describe('applyOnboardConfig — re-run preservation', () => {
 })
 
 describe('applyOnboardConfig — users / routing edge cases', () => {
+  it('updates current login route from onboarding primary author choice', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: {
+        author_routes: { alice: 'claude', teammate: 'codex' },
+        fallback_reviewer: 'auto',
+      },
+    }))
+
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, primaryAuthorRoute: 'codex' }, workflowDir)
+
+    const cfg = readConfig()
+    const routing = cfg.routing as Record<string, unknown>
+    expect(routing.author_routes).toEqual({ alice: 'codex', teammate: 'codex' })
+  })
+
+  it('supports both mode by removing the current login route only', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: {
+        author_routes: { alice: 'claude', teammate: 'codex' },
+        fallback_reviewer: 'auto',
+      },
+    }))
+
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, primaryAuthorRoute: 'both' }, workflowDir)
+
+    const cfg = readConfig()
+    const routing = cfg.routing as Record<string, unknown>
+    expect(routing.author_routes).toEqual({ teammate: 'codex' })
+  })
+
   it('clears users when switching to team mode with no scope selected', () => {
     writeFileSync(configPath, yaml.dump({
       deployment: 'personal',

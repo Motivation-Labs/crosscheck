@@ -14,6 +14,8 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runRouteFallback, runRouteSet, runRouteShow } from './commands/route.js'
+import { loadConfig } from './config/loader.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -87,6 +89,28 @@ program
   .description('Show auth state, config summary, and CLI versions')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runStatus(opts.config))
+
+const routeProgram = program
+  .command('route')
+  .description('View and update PR routing defaults for your login')
+
+routeProgram
+  .command('show')
+  .description('Show current author route and fallback reviewer settings')
+  .option('-c, --config <path>', 'config file path')
+  .action((opts: { config?: string }) => void runRouteShow(loadConfig(opts.config), opts.config))
+
+routeProgram
+  .command('set <vendor>')
+  .description('Set your primary author AI: claude | codex | both')
+  .option('-c, --config <path>', 'config file path')
+  .action((vendor: 'claude' | 'codex' | 'both', opts: { config?: string }) => void runRouteSet(loadConfig(opts.config), vendor, opts.config))
+
+routeProgram
+  .command('fallback <reviewer>')
+  .description('Set fallback reviewer for ambiguous PRs: auto | claude | codex | skip')
+  .option('-c, --config <path>', 'config file path')
+  .action((reviewer: 'auto' | 'claude' | 'codex' | 'skip', opts: { config?: string }) => void runRouteFallback(loadConfig(opts.config), reviewer, opts.config))
 
 program
   .command('diagnose')

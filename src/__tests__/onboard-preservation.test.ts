@@ -469,29 +469,49 @@ describe('applyOnboardConfig — max_rounds in workflow.yml', () => {
     expect(raw.steps[0].type).toBe('review')
   })
 
-  it('regenerates workflow when max_rounds increases (preset unchanged)', () => {
-    const dir = join(workflowDir, 'maxrounds-regen')
-    // First run with max_rounds: 1
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 1 }, dir)
-    const v1 = readFileSync(join(dir, 'workflow.yml'), 'utf8')
+  it('patches max_rounds in-place when preset unchanged (preserves custom instructions)', () => {
+    const dir = join(workflowDir, 'maxrounds-patch')
+    mkdirSync(dir, { recursive: true })
+    // Seed a workflow with custom instructions
+    writeFileSync(join(dir, 'workflow.yml'), yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: 'my custom review instructions' },
+        { name: 'fix', type: 'fix', reviewer: 'origin', when: "review.verdict != 'APPROVE'", max_rounds: 1, instructions: 'my custom fix instructions' },
+        { name: 'recheck', type: 'recheck', reviewer: 'auto', when: 'fix.applied_count > 0', max_rounds: 1, instructions: 'my custom recheck instructions' },
+      ],
+    }))
 
-    // Re-run with max_rounds: 2 — must regenerate
+    // Re-run onboard with max_rounds: 2 — must patch in-place, not regenerate
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 2 }, dir)
-    const v2 = readFileSync(join(dir, 'workflow.yml'), 'utf8')
-    expect(v2).not.toBe(v1)
-    const raw = yaml.load(v2) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number; instructions?: string }> }
+
+    // max_rounds updated on fix and recheck
     expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(2)
+    expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(2)
+    // custom instructions preserved
+    expect(raw.steps.find(s => s.type === 'review')?.instructions).toBe('my custom review instructions')
+    expect(raw.steps.find(s => s.type === 'fix')?.instructions).toBe('my custom fix instructions')
+    expect(raw.steps.find(s => s.type === 'recheck')?.instructions).toBe('my custom recheck instructions')
   })
 
-  it('regenerates workflow when max_rounds decreases back to 1 (preset unchanged)', () => {
+  it('patches max_rounds when decreasing back to 1 (preserves custom instructions)', () => {
     const dir = join(workflowDir, 'maxrounds-downgrade')
-    // First run with max_rounds: 3
-    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 3 }, dir)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'workflow.yml'), yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: 'custom review' },
+        { name: 'fix', type: 'fix', reviewer: 'origin', when: "review.verdict != 'APPROVE'", max_rounds: 3, instructions: 'custom fix' },
+        { name: 'recheck', type: 'recheck', reviewer: 'auto', when: 'fix.applied_count > 0', max_rounds: 3, instructions: 'custom recheck' },
+      ],
+    }))
 
-    // Re-run with max_rounds: 1 — must regenerate (downgrade)
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 1 }, dir)
-    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number; instructions?: string }> }
     expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(1)
     expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(1)
+    expect(raw.steps.find(s => s.type === 'fix')?.instructions).toBe('custom fix')
+    expect(raw.steps.find(s => s.type === 'recheck')?.instructions).toBe('custom recheck')
   })
 })

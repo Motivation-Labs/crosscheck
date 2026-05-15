@@ -596,8 +596,20 @@ export function applyOnboardConfig(
       const maxRoundsDrifted = existingMaxRounds.length > 0
         && existingMaxRounds.some(r => r !== effectiveMaxRounds)
 
-      if (!setsMatch || maxRoundsDrifted) {
+      if (!setsMatch) {
+        // Preset changed — regenerate from template (step types differ)
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset, effectiveMaxRounds))
+      } else if (maxRoundsDrifted) {
+        // Preset unchanged, only max_rounds changed — patch in-place to preserve
+        // any custom instructions or structural edits the user may have made.
+        const patchedSteps = existingSteps.map(s => {
+          if (s.type === 'fix' || s.type === 'recheck') {
+            return { ...s, max_rounds: effectiveMaxRounds }
+          }
+          return s
+        })
+        const patchedRaw = { ...(existingRaw as object), steps: patchedSteps }
+        writeFileSync(globalWorkflowPath, yaml.dump(patchedRaw, { lineWidth: -1, noRefs: true }))
       }
       // No drift — preserve existing file (may have user-edited instructions or structural customizations)
     } catch {

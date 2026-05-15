@@ -27,6 +27,22 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
   return stepType === 'review' && isRecheckRun ? 'recheck' : stepType
 }
 
+// Returns true when fix/recheck steps should be skipped because the configured
+// max_rounds cap has been reached. The review step (even when coerced to recheck)
+// is never skipped — it always produces a verdict for the current push.
+export function exceedsMaxRounds(
+  effectiveType: string,
+  originalStepType: string,
+  maxRounds: number,
+  round: number | undefined,
+): boolean {
+  if (round === undefined) return false
+  if (effectiveType === 'fix') return round > maxRounds
+  // Recheck step from the workflow (not a review coerced to recheck) is gated
+  if (effectiveType === 'recheck' && originalStepType !== 'review') return round > maxRounds
+  return false
+}
+
 export interface PRPhaseData {
   phase?: PRPhase
   verdict?: string | null
@@ -108,6 +124,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   for (const step of steps) {
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
+
+    if (exceedsMaxRounds(effectiveType, step.type, step.max_rounds, ctx.round)) {
+      fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
+      results[step.name] = { skipped: true }
+      if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+      else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      continue
+    }
 
     // Evaluate when condition — skip step if false
     if (step.when && !evaluateWhen(step.when, results)) {

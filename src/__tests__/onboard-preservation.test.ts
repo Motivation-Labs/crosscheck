@@ -12,6 +12,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   selectedRepos: ['alice/myapp'],
   selectedOrgs: [],
   vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
+  authorVendor: 'claude',
   qualityTier: 'balanced',
   pipelinePreset: 'review-only',
   tunnelBackend: 'localhost.run',
@@ -96,6 +97,72 @@ describe('applyOnboardConfig — first run', () => {
   })
 })
 
+describe('applyOnboardConfig — authorVendor routing', () => {
+  it('authorVendor: claude writes author_routes[login] = claude', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'claude' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('claude')
+  })
+
+  it('authorVendor: codex writes author_routes[login] = codex', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'codex' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('codex')
+  })
+
+  it('authorVendor: both removes login entry from author_routes', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'both' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toBeUndefined()
+  })
+
+  it('authorVendor: both preserves other entries while removing login entry', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude', 'bot-user': 'codex' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'both' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toEqual({ 'bot-user': 'codex' })
+  })
+
+  it('--reconfigure: overwrites existing author_routes[login] with new choice', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'codex' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('codex')
+  })
+
+  it('team mode: skips author_routes regardless of authorVendor', () => {
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      deployment: 'team',
+      login: 'alice',
+      authorVendor: 'codex',
+    }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toBeUndefined()
+  })
+
+  it('single-vendor mode: preserves existing author_routes (step skipped, authorVendor defaults to both)', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false },
+      authorVendor: 'both',  // default when step is skipped
+    }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    // author_routes must be untouched — single-vendor step is not applicable
+    expect(routing.author_routes).toEqual({ alice: 'claude' })
+  })
+})
+
 describe('applyOnboardConfig — re-run preservation', () => {
   it('preserves quality.focus and quality.custom_prompt', () => {
     // Seed config with custom quality settings
@@ -148,16 +215,17 @@ describe('applyOnboardConfig — re-run preservation', () => {
     expect(routing.fallback_reviewer).toBe('claude')              // custom value preserved
   })
 
-  it('preserves routing.author_routes on re-run', () => {
+  it('preserves other users in author_routes; updates only login entry', () => {
     writeFileSync(configPath, yaml.dump({
       deployment: 'personal',
       routing: {
         allowed_authors: ['alice'],
-        author_routes: { alice: 'claude', 'my-agent': 'codex' },
+        author_routes: { alice: 'codex', 'my-agent': 'codex' },
         fallback_reviewer: 'auto',
       },
     }))
 
+    // BASE_DECISIONS has authorVendor: 'claude' — alice's entry should be updated to 'claude'
     applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
 
     const cfg = readConfig()

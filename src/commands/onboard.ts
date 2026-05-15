@@ -511,9 +511,13 @@ export function applyOnboardConfig(
       const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
       // Normalize legacy 'address' → 'fix' so workflow.yml files written by older
       // crosscheck versions are not regenerated solely on the renamed step type
-      // (matches the schema-level transform in workflow.ts).
+      // (matches the schema-level transform in workflow.ts). Steps without a
+      // type field are filtered out rather than emitted as empty tokens — keeps
+      // sequence-matching tolerant of malformed entries, consistent with how
+      // detectCurrentPreset uses .includes() on the same shape.
       const existingSeq = (existingRaw?.steps ?? [])
-        .map(s => (s.type === 'address' ? 'fix' : (s.type ?? '')))
+        .map(s => (s.type === 'address' ? 'fix' : s.type))
+        .filter((t): t is string => Boolean(t))
         .join(',')
       if (existingSeq !== requiredSeq) {
         writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))

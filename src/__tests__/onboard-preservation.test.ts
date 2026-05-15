@@ -300,6 +300,29 @@ describe('applyOnboardConfig — workflow.yml lifecycle', () => {
     applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix' }, workflowDir)
     expect(readFileSync(workflowPath, 'utf8')).toBe(customContent)
   })
+
+  // Regression for PR #119 review: original bug scenario seeded with a real
+  // legacy workflow file (not via applyOnboardConfig). Locks in that legacy
+  // 'address' is normalized in the sequence comparison and the file is
+  // regenerated down to a single review step.
+  it('regenerates legacy address+recheck workflow on preset downgrade', () => {
+    const workflowPath = join(workflowDir, 'workflow.yml')
+    mkdirSync(workflowDir, { recursive: true })
+    writeFileSync(workflowPath, yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review' },
+        { name: 'fix', type: 'address' },
+        { name: 'recheck', type: 'recheck' },
+      ],
+    }))
+
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only' }, workflowDir)
+
+    const raw = yaml.load(readFileSync(workflowPath, 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps).toHaveLength(1)
+    expect(raw.steps[0].type).toBe('review')
+  })
 })
 
 describe('detectCurrentPreset', () => {

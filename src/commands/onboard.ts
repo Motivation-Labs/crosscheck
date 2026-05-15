@@ -593,8 +593,7 @@ export function applyOnboardConfig(
       const existingMaxRounds = existingSteps
         .filter(s => s.type === 'fix' || s.type === 'recheck')
         .map(s => s.max_rounds ?? 1)
-      const maxRoundsDrifted = effectiveMaxRounds > 1
-        && existingMaxRounds.length > 0
+      const maxRoundsDrifted = existingMaxRounds.length > 0
         && existingMaxRounds.some(r => r !== effectiveMaxRounds)
 
       if (!setsMatch || maxRoundsDrifted) {

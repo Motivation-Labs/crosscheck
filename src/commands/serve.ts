@@ -21,7 +21,7 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
 import {
@@ -52,6 +52,8 @@ const crosscheckShas = new Set<string>()
 // PRs reviewed at least once — synchronize events on these run as recheck rounds
 const reviewedPRKeys = new Set<string>()
 const prRoundCounts = new Map<string, number>()
+// Loaded once at startup; used to read max_rounds in handlePR
+let workflow: WorkflowStep[] = []
 
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
 
@@ -137,6 +139,14 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const isRecheckRun = reviewedPRKeys.has(prKey)
   const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
 
+  if (isRecheckRun) {
+    const maxRounds = workflow.find(s => s.type === 'fix' || s.type === 'recheck')?.max_rounds ?? 1
+    if (round > maxRounds) {
+      fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: 'recheck', reason: 'max_rounds_reached' })
+      return
+    }
+  }
+
   board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
@@ -220,7 +230,8 @@ export async function runServe(opts: ServeOpts = {}) {
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
 
   const board = new PRBoard()
-  board.setConfig(config, loadWorkflow(process.cwd()))
+  workflow = loadWorkflow(process.cwd())
+  board.setConfig(config, workflow)
 
   // ── Deployment setup ─────────────────────────────────────────────────────
   let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment

@@ -482,4 +482,16 @@ describe('applyOnboardConfig — max_rounds in workflow.yml', () => {
     const raw = yaml.load(v2) as { steps: Array<{ type: string; max_rounds?: number }> }
     expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(2)
   })
+
+  it('regenerates workflow when max_rounds decreases back to 1 (preset unchanged)', () => {
+    const dir = join(workflowDir, 'maxrounds-downgrade')
+    // First run with max_rounds: 3
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 3 }, dir)
+
+    // Re-run with max_rounds: 1 — must regenerate (downgrade)
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 1 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(1)
+    expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(1)
+  })
 })

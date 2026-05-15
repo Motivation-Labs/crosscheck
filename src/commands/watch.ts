@@ -189,7 +189,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board manages all terminal output after startup
   const board = new PRBoard()
-  board.setConfig(config, loadWorkflow(process.cwd()))
+  const workflow = loadWorkflow(process.cwd())
+  board.setConfig(config, workflow)
 
   // Thin wrapper: routes important messages to both terminal and file log
   const bLog = (line1: string, line2?: string) => {
@@ -270,6 +271,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       const prKey = `${owner}/${repoName}#${prNumber}`
       const isRecheckRun = reviewedPRKeys.has(prKey)
       const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+
+      if (isRecheckRun) {
+        const maxRounds = workflow.find(s => s.type === 'fix' || s.type === 'recheck')?.max_rounds ?? 1
+        if (round > maxRounds) {
+          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: 'recheck', reason: 'max_rounds_reached' })
+          return
+        }
+      }
 
       board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()

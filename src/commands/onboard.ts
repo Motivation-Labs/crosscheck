@@ -229,7 +229,7 @@ function detectPrimaryAuthorRoute(
   login: string,
   existingRoute: unknown,
 ): PrimaryAuthorRoute {
-  if (!login || typeof existingRoute !== 'object' || existingRoute === null) return 'both'
+  if (typeof existingRoute !== 'object' || existingRoute === null) return 'both'
   const entry = (existingRoute as Record<string, unknown>)[login]
   return entry === 'claude' || entry === 'codex' ? entry : 'both'
 }
@@ -265,10 +265,13 @@ async function promptPrimaryAuthorRoute(
   const defaultIndex = options.findIndex(option => option.value === current)
   const idx = await promptSinglePicker(options.map(option => option.item), {
     title: 'Which AI do you primarily use to write code?',
+    // promptSinglePicker expects a valid item index; avoid passing -1 from findIndex.
     defaultIndex: defaultIndex >= 0 ? defaultIndex : 0,
   })
   console.log()
-  return options[idx]?.value ?? 'claude'
+  const selected = options[idx]
+  if (!selected) throw new Error('Invalid primary author selection')
+  return selected.value
 }
 
 // Exported for tests; `workflowDir` defaults to the user's ~/.crosscheck for runtime callsites.
@@ -856,9 +859,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
   } else if (primaryAuthorRoute) {
+    const fallbackReviewer = primaryAuthorRoute === 'claude' ? 'codex' : 'claude'
     const routeSummary = primaryAuthorRoute === 'both'
       ? 'both (no per-author override)'
-      : `${primaryAuthorRoute} (fallback review by ${primaryAuthorRoute === 'claude' ? 'codex' : 'claude'})`
+      : `${primaryAuthorRoute} (fallback review by ${fallbackReviewer})`
     console.log(`  primary AI   ${chalk.cyan(routeSummary)}`)
   }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)

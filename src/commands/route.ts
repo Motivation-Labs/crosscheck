@@ -114,8 +114,7 @@ export function runRouteFallback(_config: Config, reviewerInput: string, explici
 
     const reviewer = parseFallbackReviewerInput(reviewerInput)
     const parsed = parseFallbackReviewer(reviewer)
-    if (parsed === null) routing.fallback_reviewer = null
-    else routing.fallback_reviewer = parsed
+    routing.fallback_reviewer = parsed
 
     writeRawConfig(configPath, raw)
 

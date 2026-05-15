@@ -52,6 +52,7 @@ Rules for <edit> blocks:
 - One <edit> block per contiguous change; multiple blocks per file are fine
 - Never output the entire file — only the sections that change
 - If a file needs a new section appended, use an <old> that matches the last few lines before the insertion point
+- To create a brand-new file, leave <old> empty and put the complete file content in <new>
 
 Output ONLY <edit> blocks or NO_CHANGES. No other text.`
 
@@ -144,12 +145,26 @@ export async function runFixStep(
     // successful edit applied. Keeping them separate prevents a failed <old> match
     // from adding the unchanged file to fileEdits and inflating appliedCount.
     let current = fileEdits.get(filePath) ?? fileCache.get(filePath)
-    if (current === undefined) {
-      try { current = readFileSync(absPath, 'utf8') } catch { continue }
-      fileCache.set(filePath, current)
+    const alreadyKnown = current !== undefined
+
+    if (!alreadyKnown) {
+      try {
+        current = readFileSync(absPath, 'utf8')
+        fileCache.set(filePath, current)
+      } catch {
+        // File doesn't exist on disk — allow new-file creation only when <old> is empty.
+        // Any non-empty <old> is meaningless against a non-existent file.
+        if (oldText !== '') continue
+        fileEdits.set(filePath, newText)
+        continue
+      }
     }
 
-    const updated = applyEdit(current, oldText, newText)
+    // Guard: empty <old> on an existing file is ambiguous — indexOf('') = 0 would
+    // silently prepend <new> at the top of the file instead of anchoring to content.
+    if (oldText === '') continue
+
+    const updated = applyEdit(current!, oldText, newText)
     if (updated === null) continue  // <old> not found — skip this edit safely
     fileEdits.set(filePath, updated)
   }

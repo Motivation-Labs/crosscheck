@@ -268,6 +268,14 @@ These four items fix the two-phase model described in Design Principles. Any new
 
 - [x] **`crosscheck onboard` destroys existing config customizations on re-run** — fixed in PR #74. All write logic extracted into `applyOnboardConfig`; routing.* fields now initialised on first run only and preserved exactly on re-runs; workflow.yml only written when it doesn't already exist and only deleted when the pipeline explicitly changes away from recheck.
 
+- [x] **`crosscheck onboard` hardcodes `author_routes` without asking — issue #121** — fixed in PR #125. Onboard now asks the user "Which AI do you primarily use?" as Step 5 (cross-vendor + personal mode only). The picker has three options; default is `[3] both`.
+  - `[1] claude` — sets `author_routes[login] = 'claude'`; my PRs without explicit attribution → Codex reviews them.
+  - `[2] codex` — sets `author_routes[login] = 'codex'`; my PRs without explicit attribution → Claude reviews them.
+  - `[3] both` *(default)* — removes `author_routes[login]`; unattributed PRs fall through to `routing.fallback_reviewer`.
+  - Re-runs pre-select the user's existing choice; `--yes` preserves it without prompting.
+  - Team deployment and single-vendor mode skip Step 5; `author_routes` is left untouched in those cases.
+  - `--reconfigure` correctly overwrites an existing `author_routes[login]` entry with the new choice.
+
 - [ ] **review → fix → re-check loop is not implemented** — `crosscheck onboard` lets users select the `review-fix-recheck` pipeline and writes `~/.crosscheck/workflow.yml`, but no execution engine reads or runs that file during `watch`/`serve`. The `post_review.auto_fix` config drives a single fix pass; there is no loop that re-reviews after the fix to confirm issues are resolved.
   - **User:** Anyone who selected `review → fix → re-check` during onboard and expects a full loop.
   - **Acceptance Criteria:**
@@ -305,12 +313,14 @@ These four items fix the two-phase model described in Design Principles. Any new
       - `[2] single-vendor` → asks which vendor; disables the other in `vendors.*.enabled`.
       - When only one CLI is available, step auto-selects single-vendor and skips the prompt.
       - `--yes` keeps the existing mode from config without prompting.
-    - **Step 5 — workflow pipeline:**
+    - **Step 5 — primary author (added in PR #125):** shown in cross-vendor + personal mode only; default `[3] both`.
+      - See issue #121 fix entry for full spec.
+    - **Step 6 — workflow pipeline** (was Step 5 before PR #125):
       - `[1] review only` → `post_review.auto_fix.enabled: false`.
       - `[2] review → fix` (recommended default) → `auto_fix.enabled: true, trigger: on_issues, delivery.mode: commit`.
       - `[3] review → fix → re-check` → same as fix, plus writes `~/.crosscheck/workflow.yml` with a three-step pipeline (review, fix, recheck).
       - `--yes` preserves existing auto_fix.enabled setting.
-    - Step 6 (was 4) summary shows `mode` and `pipeline` rows in addition to existing fields.
+    - Step 7 (was 6, originally 4) summary shows `mode`, `primary author`, and `pipeline` rows in addition to existing fields.
     - `loadWorkflow()` checks `~/.crosscheck/workflow.yml` as a global fallback (after project-local `.crosscheck/workflow.yml`, before `DEFAULT_WORKFLOW`).
   - **Technical Notes:**
     - `src/commands/onboard.ts`: `checkEnv()` returns `EnvCheckResult`; new helpers `promptVendorMode()` and `promptWorkflowPipeline()`; config write also patches `mode`, `vendors.*.enabled`, `post_review.auto_fix.*`.

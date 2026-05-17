@@ -263,6 +263,36 @@ export async function prHasCrossCheckComment(
   return false
 }
 
+// Returns the GitHub comment ID of the most recent crosscheck review comment.
+// Used by recheck steps to link back to the original review comment that raised issues.
+// Matches on the annotation tag (new) or the "Code Review by" header (legacy).
+export async function getLastCrossCheckCommentId(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<number | undefined> {
+  let page = 1
+  let lastId: number | undefined
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ id: number; body: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      if (comment.body.includes('<!-- crosscheck:') || comment.body.includes('### Code Review by')) {
+        lastId = comment.id
+      }
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return lastId
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,
@@ -366,7 +396,10 @@ export async function postReviewComment(
   body: string,
   reviewer: string,
   brand: BrandOptions = {},
-): Promise<void> {
+  origin?: string,
+  verdict?: string | null,
+  replyToCommentId?: number,
+): Promise<number> {
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
   const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
@@ -382,10 +415,22 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  await octokit.rest.issues.createComment({
+  // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks
+  const annotationParts = [`reviewer=${reviewer}`]
+  if (origin) annotationParts.push(`origin=${origin}`)
+  if (verdict) annotationParts.push(`verdict=${verdict}`)
+  const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
+
+  // Recheck: prepend a reference back to the original review so the thread is navigable
+  const replyPrefix = replyToCommentId
+    ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
+    : ''
+
+  const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: customHeader + header + body + footer + customFooter,
+    body: customHeader + replyPrefix + header + body + footer + customFooter + annotationTag,
   })
+  return comment.id
 }

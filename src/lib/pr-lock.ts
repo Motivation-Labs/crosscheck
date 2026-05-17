@@ -12,14 +12,16 @@ let signalHandlersRegistered = false
 function registerSignalCleanup() {
   if (signalHandlersRegistered) return
   signalHandlersRegistered = true
+  // Remove local lock files only — do NOT call process.exit so that existing
+  // shutdown handlers in watch/serve (webhook deletion, remote lock release)
+  // continue to run via their own finally blocks and signal handlers.
   const cleanup = () => {
     for (const p of activeLocks) {
       try { rmSync(p) } catch { /* ignore */ }
     }
-    process.exit(1)
   }
-  process.once('SIGTERM', cleanup)
-  process.once('SIGINT', cleanup)
+  process.on('SIGTERM', cleanup)
+  process.on('SIGINT', cleanup)
 }
 
 function lockPath(owner: string, repo: string, pr: number, sha: string): string {

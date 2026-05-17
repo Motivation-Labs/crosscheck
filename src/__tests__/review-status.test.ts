@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 
 function makeOctokit(state: string | null, updatedAt: string = new Date().toISOString()) {
   return {
@@ -60,6 +60,15 @@ describe('acquireRemoteLock', () => {
     expect(octokit.rest.repos.createCommitStatus).toHaveBeenCalledWith(
       expect.objectContaining({ state: 'pending', context: 'crosscheck/review' }),
     )
+  })
+})
+
+describe('startRemoteLockHeartbeat', () => {
+  it('returns a stop function that clears the interval', () => {
+    const octokit = makeOctokit(null)
+    const stop = startRemoteLockHeartbeat(octokit as never, 'o', 'r', 'sha')
+    expect(typeof stop).toBe('function')
+    expect(() => stop()).not.toThrow()
   })
 })
 

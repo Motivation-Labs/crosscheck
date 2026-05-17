@@ -46,7 +46,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { PersistentShaSet } from '../lib/sha-cache.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
-import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -286,7 +286,8 @@ export async function runWatch(opts: WatchOpts = {}) {
         await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
       } catch (err: unknown) {
         releasePRLock(owner, repoName, prNumber, params.headSha)
-        throw err
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'lock' }, err)
+        return
       }
 
       const prKey = `${owner}/${repoName}#${prNumber}`
@@ -296,6 +297,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+      let stopHeartbeat = () => {}
 
       try {
         clonePRForReview({
@@ -306,6 +308,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
+        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const { verdict } = await runWorkflow({
           owner, repoName, prNumber, pr,
@@ -329,8 +332,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         // Smart-switch recovery confirmation: if a restore attempt is pending and
         // this reviewer matches the previously-degraded vendor, announce full restoration.
         notifyReviewSuccess(reviewer, bLog)
+        stopHeartbeat()
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
       } catch (err: unknown) {
+        stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)
         board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)

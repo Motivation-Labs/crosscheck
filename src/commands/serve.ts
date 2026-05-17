@@ -21,7 +21,7 @@ import { randomFortune } from '../lib/fortune.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
 import {
@@ -49,6 +49,11 @@ function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex')
 const inFlight = new Set<string>()
 // SHAs pushed by the address step — skip synchronize events from our own commits
 const crosscheckShas = new Set<string>()
+// PRs reviewed at least once — synchronize events on these run as recheck rounds
+const reviewedPRKeys = new Set<string>()
+const prRoundCounts = new Map<string, number>()
+// Loaded once at startup; used to read max_rounds in handlePR
+let workflow: WorkflowStep[] = []
 
 const NOISE_EXT = /\.(lock|snap|min\.js|min\.css|csv|json|png|jpg|jpeg|gif|svg|mp4|woff2?|ttf|eot|ico|pdf)$/i
 
@@ -130,7 +135,11 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`,
   )
 
-  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref)
+  const prKey = `${owner}/${repoName}#${prNumber}`
+  const isRecheckRun = reviewedPRKeys.has(prKey)
+  const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+
+  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
 
@@ -152,8 +161,12 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+      isRecheckRun,
+      round,
     })
 
+    reviewedPRKeys.add(prKey)
+    prRoundCounts.set(prKey, round)
     board.completePR(key, {
       elapsedMs: Date.now() - reviewStart,
       url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -209,7 +222,8 @@ export async function runServe(opts: ServeOpts = {}) {
   fileLog({ level: 'info', event: 'session_start', command: 'serve' })
 
   const board = new PRBoard()
-  board.setConfig(config, loadWorkflow(process.cwd()))
+  workflow = loadWorkflow(process.cwd())
+  board.setConfig(config, workflow)
 
   // ── Deployment setup ─────────────────────────────────────────────────────
   let effectiveDeployment: 'personal' | 'team' | undefined = config.deployment

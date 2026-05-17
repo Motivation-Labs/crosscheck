@@ -186,6 +186,35 @@ async function promptVendorMode(
   }
 }
 
+async function promptAuthorVendor(
+  login: string,
+  existingAuthorRoutes: Record<string, string> | null,
+  opts: OnboardOpts,
+): Promise<'claude' | 'codex' | 'both'> {
+  const existing = existingAuthorRoutes?.[login]
+  const current: 'claude' | 'codex' | 'both' =
+    existing === 'codex' ? 'codex' : existing === 'claude' ? 'claude' : 'both'
+
+  if (opts.yes) {
+    console.log(`  Primary author: ${chalk.cyan(current)}`)
+    return current
+  }
+
+  const items: PickerItem[] = [
+    { label: 'claude', description: 'my PRs without explicit attribution → Codex reviews them' },
+    { label: 'codex',  description: 'my PRs without explicit attribution → Claude reviews them' },
+    { label: 'both',   description: 'my PRs without explicit attribution → use fallback_reviewer' },
+  ]
+  const defaultIdx = current === 'codex' ? 1 : current === 'claude' ? 0 : 2
+  const idx = await promptSinglePicker(items, {
+    title: 'Which AI do you primarily use to write code?',
+    defaultIndex: defaultIdx,
+  })
+  console.log()
+
+  return idx === 1 ? 'codex' : idx === 2 ? 'both' : 'claude'
+}
+
 async function promptQualityTier(
   claudeEnabled: boolean,
   codexEnabled: boolean,
@@ -239,6 +268,30 @@ export function detectCurrentPreset(workflowDir: string = join(homedir(), '.cros
     } catch { /* malformed — default to review-only */ }
   }
   return 'review-only'
+}
+
+async function promptMaxRounds(
+  currentMaxRounds: number | undefined,
+  opts: OnboardOpts,
+): Promise<number> {
+  if (opts.yes) {
+    const rounds = currentMaxRounds ?? 1
+    console.log(`  Max rounds: ${chalk.cyan(String(rounds))}`)
+    return rounds
+  }
+
+  const items: PickerItem[] = [
+    { label: '1 round', description: 'one fix pass, then re-check once' },
+    { label: '2 rounds', description: 'up to two fix → re-check cycles' },
+    { label: '3 rounds', description: 'up to three fix → re-check cycles (maximum)' },
+  ]
+  const defaultIdx = Math.max(0, Math.min(2, (currentMaxRounds ?? 1) - 1))
+  const idx = await promptSinglePicker(items, {
+    title: 'How many fix → re-check rounds?',
+    defaultIndex: defaultIdx,
+  })
+  console.log()
+  return idx + 1
 }
 
 async function promptWorkflowPipeline(opts: OnboardOpts): Promise<WorkflowPreset> {
@@ -339,8 +392,10 @@ export interface OnboardDecisions {
   selectedRepos: string[]
   selectedOrgs: string[]
   vendorConfig: VendorModeConfig
+  authorVendor: 'claude' | 'codex' | 'both'
   qualityTier: QualityTier
   pipelinePreset: WorkflowPreset
+  maxRounds?: number  // only relevant for review-fix-recheck; defaults to 1
   tunnelBackend: 'localhost.run' | 'smee'
   smeeChannel: string
   cloneProtocol: 'ssh' | 'https'
@@ -349,7 +404,7 @@ export interface OnboardDecisions {
 // Build the workflow YAML for the given preset, with inline per-step instructions.
 // Written to ~/.crosscheck/workflow.yml on first onboard. On re-runs, regenerated
 // only when the step-type sequence drifts from the selected preset.
-function buildWorkflowYaml(preset: WorkflowPreset): string {
+function buildWorkflowYaml(preset: WorkflowPreset, maxRounds = 1): string {
   const reviewStep = {
     name: 'review',
     type: 'review',
@@ -362,7 +417,7 @@ function buildWorkflowYaml(preset: WorkflowPreset): string {
     type: 'fix',
     reviewer: 'origin',
     when: "review.verdict != 'APPROVE'",
-    max_rounds: 1,
+    max_rounds: maxRounds,
     instructions: DEFAULT_FIX_INSTRUCTIONS,
   }
   const recheckStep = {
@@ -370,7 +425,7 @@ function buildWorkflowYaml(preset: WorkflowPreset): string {
     type: 'recheck',
     reviewer: 'auto',
     when: "fix.applied_count > 0",
-    max_rounds: 1,
+    max_rounds: maxRounds,
     instructions: DEFAULT_RECHECK_INSTRUCTIONS,
   }
 
@@ -396,7 +451,7 @@ export function applyOnboardConfig(
   decisions: OnboardDecisions,
   workflowDir = join(homedir(), '.crosscheck'),
 ): void {
-  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, tunnelBackend, smeeChannel, cloneProtocol } = decisions
+  const { deployment, login, selectedRepos, selectedOrgs, vendorConfig, qualityTier, pipelinePreset, maxRounds, tunnelBackend, smeeChannel, cloneProtocol } = decisions
 
   mkdirSync(dirname(configPath), { recursive: true })
 
@@ -438,11 +493,20 @@ export function applyOnboardConfig(
     const currentAuthors = Array.isArray(routing.allowed_authors) ? (routing.allowed_authors as string[]) : []
     if (currentAuthors.length === 0) routing.allowed_authors = [login]
 
-    const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
-      ? (routing.author_routes as Record<string, string>)
-      : null
-    if (!currentRoutes || Object.keys(currentRoutes).length === 0) {
-      routing.author_routes = { [login]: 'claude' }
+    if (decisions.vendorConfig.mode === 'cross-vendor') {
+      const currentRoutes = routing.author_routes != null && typeof routing.author_routes === 'object'
+        ? { ...(routing.author_routes as Record<string, string>) }
+        : {}
+      if (decisions.authorVendor === 'both') {
+        delete currentRoutes[login]
+        if (Object.keys(currentRoutes).length > 0) {
+          routing.author_routes = currentRoutes
+        } else {
+          delete routing.author_routes
+        }
+      } else {
+        routing.author_routes = { ...currentRoutes, [login]: decisions.authorVendor }
+      }
     }
   }
   if (routing.fallback_reviewer === undefined) routing.fallback_reviewer = 'auto'
@@ -504,30 +568,53 @@ export function applyOnboardConfig(
   }
   const requiredSet = new Set(presetStepTypes[pipelinePreset])
 
+  const effectiveMaxRounds = maxRounds ?? 1
+
   if (!existsSync(globalWorkflowPath)) {
-    writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+    writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset, effectiveMaxRounds))
   } else {
     try {
-      const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string }> }
+      const existingRaw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string; max_rounds?: number }> }
       // Normalize legacy 'address' → 'fix' so workflow.yml files written by older
       // crosscheck versions are not regenerated solely on the renamed step type
       // (matches the schema-level transform in workflow.ts). Steps without a
       // type field are filtered out. Set comparison (not sequence) so user-added
       // duplicate steps or reordered steps are treated as equivalent and preserved.
+      const existingSteps = existingRaw?.steps ?? []
       const existingSet = new Set(
-        (existingRaw?.steps ?? [])
+        existingSteps
           .map(s => (s.type === 'address' ? 'fix' : s.type))
           .filter((t): t is string => Boolean(t)),
       )
       const setsMatch =
         requiredSet.size === existingSet.size && [...requiredSet].every(t => existingSet.has(t))
+
+      // Also regenerate when max_rounds has changed on any fix or recheck step
+      const existingMaxRounds = existingSteps
+        .filter(s => s.type === 'fix' || s.type === 'recheck')
+        .map(s => s.max_rounds ?? 1)
+      const maxRoundsDrifted = existingMaxRounds.length > 0
+        && existingMaxRounds.some(r => r !== effectiveMaxRounds)
+
       if (!setsMatch) {
-        writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+        // Preset changed — regenerate from template (step types differ)
+        writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset, effectiveMaxRounds))
+      } else if (maxRoundsDrifted) {
+        // Preset unchanged, only max_rounds changed — patch in-place to preserve
+        // any custom instructions or structural edits the user may have made.
+        const patchedSteps = existingSteps.map(s => {
+          if (s.type === 'fix' || s.type === 'recheck') {
+            return { ...s, max_rounds: effectiveMaxRounds }
+          }
+          return s
+        })
+        const patchedRaw = { ...(existingRaw as object), steps: patchedSteps }
+        writeFileSync(globalWorkflowPath, yaml.dump(patchedRaw, { lineWidth: -1, noRefs: true }))
       }
-      // Sets match — preserve existing file (may have user-edited instructions or structural customizations)
+      // No drift — preserve existing file (may have user-edited instructions or structural customizations)
     } catch {
       // Malformed workflow file — regenerate
-      writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset))
+      writeFileSync(globalWorkflowPath, buildWorkflowYaml(pipelinePreset, effectiveMaxRounds))
     }
   }
 }
@@ -734,8 +821,20 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 5: Review quality ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 5 — review quality'))
+  // ── Step 5: Primary author (cross-vendor + personal only) ───────────────────
+  console.log(chalk.bold('Step 5 — primary author'))
+  let authorVendor: 'claude' | 'codex' | 'both' = 'both'
+  if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    const existingRoutes = (existingConfig?.routing?.author_routes as Record<string, string> | undefined) ?? null
+    authorVendor = await promptAuthorVendor(login, existingRoutes, opts)
+  } else {
+    const reason = vendorConfig.mode === 'single-vendor' ? 'single-vendor mode' : 'team mode'
+    console.log(chalk.dim(`  Skipped — not applicable in ${reason}.`))
+    console.log()
+  }
+
+  // ── Step 6: Review quality ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 6 — review quality'))
   const qualityTier = await promptQualityTier(
     vendorConfig.claudeEnabled,
     vendorConfig.codexEnabled,
@@ -744,13 +843,30 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   )
   console.log()
 
-  // ── Step 6: Workflow pipeline ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 6 — workflow pipeline'))
+  // ── Step 7: Workflow pipeline ──────────────────────────────────────────────
+  console.log(chalk.bold('Step 7 — workflow pipeline'))
   const pipelinePreset = await promptWorkflowPipeline(opts)
   console.log()
 
-  // ── Step 7: Connection type ────────────────────────────────────────────────
-  console.log(chalk.bold('Step 7 — connection type'))
+  // ── Step 7.5: Max rounds (review-fix-recheck only) ────────────────────────
+  let maxRounds: number | undefined
+  if (pipelinePreset === 'review-fix-recheck') {
+    console.log(chalk.bold('Step 7.5 — fix → re-check rounds'))
+    const globalWorkflowPath = join(homedir(), '.crosscheck', 'workflow.yml')
+    let currentMaxRounds: number | undefined
+    if (existsSync(globalWorkflowPath)) {
+      try {
+        const raw = yaml.load(readFileSync(globalWorkflowPath, 'utf8')) as { steps?: Array<{ type?: string; max_rounds?: number }> }
+        const fixOrRecheckStep = (raw?.steps ?? []).find(s => s.type === 'fix' || s.type === 'recheck')
+        currentMaxRounds = fixOrRecheckStep?.max_rounds
+      } catch { /* malformed — use default */ }
+    }
+    maxRounds = await promptMaxRounds(currentMaxRounds, opts)
+    console.log()
+  }
+
+  // ── Step 8: Connection type ────────────────────────────────────────────────
+  console.log(chalk.bold('Step 8 — connection type'))
   const currentTunnel = existingConfig?.tunnel?.backend
   let tunnelBackend = await promptConnectionType(currentTunnel, opts)
 
@@ -775,12 +891,12 @@ export async function runOnboard(opts: OnboardOpts = {}) {
   }
   console.log()
 
-  // ── Step 8: Clone protocol ─────────────────────────────────────────────────
-  console.log(chalk.bold('Step 8 — clone protocol'))
+  // ── Step 9: Clone protocol ─────────────────────────────────────────────────
+  console.log(chalk.bold('Step 9 — clone protocol'))
   const cloneProtocol = await promptCloneProtocol(existingConfig?.clone_protocol, opts)
 
-  // ── Step 9: Confirm and write ──────────────────────────────────────────────
-  console.log(chalk.bold('Step 9 — review and write config'))
+  // ── Step 10: Confirm and write ─────────────────────────────────────────────
+  console.log(chalk.bold('Step 10 — review and write config'))
   console.log()
   console.log(`  deployment   ${chalk.cyan(deployment)}`)
   console.log(`  connection   ${chalk.cyan(tunnelBackend)}${tunnelBackend === 'smee' && smeeChannel ? chalk.dim(` (${smeeChannel})`) : ''}`)
@@ -790,8 +906,17 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     const activeVendor = vendorConfig.claudeEnabled ? 'claude' : 'codex'
     console.log(`  vendor       ${chalk.cyan(activeVendor)}`)
   }
+  if (vendorConfig.mode === 'cross-vendor' && deployment === 'personal') {
+    const routingLabel = authorVendor === 'both'
+      ? 'both (attribution detection only)'
+      : `${authorVendor} → reviewed by ${authorVendor === 'claude' ? 'codex' : 'claude'}`
+    console.log(`  routing      ${chalk.cyan(routingLabel)}`)
+  }
   console.log(`  quality      ${chalk.cyan(qualityTier)}${chalk.dim(`  — ${QUALITY_TIERS[qualityTier].description.split('  ')[0]}`)}`)
   console.log(`  pipeline     ${chalk.cyan(pipelinePreset)}`)
+  if (pipelinePreset === 'review-fix-recheck') {
+    console.log(`  max rounds   ${chalk.cyan(String(maxRounds ?? 1))}`)
+  }
   if (selectedOrgs.length > 0) {
     console.log(`  orgs         ${selectedOrgs.map(o => chalk.cyan(o)).join(', ')}`)
   }
@@ -822,8 +947,10 @@ export async function runOnboard(opts: OnboardOpts = {}) {
     selectedRepos,
     selectedOrgs,
     vendorConfig,
+    authorVendor,
     qualityTier,
     pipelinePreset,
+    maxRounds,
     tunnelBackend,
     smeeChannel,
     cloneProtocol,

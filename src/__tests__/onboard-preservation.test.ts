@@ -12,6 +12,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   selectedRepos: ['alice/myapp'],
   selectedOrgs: [],
   vendorConfig: { mode: 'cross-vendor', claudeEnabled: true, codexEnabled: true },
+  authorVendor: 'claude',
   qualityTier: 'balanced',
   pipelinePreset: 'review-only',
   tunnelBackend: 'localhost.run',
@@ -96,6 +97,72 @@ describe('applyOnboardConfig — first run', () => {
   })
 })
 
+describe('applyOnboardConfig — authorVendor routing', () => {
+  it('authorVendor: claude writes author_routes[login] = claude', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'claude' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('claude')
+  })
+
+  it('authorVendor: codex writes author_routes[login] = codex', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'codex' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('codex')
+  })
+
+  it('authorVendor: both removes login entry from author_routes', () => {
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'both' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toBeUndefined()
+  })
+
+  it('authorVendor: both preserves other entries while removing login entry', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude', 'bot-user': 'codex' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'both' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toEqual({ 'bot-user': 'codex' })
+  })
+
+  it('--reconfigure: overwrites existing author_routes[login] with new choice', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, authorVendor: 'codex' }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect((routing.author_routes as Record<string, string>).alice).toBe('codex')
+  })
+
+  it('team mode: skips author_routes regardless of authorVendor', () => {
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      deployment: 'team',
+      login: 'alice',
+      authorVendor: 'codex',
+    }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    expect(routing.author_routes).toBeUndefined()
+  })
+
+  it('single-vendor mode: preserves existing author_routes (step skipped, authorVendor defaults to both)', () => {
+    writeFileSync(configPath, yaml.dump({
+      deployment: 'personal',
+      routing: { author_routes: { alice: 'claude' }, fallback_reviewer: 'auto' },
+    }))
+    applyOnboardConfig(configPath, {
+      ...BASE_DECISIONS,
+      vendorConfig: { mode: 'single-vendor', claudeEnabled: true, codexEnabled: false },
+      authorVendor: 'both',  // default when step is skipped
+    }, workflowDir)
+    const routing = (readConfig().routing as Record<string, unknown>)
+    // author_routes must be untouched — single-vendor step is not applicable
+    expect(routing.author_routes).toEqual({ alice: 'claude' })
+  })
+})
+
 describe('applyOnboardConfig — re-run preservation', () => {
   it('preserves quality.focus and quality.custom_prompt', () => {
     // Seed config with custom quality settings
@@ -148,16 +215,17 @@ describe('applyOnboardConfig — re-run preservation', () => {
     expect(routing.fallback_reviewer).toBe('claude')              // custom value preserved
   })
 
-  it('preserves routing.author_routes on re-run', () => {
+  it('preserves other users in author_routes; updates only login entry', () => {
     writeFileSync(configPath, yaml.dump({
       deployment: 'personal',
       routing: {
         allowed_authors: ['alice'],
-        author_routes: { alice: 'claude', 'my-agent': 'codex' },
+        author_routes: { alice: 'codex', 'my-agent': 'codex' },
         fallback_reviewer: 'auto',
       },
     }))
 
+    // BASE_DECISIONS has authorVendor: 'claude' — alice's entry should be updated to 'claude'
     applyOnboardConfig(configPath, BASE_DECISIONS, workflowDir)
 
     const cfg = readConfig()
@@ -369,5 +437,81 @@ describe('detectCurrentPreset', () => {
   it('returns review-only for malformed workflow', () => {
     seedWorkflow('not: valid: yaml: at all: [')
     expect(detectCurrentPreset(workflowDir)).toBe('review-only')
+  })
+})
+
+describe('applyOnboardConfig — max_rounds in workflow.yml', () => {
+  it('writes max_rounds: 1 on fix and recheck steps by default', () => {
+    const dir = join(workflowDir, 'maxrounds-default')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck' }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const fixStep = raw.steps.find(s => s.type === 'fix')
+    const recheckStep = raw.steps.find(s => s.type === 'recheck')
+    expect(fixStep?.max_rounds).toBe(1)
+    expect(recheckStep?.max_rounds).toBe(1)
+  })
+
+  it('writes custom max_rounds on fix and recheck steps', () => {
+    const dir = join(workflowDir, 'maxrounds-custom')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 3 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    const fixStep = raw.steps.find(s => s.type === 'fix')
+    const recheckStep = raw.steps.find(s => s.type === 'recheck')
+    expect(fixStep?.max_rounds).toBe(3)
+    expect(recheckStep?.max_rounds).toBe(3)
+  })
+
+  it('max_rounds does not apply to review-only preset (fix step absent)', () => {
+    const dir = join(workflowDir, 'maxrounds-review-only')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only', maxRounds: 3 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number }> }
+    expect(raw.steps.length).toBe(1)
+    expect(raw.steps[0].type).toBe('review')
+  })
+
+  it('patches max_rounds in-place when preset unchanged (preserves custom instructions)', () => {
+    const dir = join(workflowDir, 'maxrounds-patch')
+    mkdirSync(dir, { recursive: true })
+    // Seed a workflow with custom instructions
+    writeFileSync(join(dir, 'workflow.yml'), yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: 'my custom review instructions' },
+        { name: 'fix', type: 'fix', reviewer: 'origin', when: "review.verdict != 'APPROVE'", max_rounds: 1, instructions: 'my custom fix instructions' },
+        { name: 'recheck', type: 'recheck', reviewer: 'auto', when: 'fix.applied_count > 0', max_rounds: 1, instructions: 'my custom recheck instructions' },
+      ],
+    }))
+
+    // Re-run onboard with max_rounds: 2 — must patch in-place, not regenerate
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 2 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number; instructions?: string }> }
+
+    // max_rounds updated on fix and recheck
+    expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(2)
+    expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(2)
+    // custom instructions preserved
+    expect(raw.steps.find(s => s.type === 'review')?.instructions).toBe('my custom review instructions')
+    expect(raw.steps.find(s => s.type === 'fix')?.instructions).toBe('my custom fix instructions')
+    expect(raw.steps.find(s => s.type === 'recheck')?.instructions).toBe('my custom recheck instructions')
+  })
+
+  it('patches max_rounds when decreasing back to 1 (preserves custom instructions)', () => {
+    const dir = join(workflowDir, 'maxrounds-downgrade')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'workflow.yml'), yaml.dump({
+      on: ['opened', 'synchronize'],
+      steps: [
+        { name: 'review', type: 'review', reviewer: 'auto', max_rounds: 1, instructions: 'custom review' },
+        { name: 'fix', type: 'fix', reviewer: 'origin', when: "review.verdict != 'APPROVE'", max_rounds: 3, instructions: 'custom fix' },
+        { name: 'recheck', type: 'recheck', reviewer: 'auto', when: 'fix.applied_count > 0', max_rounds: 3, instructions: 'custom recheck' },
+      ],
+    }))
+
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix-recheck', maxRounds: 1 }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number; instructions?: string }> }
+    expect(raw.steps.find(s => s.type === 'fix')?.max_rounds).toBe(1)
+    expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(1)
+    expect(raw.steps.find(s => s.type === 'fix')?.instructions).toBe('custom fix')
+    expect(raw.steps.find(s => s.type === 'recheck')?.instructions).toBe('custom recheck')
   })
 })

@@ -189,7 +189,8 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board manages all terminal output after startup
   const board = new PRBoard()
-  board.setConfig(config, loadWorkflow(process.cwd()))
+  const workflow = loadWorkflow(process.cwd())
+  board.setConfig(config, workflow)
 
   // Thin wrapper: routes important messages to both terminal and file log
   const bLog = (line1: string, line2?: string) => {
@@ -207,6 +208,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   const inFlight = new Set<string>()
   // SHAs pushed by the fix step — persisted to disk so restarts don't re-review our own commits
   const crosscheckShas = new PersistentShaSet()
+  // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
+  const reviewedPRKeys = new Set<string>()
+  const prRoundCounts = new Map<string, number>()
 
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
@@ -264,7 +268,11 @@ export async function runWatch(opts: WatchOpts = {}) {
         user: { login: params.author },
       }
 
-      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef)
+      const prKey = `${owner}/${repoName}#${prNumber}`
+      const isRecheckRun = reviewedPRKeys.has(prKey)
+      const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+
+      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
 
@@ -286,9 +294,13 @@ export async function runWatch(opts: WatchOpts = {}) {
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+          isRecheckRun,
+          round,
         })
 
         void verdict
+        reviewedPRKeys.add(prKey)
+        prRoundCounts.set(prKey, round)
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,

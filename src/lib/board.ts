@@ -49,6 +49,7 @@ interface PRSlot {
   crTokens?: number
   recheckTokens?: number
   fixTokens?: number
+  round?: number            // 1 = first review, 2+ = subsequent recheck run
 }
 
 export interface PRUpdate {
@@ -62,6 +63,7 @@ export interface PRUpdate {
   crTokens?: number
   recheckTokens?: number
   fixTokens?: number
+  round?: number
 }
 
 export interface PRCompletionData {
@@ -100,6 +102,14 @@ export function fmtTokens(n?: number): string {
   if (n < 1_000) return `(${n})`
   if (n < 1_000_000) return `(${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K)`
   return `(${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M)`
+}
+
+// Raw token count without surrounding parens: "900", "1.2K", "1.5M". Returns '' when undefined.
+function fmtTokensRaw(n?: number): string {
+  if (n == null) return ''
+  if (n < 1_000) return `${n}`
+  if (n < 1_000_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K`
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
 }
 
 // Strip ANSI escape codes for visible-width calculations
@@ -238,8 +248,8 @@ export class PRBoard {
     this.eraseLive()
   }
 
-  addPR(key: string, prNumber: number, repo: string, branch: string): void {
-    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued' })
+  addPR(key: string, prNumber: number, repo: string, branch: string, round?: number): void {
+    this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued', round: round ?? 1 })
     this.stats.prsReceived++
   }
 
@@ -256,6 +266,7 @@ export class PRBoard {
     if (updates.crTokens !== undefined) slot.crTokens = updates.crTokens
     if (updates.recheckTokens !== undefined) slot.recheckTokens = updates.recheckTokens
     if (updates.fixTokens !== undefined) slot.fixTokens = updates.fixTokens
+    if (updates.round !== undefined) slot.round = updates.round
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -279,7 +290,6 @@ export class PRBoard {
 
     const t = this.theme
     const ts = fmtTime()
-    const indent = ' '.repeat(FMT_TIME_WIDTH + 2)
     const elapsed = `(${Math.round(data.elapsedMs / 1000)}s)`
 
     // line 1 — use recheck verdict for badge when available
@@ -300,21 +310,42 @@ export class PRBoard {
     if (verdict !== null) {
       const crFill = this.crFillFn(verdict)
       const crLabel = this.crLabelFn(verdict)
-      const tokSuffix = fmtTokens(slot.crTokens)
-      const crLabelStr = tokSuffix
-        ? `${commentCount} issues (${verdict}) ${t.dim(tokSuffix)}`
+      const tokRaw = fmtTokensRaw(slot.crTokens)
+      const crLabelStr = tokRaw
+        ? `${commentCount} issues (${verdict}, ${tokRaw})`
         : `${commentCount} issues (${verdict})`
       crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(crLabelStr)}`
     } else {
       crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
     }
 
+    const round = slot.round ?? 1
+
+    // Round 2+: collapse Fix + Recheck into a compact "N ROUNDS" counter
+    if (round >= 2) {
+      const rv = slot.recheckVerdict ?? null
+      let roundSection: string
+      if (rv !== null) {
+        const fill = this.crFillFn(rv)
+        const label = this.crLabelFn(rv)
+        const tokRaw = fmtTokensRaw(slot.recheckTokens)
+        const roundLabel = tokRaw ? `${rv}, ${tokRaw}` : rv
+        roundSection = `${round} ROUNDS ${makeBar(0, 5, fill, t.barEmpty)} ${label(roundLabel)}`
+      } else {
+        roundSection = `${round} ROUNDS ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
+      }
+      const parts = [prSection, crSection, roundSection]
+      this.printStatic(`\n${line1}\n${parts.join(pipe)}`)
+      if (!this.isTTY) this.slots.delete(key)
+      return
+    }
+
     let fixSection: string
     if (!hasFixStep) {
       fixSection = `Fix ${t.dim('—')}`
     } else if (fixCount !== undefined && fixCount > 0) {
-      const fixTokSuffix = fmtTokens(slot.fixTokens)
-      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}${fixTokSuffix ? ' ' + t.dim(fixTokSuffix) : ''}`
+      const fixTokRaw = fmtTokensRaw(slot.fixTokens)
+      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}${fixTokRaw ? ' ' + t.dim(`(${fixTokRaw})`) : ''}`
     } else {
       fixSection = `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
     }
@@ -325,8 +356,8 @@ export class PRBoard {
       if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
         const fill = this.crFillFn(slot.recheckVerdict)
         const label = this.crLabelFn(slot.recheckVerdict)
-        const tokSuffix = fmtTokens(slot.recheckTokens)
-        const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
+        const tokRaw = fmtTokensRaw(slot.recheckTokens)
+        const recheckLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
         recheckSection = `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
       } else {
         recheckSection = `Recheck ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
@@ -335,7 +366,7 @@ export class PRBoard {
 
     const parts = [prSection, crSection, fixSection]
     if (recheckSection !== null) parts.push(recheckSection)
-    this.printStatic(`\n${line1}\n${indent}${parts.join(pipe)}`)
+    this.printStatic(`\n${line1}\n${parts.join(pipe)}`)
 
     // In non-TTY mode render() never runs, so purge the slot here instead of
     // relying on the render loop's 5-second cleanup.
@@ -467,7 +498,6 @@ export class PRBoard {
       ' '.repeat(l1Pad) + rightPart
 
     // ── Line 2: PR | CR | Fix | Recheck pipeline ────────────────────────────────
-    const indent = '    '
     const pipe = t.dim(' | ')
 
     const prSection = slot.prLoc !== undefined
@@ -475,13 +505,23 @@ export class PRBoard {
       : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
     const crSection = this.renderCRSection(slot, frame)
+
+    // Round 2+: skip Fix, collapse into compact recheck display
+    const round = slot.round ?? 1
+    if (round >= 2) {
+      const recheckSection = this.renderRecheckSection(slot, frame)
+      const parts = [prSection, crSection]
+      if (recheckSection !== null) parts.push(recheckSection)
+      return `${l1}\n${parts.join(pipe)}`
+    }
+
     const fixSection = this.renderFixSection(slot, frame)
     const recheckSection = this.renderRecheckSection(slot, frame)
 
     const parts = [prSection, crSection, fixSection]
     if (recheckSection !== null) parts.push(recheckSection)
 
-    return `${l1}\n${indent}${parts.join(pipe)}`
+    return `${l1}\n${parts.join(pipe)}`
   }
 
   private phaseLine1Label(slot: PRSlot, frame: string): string {
@@ -511,9 +551,9 @@ export class PRBoard {
     const crFill = this.crFillFn(slot.verdict)
     const crLabel = this.crLabelFn(slot.verdict)
     const count = slot.commentCount ?? 0
-    const tokSuffix = fmtTokens(slot.crTokens)
-    const label = tokSuffix
-      ? `${count} issues (${slot.verdict}) ${t.dim(tokSuffix)}`
+    const tokRaw = fmtTokensRaw(slot.crTokens)
+    const label = tokRaw
+      ? `${count} issues (${slot.verdict}, ${tokRaw})`
       : `${count} issues (${slot.verdict})`
     return `CR ${makeBar(commentCountToFilled(count), 8, crFill, t.barEmpty)} ${crLabel(label)}`
   }
@@ -527,14 +567,32 @@ export class PRBoard {
     }
     if (slot.fixCount !== undefined) {
       if (slot.fixCount === 0) return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('— skipped')}`
-      const tokSuffix = fmtTokens(slot.fixTokens)
-      return `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.success('✓')} ${t.accent(String(slot.fixCount) + ' applied')}${tokSuffix ? ' ' + t.dim(tokSuffix) : ''}`
+      const tokRaw = fmtTokensRaw(slot.fixTokens)
+      return `Fix ${makeBar(fixCountToFilled(slot.fixCount), 6, t.barFixFill, t.barEmpty)} ${t.success('✓')} ${t.accent(String(slot.fixCount) + ' applied')}${tokRaw ? ' ' + t.dim(`(${tokRaw})`) : ''}`
     }
     return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('queued')}`
   }
 
   private renderRecheckSection(slot: PRSlot, frame: string): string | null {
     const t = this.theme
+    const round = slot.round ?? 1
+
+    // Round 2+: compact "N ROUNDS" display regardless of workflow steps
+    if (round >= 2) {
+      const roundsLabel = `${round} ROUNDS`
+      if (slot.phase === 'rechecking' || slot.phase === 'reviewing') {
+        return `${roundsLabel} ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim(`round ${round}…`)}`
+      }
+      if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
+        const fill = this.crFillFn(slot.recheckVerdict)
+        const label = this.crLabelFn(slot.recheckVerdict)
+        const tokRaw = fmtTokensRaw(slot.recheckTokens)
+        const roundLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
+        return `${roundsLabel} ${makeBar(0, 5, fill, t.barEmpty)} ${label(roundLabel)}`
+      }
+      return `${roundsLabel} ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
+    }
+
     const hasRecheckStep = this.steps.some(s => s.type === 'recheck')
     if (!hasRecheckStep) return null
     if (slot.phase === 'rechecking') {
@@ -549,8 +607,8 @@ export class PRBoard {
       }
       const fill = this.crFillFn(slot.recheckVerdict)
       const label = this.crLabelFn(slot.recheckVerdict)
-      const tokSuffix = fmtTokens(slot.recheckTokens)
-      const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
+      const tokRaw = fmtTokensRaw(slot.recheckTokens)
+      const recheckLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
       return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
     }
     return `Recheck ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`

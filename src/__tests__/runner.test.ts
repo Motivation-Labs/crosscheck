@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isRetryableFixError } from '../lib/runner.js'
+import { isRetryableFixError, getEffectiveStepType, exceedsMaxRounds } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -25,5 +25,53 @@ describe('isRetryableFixError', () => {
     expect(isRetryableFixError('timeout string')).toBe(true)
     expect(isRetryableFixError('auth failure: bad token')).toBe(false)
     expect(isRetryableFixError(null)).toBe(true)
+  })
+})
+
+describe('exceedsMaxRounds', () => {
+  it('returns false when round is undefined (no tracking)', () => {
+    expect(exceedsMaxRounds('fix', 'fix', 1, undefined)).toBe(false)
+    expect(exceedsMaxRounds('recheck', 'recheck', 1, undefined)).toBe(false)
+  })
+
+  it('skips fix step when round exceeds max_rounds', () => {
+    expect(exceedsMaxRounds('fix', 'fix', 1, 2)).toBe(true)
+    expect(exceedsMaxRounds('fix', 'fix', 1, 1)).toBe(false)
+    expect(exceedsMaxRounds('fix', 'fix', 2, 2)).toBe(false)
+    expect(exceedsMaxRounds('fix', 'fix', 2, 3)).toBe(true)
+  })
+
+  it('skips recheck step (from workflow) when round exceeds max_rounds', () => {
+    expect(exceedsMaxRounds('recheck', 'recheck', 1, 2)).toBe(true)
+    expect(exceedsMaxRounds('recheck', 'recheck', 1, 1)).toBe(false)
+  })
+
+  it('never skips a review step coerced to recheck (always runs assessment)', () => {
+    expect(exceedsMaxRounds('recheck', 'review', 1, 2)).toBe(false)
+    expect(exceedsMaxRounds('recheck', 'review', 1, 99)).toBe(false)
+  })
+
+  it('never skips a plain review step', () => {
+    expect(exceedsMaxRounds('review', 'review', 1, 2)).toBe(false)
+  })
+})
+
+describe('getEffectiveStepType', () => {
+  it('coerces review → recheck when isRecheckRun is true', () => {
+    expect(getEffectiveStepType('review', true)).toBe('recheck')
+  })
+
+  it('preserves review when isRecheckRun is false', () => {
+    expect(getEffectiveStepType('review', false)).toBe('review')
+  })
+
+  it('preserves fix regardless of isRecheckRun', () => {
+    expect(getEffectiveStepType('fix', true)).toBe('fix')
+    expect(getEffectiveStepType('fix', false)).toBe('fix')
+  })
+
+  it('preserves recheck regardless of isRecheckRun', () => {
+    expect(getEffectiveStepType('recheck', true)).toBe('recheck')
+    expect(getEffectiveStepType('recheck', false)).toBe('recheck')
   })
 })

@@ -11,6 +11,8 @@ import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
 
 export interface RunOpts {
@@ -118,6 +120,20 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     user: { login: prData.user?.login ?? '' },
   }
 
+  if (!acquirePRLock(owner, repo, number)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_local' })
+    console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed by another process on this machine — skipping`))
+    return
+  }
+
+  if (await checkRemoteLock(octokit, owner, repo, prData.head.sha)) {
+    releasePRLock(owner, repo, number)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
+    console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+    return
+  }
+  await acquireRemoteLock(octokit, owner, repo, prData.head.sha)
+
   // Clone the repo
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-run-'))
   const cloneSpinner = ora('Cloning repo...').start()
@@ -158,11 +174,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
     }
 
+    await releaseRemoteLock(octokit, owner, repo, prData.head.sha, 'success')
   } catch (err: unknown) {
+    await releaseRemoteLock(octokit, owner, repo, prData.head.sha, 'failure')
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
     console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
     process.exit(2)
   } finally {
+    releasePRLock(owner, repo, number)
     rmSync(tmpDir, { force: true, recursive: true })
   }
 }

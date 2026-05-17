@@ -4,7 +4,7 @@ import { join } from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient, postReviewComment } from '../github/client.js'
-import { detectPROrigin, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
@@ -52,13 +52,22 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewer = forceReviewer
     console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
   } else {
-    const origin = detectPROrigin(pr.body ?? '', config, pr.user?.login)
+    const { origin, method } = await detectOriginFull(
+      pr.body ?? '',
+      pr.head.ref,
+      owner,
+      repo,
+      number,
+      config,
+      token,
+      pr.user?.login,
+    )
     reviewer = await assignReviewer(origin, config)
     if (!reviewer) {
-      console.log(chalk.dim(`  PR origin: ${origin} — no reviewer assigned (use --reviewer codex|claude to force)`))
+      console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) — no reviewer assigned (use --reviewer codex|claude to force)`))
       return
     }
-    console.log(chalk.dim(`  PR origin: ${origin} → assigned reviewer: ${reviewer}`))
+    console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) → assigned reviewer: ${reviewer}`))
   }
 
   // Clone the repo into a temp dir

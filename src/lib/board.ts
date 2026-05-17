@@ -279,13 +279,10 @@ export class PRBoard {
     if (updates.crTokens !== undefined) slot.crTokens = updates.crTokens
     if (updates.recheckTokens !== undefined) slot.recheckTokens = updates.recheckTokens
     if (updates.fixTokens !== undefined) slot.fixTokens = updates.fixTokens
-<<<<<<< HEAD
     if (updates.round !== undefined) slot.round = updates.round
-=======
     if (updates.crReviewer !== undefined) slot.crReviewer = updates.crReviewer
     if (updates.recheckReviewer !== undefined) slot.recheckReviewer = updates.recheckReviewer
     if (updates.qualityTier !== undefined) slot.qualityTier = updates.qualityTier
->>>>>>> 56b5f58 (feat: show reviewer vendor and quality tier in CR stripe)
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -376,16 +373,10 @@ export class PRBoard {
       if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
         const fill = this.crFillFn(slot.recheckVerdict)
         const label = this.crLabelFn(slot.recheckVerdict)
-<<<<<<< HEAD
         const tokRaw = fmtTokensRaw(slot.recheckTokens)
         const recheckLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
-        recheckSection = `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
-=======
-        const tokSuffix = fmtTokens(slot.recheckTokens)
-        const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
         const reviewerTag = fmtReviewerTag(slot.recheckReviewer, slot.qualityTier)
         recheckSection = `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}${reviewerTag ? ' ' + t.dim(reviewerTag) : ''}`
->>>>>>> 56b5f58 (feat: show reviewer vendor and quality tier in CR stripe)
       } else {
         recheckSection = `Recheck ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
       }
@@ -635,16 +626,10 @@ export class PRBoard {
       }
       const fill = this.crFillFn(slot.recheckVerdict)
       const label = this.crLabelFn(slot.recheckVerdict)
-<<<<<<< HEAD
       const tokRaw = fmtTokensRaw(slot.recheckTokens)
       const recheckLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
-      return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}`
-=======
-      const tokSuffix = fmtTokens(slot.recheckTokens)
-      const recheckLabel = tokSuffix ? `${slot.recheckVerdict} ${t.dim(tokSuffix)}` : slot.recheckVerdict
       const reviewerTag = fmtReviewerTag(slot.recheckReviewer, slot.qualityTier)
       return `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}${reviewerTag ? ' ' + t.dim(reviewerTag) : ''}`
->>>>>>> 56b5f58 (feat: show reviewer vendor and quality tier in CR stripe)
     }
     return `Recheck ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
   }

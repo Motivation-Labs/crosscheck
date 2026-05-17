@@ -18,10 +18,32 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
-export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string) {
-  const config = loadConfig(configPath)
+export interface ReviewOpts {
+  config?: string
+  reviewer?: string
+  timeout?: number
+  tier?: string
+  focus?: string
+}
+
+export async function runReview(prUrl: string, configPath?: string, forceReviewer?: string, opts: ReviewOpts = {}) {
+  const config = loadConfig(configPath ?? opts.config)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'review', pr_url: prUrl })
+
+  // Validate and build per-run overrides
+  const timeoutOverrideMs = opts.timeout !== undefined ? opts.timeout * 1_000 : undefined
+  if (opts.timeout !== undefined && (isNaN(opts.timeout) || opts.timeout <= 0)) {
+    console.error(chalk.red('✗ --timeout must be a positive number of seconds'))
+    process.exit(1)
+  }
+  const focusOverride = opts.focus
+    ? opts.focus.split(',').map(s => s.trim()).filter(Boolean)
+    : undefined
+  const tierOverride = opts.tier as import('../config/schema.js').QualityConfig['tier'] | undefined
+  const effectiveQuality = (tierOverride !== undefined || focusOverride !== undefined)
+    ? { ...config.quality, ...(tierOverride && { tier: tierOverride }), ...(focusOverride && { focus: focusOverride }) }
+    : config.quality
 
   let token: string
   try {
@@ -88,21 +110,23 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
+          effectiveQuality,
           config.vendors.codex,
           undefined,
           msg => { reviewSpinner!.text = msg },
+          timeoutOverrideMs,
         ))
       } else {
         ;({ review: reviewText, tokensUsed } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
-          config.quality,
+          effectiveQuality,
           config.vendors.claude,
           config.budget.per_review_usd,
           undefined,
           msg => { reviewSpinner!.text = msg },
+          timeoutOverrideMs,
         ))
       }
     } finally {

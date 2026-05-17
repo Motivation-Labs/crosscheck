@@ -241,6 +241,32 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 ## Build Queue
 
+### 🔜 Next Up
+
+- [ ] **Per-run parameter overrides for `ck review` / `ck run`** — three flags to customize a single invocation without touching config
+  - **User:** Developer running a one-off review that needs different settings (large PR needing more time, focused security scan, etc.)
+  - **Acceptance Criteria:**
+    - `ck review <url> --timeout 300` caps the reviewer process at 300 s (overrides claude's 180 s hardcode and codex's tier-based limit)
+    - `ck run <url> --timeout 600` applies the same cap to every review and recheck step in the workflow
+    - `ck review <url> --tier thorough` uses the thorough quality tier for this run only (affects codex model + timeout ceiling, claude model)
+    - `ck review <url> --focus security,performance` injects those focus areas into the prompt for this run (replaces `quality.focus`)
+    - All three flags combine freely: `ck run <url> --tier thorough --timeout 900 --focus security`
+    - No config file is read from or written by any of these flags
+    - `--timeout` value is validated to be a positive integer; bad values exit 1 with a clear error
+  - **Technical Notes:**
+    - `runClaudeReview` and `runCodexReview` each gain an optional `timeoutMs?: number` parameter that overrides their internal default when provided
+    - `WorkflowContext` gains `qualityOverrides?: Partial<QualityConfig>` and `timeoutOverrideMs?: number`; `runWorkflow` merges these into the effective quality before each step
+    - `RunOpts` in `run.ts` gains `timeout?: number`, `tier?: string`, `focus?: string`
+    - `runReview` in `review.ts` gains the same three optional fields on its opts object
+    - Parse `--focus` as a comma-split, trim, filter-empty list; pass as `quality.focus` override
+  - **Tests Required:**
+    - `--timeout 300` → `execa` called with `timeout: 300_000` in both reviewers
+    - `--tier fast` → codex uses fast-tier model and 300 s timeout; claude uses fast-tier model
+    - `--focus security,perf` → focus line appears in prompt passed to reviewer
+    - `--timeout abc` → exits 1 with "timeout must be a positive number of seconds"
+
+---
+
 ### ✅ Recently shipped
 
 - [x] **smart-switch** — fault-tolerance for cross-vendor mode when a reviewer hits a subscription limit. Full spec below in Next Up (marked done).

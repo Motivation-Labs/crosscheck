@@ -18,6 +18,9 @@ export interface RunOpts {
   reviewer?: string
   steps?: string
   dryRun?: boolean
+  timeout?: number
+  tier?: string
+  focus?: string
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -30,6 +33,20 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   const config = loadConfig(opts.config)
   initLogger(config.logs)
   fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl })
+
+  // Validate and parse per-run overrides
+  const timeoutOverrideMs = opts.timeout !== undefined ? opts.timeout * 1_000 : undefined
+  if (opts.timeout !== undefined && (isNaN(opts.timeout) || opts.timeout <= 0)) {
+    console.error(chalk.red('✗ --timeout must be a positive number of seconds'))
+    process.exit(1)
+  }
+  const focusOverride = opts.focus
+    ? opts.focus.split(',').map(s => s.trim()).filter(Boolean)
+    : undefined
+  const tierOverride = opts.tier as import('../config/schema.js').QualityConfig['tier'] | undefined
+  const qualityOverrides = (tierOverride !== undefined || focusOverride !== undefined)
+    ? { ...(tierOverride && { tier: tierOverride }), ...(focusOverride && { focus: focusOverride }) }
+    : undefined
 
   let token: string
   try {
@@ -147,6 +164,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       crosscheckShas: new Set(),
       dryRun: opts.dryRun,
       steps: filteredSteps,
+      qualityOverrides,
+      timeoutOverrideMs,
     })
 
     activeSpinner.stop()

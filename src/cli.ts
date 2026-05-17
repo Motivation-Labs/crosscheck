@@ -71,7 +71,10 @@ program
   .description('Manually trigger a review for a single PR URL')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
+  .option('--timeout <seconds>', 'override reviewer process timeout in seconds (default: 180 for claude, tier-based for codex)', parseFloat)
+  .option('--tier <level>', 'override quality tier for this run: fast | balanced | thorough')
+  .option('--focus <areas>', 'override review focus areas for this run, comma-separated (e.g. security,performance)')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; timeout?: number; tier?: string; focus?: string }) => void runReview(prUrl, opts.config, opts.reviewer, opts))
 
 program
   .command('run <pr-url>')
@@ -80,7 +83,10 @@ program
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, opts))
+  .option('--timeout <seconds>', 'override reviewer process timeout in seconds for each step (default: 180 for claude, tier-based for codex)', parseFloat)
+  .option('--tier <level>', 'override quality tier for this run: fast | balanced | thorough')
+  .option('--focus <areas>', 'override review focus areas for this run, comma-separated (e.g. security,performance)')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; steps?: string; dryRun?: boolean; timeout?: number; tier?: string; focus?: string }) => void runRun(prUrl, opts))
 
 program
   .command('status')

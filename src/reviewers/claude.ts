@@ -37,6 +37,7 @@ export async function runClaudeReview(
   perReviewBudget: number,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
+  timeoutMs?: number,
 ): Promise<ReviewResult> {
   const model = TIER_MODELS[quality.tier] ?? 'claude-sonnet-4-6'
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -69,7 +70,7 @@ export async function runClaudeReview(
   try {
     const { stdout } = await execa('claude', args, {
       cwd: repoDir,
-      timeout: 180_000,
+      timeout: timeoutMs ?? 180_000,
       input: prompt,
       env: { ...process.env },
     })

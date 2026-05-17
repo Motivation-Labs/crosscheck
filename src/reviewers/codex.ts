@@ -51,6 +51,7 @@ export async function runCodexReview(
   vendor: CodexVendorConfig,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
+  timeoutMs?: number,
 ): Promise<ReviewResult> {
   // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
   const model = vendor.auth === 'api-key'
@@ -74,17 +75,17 @@ export async function runCodexReview(
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(instructionsPath, instructionsNote)
 
+  const effectiveTimeoutMs = timeoutMs ?? TIER_TIMEOUT_MS[quality.tier] ?? 600_000
+
   try {
     const modelArgs = model ? ['-c', `model="${model}"`] : []
     onLog?.(`  running: codex review --base ${baseBranch}${model ? ` -c model="${model}"` : ''}`)
-
-    const timeoutMs = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
     const result = await execa(
       'codex',
       ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
       {
         cwd: repoDir,
-        timeout: timeoutMs,
+        timeout: effectiveTimeoutMs,
         env: {
           ...process.env,
           // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
@@ -105,7 +106,7 @@ export async function runCodexReview(
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''
-    const timeoutSec = (TIER_TIMEOUT_MS[quality.tier] ?? 600_000) / 1000
+    const timeoutSec = effectiveTimeoutMs / 1000
     const summary = execa.timedOut
       ? `timed out after ${timeoutSec}s — PR diff may be too large (tier: ${quality.tier})`
       : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')

@@ -82,6 +82,11 @@ export interface WorkflowContext {
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
   smartSwitchFallback?: 'claude' | 'codex'
+  // Per-run overrides from CLI flags (--timeout, --tier, --focus).
+  // Merged into config.quality before each step; never written to config.
+  qualityOverrides?: Partial<import('../config/schema.js').QualityConfig>
+  // Overrides the reviewer process timeout for every review/recheck step.
+  timeoutOverrideMs?: number
 }
 
 export interface WorkflowResult {
@@ -119,6 +124,9 @@ function resolveReviewer(
 
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
+  const effectiveQuality = ctx.qualityOverrides
+    ? { ...config.quality, ...ctx.qualityOverrides }
+    : config.quality
   const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
 
@@ -159,9 +167,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let rawReview: string
       let tokensUsed: number | undefined
       if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
+        ;({ review: rawReview, tokensUsed } = await runCodexReview(tmpDir, pr.base.ref, pr.title, effectiveQuality, config.vendors.codex, step.instructions, log, ctx.timeoutOverrideMs))
       } else {
-        ;({ review: rawReview, tokensUsed } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
+        ;({ review: rawReview, tokensUsed } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, effectiveQuality, config.vendors.claude, config.budget.per_review_usd, step.instructions, log, ctx.timeoutOverrideMs))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)

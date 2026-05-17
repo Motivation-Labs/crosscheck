@@ -132,7 +132,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
     return
   }
-  await acquireRemoteLock(octokit, owner, repo, prData.head.sha)
+  try {
+    await acquireRemoteLock(octokit, owner, repo, prData.head.sha)
+  } catch (err: unknown) {
+    releasePRLock(owner, repo, number)
+    throw err
+  }
 
   // Clone the repo
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-run-'))
@@ -179,6 +184,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     await releaseRemoteLock(octokit, owner, repo, prData.head.sha, 'failure')
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
     console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
+    releasePRLock(owner, repo, number)
+    rmSync(tmpDir, { force: true, recursive: true })
     process.exit(2)
   } finally {
     releasePRLock(owner, repo, number)

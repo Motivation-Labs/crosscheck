@@ -11,6 +11,8 @@ import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
 
 export interface RunOpts {
@@ -118,9 +120,33 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     user: { login: prData.user?.login ?? '' },
   }
 
+  const { sha } = prData.head
+
+  if (!acquirePRLock(owner, repo, number, sha)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_local' })
+    console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed by another process on this machine — skipping`))
+    return
+  }
+
+  if (!opts.dryRun) {
+    if (await checkRemoteLock(octokit, owner, repo, sha)) {
+      releasePRLock(owner, repo, number, sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
+      console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+      return
+    }
+    try {
+      await acquireRemoteLock(octokit, owner, repo, sha)
+    } catch (err: unknown) {
+      releasePRLock(owner, repo, number, sha)
+      throw err
+    }
+  }
+
   // Clone the repo
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-run-'))
   const cloneSpinner = ora('Cloning repo...').start()
+  let stopHeartbeat = () => {}
 
   try {
     clonePRForReview({
@@ -130,6 +156,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     })
     cloneSpinner.succeed('Repo ready')
 
+    if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
     let activeSpinner = ora('').start()
 
     const { verdict } = await runWorkflow({
@@ -158,11 +185,18 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
     }
 
+    stopHeartbeat()
+    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
   } catch (err: unknown) {
+    stopHeartbeat()
+    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
     console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
+    releasePRLock(owner, repo, number, sha)
+    rmSync(tmpDir, { force: true, recursive: true })
     process.exit(2)
   } finally {
+    releasePRLock(owner, repo, number, sha)
     rmSync(tmpDir, { force: true, recursive: true })
   }
 }

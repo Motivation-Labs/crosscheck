@@ -251,6 +251,23 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
 
+- [ ] **In-flight lock: prevent duplicate reviews when `watch` and `crosscheck run` race** — if a `watch` process receives a webhook for PR #N at the same time a user manually runs `crosscheck run <pr-url>`, both pass the existing dedup check (which only looks at posted GitHub comments) because neither has posted yet. Both complete a full review and post separate comments. Root cause confirmed via logs on 2026-05-17: `codatta/symphony#22` received 3 comments — two NEEDS WORK reviews posted 90 seconds apart (one from the webhook handler, one from a concurrent manual run), then a third APPROVE recheck after the auto-fix step.
+  - **User:** Anyone who runs `crosscheck run` on a PR that is simultaneously being processed by a running `watch`/`serve` daemon on the same or a different machine.
+  - **Acceptance Criteria:**
+    - A file lock at `~/.crosscheck/locks/<owner>-<repo>-<pr>.lock` is acquired (using `open(path, 'wx')` — atomic exclusive create) before `runWorkflow` is called. If the lock file already exists, the session logs `pr_skipped: reason: in_progress_local` and returns without reviewing.
+    - The lock file is always released in a `finally` block — including on timeout, error, and process signal. Lock directory is created on first use.
+    - A GitHub commit status `crosscheck/review` on the PR head SHA acts as the cross-machine advisory lock:
+      - Before starting, check if a `pending` status already exists and is less than 15 minutes old. If so, log `pr_skipped: reason: in_progress_remote` and return.
+      - After acquiring the file lock, immediately set the status to `pending` (description includes ISO timestamp for stale detection).
+      - On workflow completion, set the status to `success`. On unhandled error, set to `failure`. Both are best-effort (errors suppressed).
+    - Stale lock guard: a pending status older than 15 minutes is treated as abandoned (the machine crashed mid-review) and does not block a new session.
+    - The file lock only covers the same machine; the commit status covers cross-machine races. Both are required.
+    - New file: `src/lib/pr-lock.ts` — `acquirePRLock`, `releasePRLock`. New file: `src/github/review-status.ts` — `checkRemoteLock`, `acquireRemoteLock`, `releaseRemoteLock`.
+    - Lock acquisition wraps the existing call site where `runWorkflow` is invoked in `commands/run.ts` and `commands/watch.ts` (the `reviewPR` function).
+    - No change to the existing in-memory SHA dedup set — it remains as a fast-path for same-process duplicate webhook events.
+  - **Technical Notes:** `openSync(path, 'wx')` throws `EEXIST` if the file already exists — this is the atomic OS-level test-and-set. GitHub commit status API: `repos.createCommitStatus` with `state: 'pending' | 'success' | 'failure'`, `context: 'crosscheck/review'`. There is no CAS in the GitHub API; the cross-machine window is ~100–300ms of network latency, which is acceptable — the consequence of the rare race is one extra comment, not data corruption.
+  - **Tests Required:** two concurrent `acquirePRLock` calls for the same PR — second returns `false`; `releasePRLock` removes the file and a third call succeeds; `checkRemoteLock` returns `true` when status is `pending` and age < 15 min; returns `false` when age > 15 min; returns `false` when status is `success`.
+
 - [ ] **Consolidate skip decision: delete `shouldReview()`, rely solely on `assignReviewer`** — `shouldReview` (detector.ts:82) and `assignReviewer` both independently gate on `origin === 'human'` in cross-vendor mode. Adding `fallback_reviewer` to only one of them creates a silent divergence. Full spec below.
   - **Acceptance Criteria:**
     - `shouldReview` is deleted from `detector.ts` and from all exports.

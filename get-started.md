@@ -1073,7 +1073,18 @@ claude \
 
 ### Deduplication
 
-GitHub can fire both `opened` and `synchronize` events for the same push. crosscheck tracks `owner/repo#pr@sha` in an in-memory set and drops duplicate events for the same commit.
+crosscheck uses three layers of deduplication to avoid posting multiple reviews on the same PR:
+
+**1. Same-event dedup (in-memory, same process)**
+GitHub can fire both `opened` and `synchronize` events for the same push. crosscheck tracks `owner/repo#pr@sha` in an in-memory set and drops duplicate events for the same commit within the same running process.
+
+**2. Same-machine dedup (file lock)**
+If `crosscheck run <pr-url>` is invoked while a `watch`/`serve` daemon is already reviewing the same PR, the second session detects the conflict immediately and exits without starting a review. The lock lives at `~/.crosscheck/locks/<owner>-<repo>-<pr>.lock` and is released automatically when the review finishes (or the process crashes).
+
+**3. Cross-machine dedup (GitHub commit status)**
+When two machines — for example, a developer laptop running `crosscheck run` and a mac-mini running `serve` — both pick up the same PR, a GitHub commit status (`crosscheck/review`) on the PR's head SHA acts as an advisory lock. The first machine to set the status to `pending` wins; the other sees the existing pending status and skips. A pending status older than 15 minutes is treated as stale (the machine crashed mid-review) and does not block a new session.
+
+> **Precedence:** a new commit always resets the lock namespace — each SHA gets its own status, so a push that arrives while a review is in progress will be reviewed normally once the previous review completes.
 
 ### Watch vs serve
 

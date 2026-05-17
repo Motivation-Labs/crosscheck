@@ -52,6 +52,9 @@ export interface PRPhaseData {
   crTokens?: number
   recheckTokens?: number
   fixTokens?: number
+  crReviewer?: string
+  recheckReviewer?: string
+  qualityTier?: string
 }
 
 export interface WorkflowContext {
@@ -176,8 +179,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
-        ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed }
-        : { verdict, commentCount, phase: donePhase, crTokens: tokensUsed }
+        ? { recheckVerdict: verdict, phase: donePhase, recheckTokens: tokensUsed, recheckReviewer: reviewer, qualityTier: config.quality.tier }
+        : { verdict, commentCount, phase: donePhase, crTokens: tokensUsed, crReviewer: reviewer, qualityTier: config.quality.tier }
 
       if (ctx.dryRun) {
         onPhaseChange('dry-run — comment not posted', phaseUpdate)

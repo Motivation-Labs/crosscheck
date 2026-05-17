@@ -137,7 +137,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`,
   )
 
-  if (!acquirePRLock(owner, repoName, prNumber)) {
+  if (!acquirePRLock(owner, repoName, prNumber, pr.head.sha)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
     inFlight.delete(key)
     return
@@ -145,7 +145,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
   const lockOctokit = createGithubClient(token)
   if (await checkRemoteLock(lockOctokit, owner, repoName, pr.head.sha)) {
-    releasePRLock(owner, repoName, prNumber)
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
     inFlight.delete(key)
     return
@@ -153,7 +153,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   try {
     await acquireRemoteLock(lockOctokit, owner, repoName, pr.head.sha)
   } catch (err: unknown) {
-    releasePRLock(owner, repoName, prNumber)
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
     inFlight.delete(key)
     throw err
   }
@@ -206,7 +206,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       if (failedVendor) triggerSwitch(failedVendor, message, announce)
     }
   } finally {
-    releasePRLock(owner, repoName, prNumber)
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
     rmSync(tmpDir, { force: true, recursive: true })
     inFlight.delete(key)
   }

@@ -120,23 +120,27 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     user: { login: prData.user?.login ?? '' },
   }
 
-  if (!acquirePRLock(owner, repo, number)) {
+  const { sha } = prData.head
+
+  if (!acquirePRLock(owner, repo, number, sha)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_local' })
     console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed by another process on this machine — skipping`))
     return
   }
 
-  if (await checkRemoteLock(octokit, owner, repo, prData.head.sha)) {
-    releasePRLock(owner, repo, number)
-    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
-    console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
-    return
-  }
-  try {
-    await acquireRemoteLock(octokit, owner, repo, prData.head.sha)
-  } catch (err: unknown) {
-    releasePRLock(owner, repo, number)
-    throw err
+  if (!opts.dryRun) {
+    if (await checkRemoteLock(octokit, owner, repo, sha)) {
+      releasePRLock(owner, repo, number, sha)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
+      console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+      return
+    }
+    try {
+      await acquireRemoteLock(octokit, owner, repo, sha)
+    } catch (err: unknown) {
+      releasePRLock(owner, repo, number, sha)
+      throw err
+    }
   }
 
   // Clone the repo
@@ -179,16 +183,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
     }
 
-    await releaseRemoteLock(octokit, owner, repo, prData.head.sha, 'success')
+    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
   } catch (err: unknown) {
-    await releaseRemoteLock(octokit, owner, repo, prData.head.sha, 'failure')
+    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
     logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
     console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-    releasePRLock(owner, repo, number)
+    releasePRLock(owner, repo, number, sha)
     rmSync(tmpDir, { force: true, recursive: true })
     process.exit(2)
   } finally {
-    releasePRLock(owner, repo, number)
+    releasePRLock(owner, repo, number, sha)
     rmSync(tmpDir, { force: true, recursive: true })
   }
 }

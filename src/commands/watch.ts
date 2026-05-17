@@ -271,18 +271,23 @@ export async function runWatch(opts: WatchOpts = {}) {
         user: { login: params.author },
       }
 
-      if (!acquirePRLock(owner, repoName, prNumber)) {
+      if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
         return
       }
 
       const lockOctokit = createGithubClient(token)
       if (await checkRemoteLock(lockOctokit, owner, repoName, params.headSha)) {
-        releasePRLock(owner, repoName, prNumber)
+        releasePRLock(owner, repoName, prNumber, params.headSha)
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
         return
       }
-      await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
+      try {
+        await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
+      } catch (err: unknown) {
+        releasePRLock(owner, repoName, prNumber, params.headSha)
+        throw err
+      }
 
       const prKey = `${owner}/${repoName}#${prNumber}`
       const isRecheckRun = reviewedPRKeys.has(prKey)
@@ -337,7 +342,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (failedVendor) triggerSwitch(failedVendor, message, bLog)
         }
       } finally {
-        releasePRLock(owner, repoName, prNumber)
+        releasePRLock(owner, repoName, prNumber, params.headSha)
         rmSync(tmpDir, { force: true, recursive: true })
       }
     } catch (err: unknown) {

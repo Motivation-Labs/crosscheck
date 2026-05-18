@@ -323,6 +323,31 @@ These four items fix the two-phase model described in Design Principles. Any new
 
 ### 🔜 Next Up
 
+- [ ] **`conflict-resolve` workflow step — auto-resolve merge conflicts** — a new opt-in workflow step type that detects merge conflict markers in the cloned PR branch, uses Claude to resolve them, and pushes the result as a `[crosscheck]` commit. Runs before the review step so the reviewer always sees clean code. Repeats on subsequent pushes up to `max_rounds`. Not added to the default workflow; user must opt-in during `crosscheck onboard` after the pipeline-preset step.
+  - **User:** Anyone whose PRs frequently have merge conflicts that block review (e.g., long-lived feature branches, active rebases).
+  - **Acceptance Criteria:**
+    - New step type `'conflict-resolve'` added to `WorkflowStepSchema` enum and validated correctly.
+    - Step is placed FIRST in the generated workflow (before `review`) so the reviewer always sees conflict-free code.
+    - Step self-skips when no conflict markers are found (`git diff --name-only --diff-filter=U` returns empty).
+    - When conflicts are found: Claude resolves all `<<<<<<< / ======= / >>>>>>>` regions, applies edits using the same `<edit>` block format as the fix step, commits with `[crosscheck] resolve: ...` prefix, pushes to PR branch.
+    - `max_rounds: 3` default (hardcoded in template); caps how many times conflict-resolve can run per PR lifecycle.
+    - Fork PRs are skipped (cannot push to forks) with reason `'fork_pr'`.
+    - `MAX_CROSSCHECK_COMMITS` guard applies (same as fix step).
+    - Codex is not supported for conflict-resolve (same as fix); skips with reason `'codex_conflict_resolve_unsupported'`.
+    - `onboard` Step 7.7 — shown after pipeline preset (and after max-rounds if applicable). Prompt: "Auto-resolve merge conflicts?" with `[1] no (default)` / `[2] yes`. Default is no.
+    - `conflictResolve: true` in `OnboardDecisions` causes `buildWorkflowYaml` to prepend the `conflict-resolve` step.
+    - `detectConflictResolveEnabled(workflowDir)` reads the workflow and returns `true` when a `conflict-resolve` step is present.
+    - `applyOnboardConfig` regenerates workflow when conflict-resolve presence drifts from the user's choice.
+    - Step 10 summary shows `conflict-resolve  yes` when enabled.
+    - Board `renderFixSection` and `completePR` Fix section recognize `'conflict-resolve'` as a fix-type step (reuse `fixCount` slot; last-writer wins if both fix and conflict-resolve are in the workflow).
+  - **Technical Notes:**
+    - `src/reviewers/conflict-resolve.ts` — `findConflictedFiles(tmpDir)` + `runConflictResolveStep(tmpDir, prTitle, instructions)`. Reuses `applyEdit` from `fix.ts`. Prompt shows conflicted file content with markers, asks Claude to output `<edit>` blocks resolving each conflict.
+    - `src/lib/workflow.ts` — add `'conflict-resolve'` to `WorkflowStepSchema` type enum; add `DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS`.
+    - `src/lib/runner.ts` — add `exceedsMaxRounds` handling for `'conflict-resolve'`; add `else if (effectiveType === 'conflict-resolve')` block in `runWorkflow`.
+    - `src/lib/board.ts` — update `hasFixStep` checks to include `'conflict-resolve'`.
+    - `src/commands/onboard.ts` — add `promptConflictResolve`, `detectConflictResolveEnabled`; update `OnboardDecisions`, `buildWorkflowYaml`, `applyOnboardConfig`.
+  - **Tests Required:** `conflict-resolve: true` → workflow step count increases by 1 and first step type is `conflict-resolve`; re-run with `conflict-resolve: false` regenerates (step removed); `detectConflictResolveEnabled` returns correct values; `--yes` preserves existing setting.
+
 - [x] **Onboard — workflow, mode, and pipeline steps** — extend `crosscheck onboard` with interactive steps for review mode (cross-vendor vs single-vendor) and workflow pipeline (review-only, review→fix, review→fix→re-check). Mode step is shown only when both AI CLIs are authenticated; pipeline step always shown.
   - **User:** Anyone running `crosscheck onboard` for the first time, or re-running after installing a second AI CLI.
   - **Acceptance Criteria:**

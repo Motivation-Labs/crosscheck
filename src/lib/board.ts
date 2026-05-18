@@ -316,7 +316,7 @@ export class PRBoard {
 
     // line 2 — always shown: PR | CR | Fix pipeline summary
     const pipe = chalk.dim(' | ')
-    const hasFixStep = this.steps.some(s => s.type === 'fix')
+    const hasFixStep = this.steps.some(s => s.type === 'fix' || s.type === 'conflict-resolve')
 
     const prSection = slot.prLoc !== undefined
       ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
@@ -586,7 +586,7 @@ export class PRBoard {
 
   private renderFixSection(slot: PRSlot, frame: string): string {
     const t = this.theme
-    const hasFixStep = this.steps.some(s => s.type === 'fix')
+    const hasFixStep = this.steps.some(s => s.type === 'fix' || s.type === 'conflict-resolve')
     if (!hasFixStep) return `Fix ${t.dim('—')}`
     if (slot.phase === 'fixing') {
       return `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim('applying…')}`

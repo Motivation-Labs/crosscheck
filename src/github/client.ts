@@ -411,6 +411,7 @@ export async function postReviewComment(
   origin?: string,
   verdict?: string | null,
   replyToCommentId?: number,
+  isRecheck?: boolean,
 ): Promise<number> {
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
@@ -428,10 +429,12 @@ export async function postReviewComment(
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
   // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks.
-  // type= distinguishes reviews from rechecks so getLastCrossCheckCommentId can filter correctly.
-  const annotationParts = [`type=${replyToCommentId !== undefined ? 'recheck' : 'review'}`, `reviewer=${reviewer}`]
+  // type= comes from the step being posted (isRecheck), NOT from whether a backlink was resolved,
+  // so the annotation stays correct even when the prior-comment lookup fails.
+  // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
+  const annotationParts = [`type=${isRecheck ? 'recheck' : 'review'}`, `reviewer=${reviewer}`]
   if (origin) annotationParts.push(`origin=${origin}`)
-  if (verdict) annotationParts.push(`verdict=${verdict}`)
+  if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
   const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
 
   // Recheck: prepend a reference back to the original review so the thread is navigable

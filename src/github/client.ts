@@ -408,7 +408,7 @@ export async function postReviewComment(
   body: string,
   reviewer: string,
   brand: BrandOptions = {},
-  origin?: string,
+  origin: string = 'human',
   verdict?: string | null,
   replyToCommentId?: number,
   isRecheck?: boolean,
@@ -428,13 +428,14 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks.
-  // type= comes from the step being posted (isRecheck), NOT from whether a backlink was resolved,
-  // so the annotation stays correct even when the prior-comment lookup fails.
+  // Annotation tag for Phase 2 step 4 detection — matches the documented contract:
+  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> -->
+  // origin= is always present so scanners matching "crosscheck: origin=" reliably find it.
+  // type= is explicit from isRecheck (not inferred from backlink resolution).
   // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
-  const annotationParts = [`type=${isRecheck ? 'recheck' : 'review'}`, `reviewer=${reviewer}`]
-  if (origin) annotationParts.push(`origin=${origin}`)
+  const annotationParts = [`origin=${origin}`, `reviewer=${reviewer}`]
   if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
+  annotationParts.push(`type=${isRecheck ? 'recheck' : 'review'}`)
   const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
 
   // Recheck: prepend a reference back to the original review so the thread is navigable

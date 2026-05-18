@@ -263,6 +263,48 @@ export async function prHasCrossCheckComment(
   return false
 }
 
+// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment (not recheck, not fix_failed).
+// Used by recheck steps to link back to the original review that raised issues.
+// Matching rules (in priority order):
+//   1. New format: has <!-- crosscheck: type=review ... --> annotation
+//   2. Legacy format: has "### Code Review by" header but no recheck prefix (pre-annotation era)
+// Explicitly excluded: type=recheck annotations, fix_failed notifications.
+export async function getLastCrossCheckCommentId(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<number | undefined> {
+  let page = 1
+  let lastId: number | undefined
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ id: number; body: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      const body = comment.body
+      const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
+      if (annotationMatch) {
+        const attrs = annotationMatch[1]
+        // Skip fix_failed notifications and recheck-typed annotations
+        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck')) {
+          lastId = comment.id
+        }
+      } else if (body.includes('### Code Review by') && !body.startsWith('> Recheck of')) {
+        // Legacy: pre-annotation comment that is not a recheck
+        lastId = comment.id
+      }
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return lastId
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,
@@ -366,7 +408,11 @@ export async function postReviewComment(
   body: string,
   reviewer: string,
   brand: BrandOptions = {},
-): Promise<void> {
+  origin?: string,
+  verdict?: string | null,
+  replyToCommentId?: number,
+  isRecheck?: boolean,
+): Promise<number> {
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
   const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
@@ -382,10 +428,25 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  await octokit.rest.issues.createComment({
+  // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks.
+  // type= comes from the step being posted (isRecheck), NOT from whether a backlink was resolved,
+  // so the annotation stays correct even when the prior-comment lookup fails.
+  // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
+  const annotationParts = [`type=${isRecheck ? 'recheck' : 'review'}`, `reviewer=${reviewer}`]
+  if (origin) annotationParts.push(`origin=${origin}`)
+  if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
+  const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
+
+  // Recheck: prepend a reference back to the original review so the thread is navigable
+  const replyPrefix = replyToCommentId
+    ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
+    : ''
+
+  const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: customHeader + header + body + footer + customFooter,
+    body: customHeader + replyPrefix + header + body + footer + customFooter + annotationTag,
   })
+  return comment.id
 }

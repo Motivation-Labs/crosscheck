@@ -7,7 +7,7 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
-import { createGithubClient, postReviewComment } from '../github/client.js'
+import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -189,10 +189,23 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else {
         onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
-        await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
+        // For rechecks: look up the original review comment ID so the recheck
+        // can link back to it. Check in-run results first (single-run pipelines),
+        // then fall back to GitHub (cross-run: recheck triggered by a new push).
+        let priorReviewId: number | undefined
+        if (isRecheck) {
+          priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
+          if (priorReviewId === undefined) {
+            priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
+          }
+        }
+        const commentId = await postReviewComment(
+          octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
+          origin, verdict ?? undefined, priorReviewId, isRecheck,
+        )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
-        results[step.name] = { verdict, commentBody, commentUrl }
+        results[step.name] = { verdict, commentBody, commentUrl, commentId }
       }
 
     } else if (effectiveType === 'fix') {

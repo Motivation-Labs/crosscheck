@@ -97,6 +97,7 @@ export interface StepResult {
   verdict?: string | null
   commentBody?: string
   commentUrl?: string
+  commentId?: number
   applied_count?: number
   skipped?: boolean
 }

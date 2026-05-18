@@ -263,9 +263,12 @@ export async function prHasCrossCheckComment(
   return false
 }
 
-// Returns the GitHub comment ID of the most recent crosscheck review comment.
-// Used by recheck steps to link back to the original review comment that raised issues.
-// Matches on the annotation tag (new) or the "Code Review by" header (legacy).
+// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment (not recheck, not fix_failed).
+// Used by recheck steps to link back to the original review that raised issues.
+// Matching rules (in priority order):
+//   1. New format: has <!-- crosscheck: type=review ... --> annotation
+//   2. Legacy format: has "### Code Review by" header but no recheck prefix (pre-annotation era)
+// Explicitly excluded: type=recheck annotations, fix_failed notifications.
 export async function getLastCrossCheckCommentId(
   owner: string,
   repo: string,
@@ -283,7 +286,16 @@ export async function getLastCrossCheckCommentId(
     const data = await res.json() as Array<{ id: number; body: string }>
     if (data.length === 0) break
     for (const comment of data) {
-      if (comment.body.includes('<!-- crosscheck:') || comment.body.includes('### Code Review by')) {
+      const body = comment.body
+      const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
+      if (annotationMatch) {
+        const attrs = annotationMatch[1]
+        // Skip fix_failed notifications and recheck-typed annotations
+        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck')) {
+          lastId = comment.id
+        }
+      } else if (body.includes('### Code Review by') && !body.startsWith('> Recheck of')) {
+        // Legacy: pre-annotation comment that is not a recheck
         lastId = comment.id
       }
     }
@@ -415,8 +427,9 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks
-  const annotationParts = [`reviewer=${reviewer}`]
+  // Annotation tag for Phase 2 step 4 detection — parsed by detector.ts to route future rechecks.
+  // type= distinguishes reviews from rechecks so getLastCrossCheckCommentId can filter correctly.
+  const annotationParts = [`type=${replyToCommentId !== undefined ? 'recheck' : 'review'}`, `reviewer=${reviewer}`]
   if (origin) annotationParts.push(`origin=${origin}`)
   if (verdict) annotationParts.push(`verdict=${verdict}`)
   const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`

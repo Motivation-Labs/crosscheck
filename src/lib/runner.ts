@@ -6,6 +6,7 @@ import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
+import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
@@ -38,6 +39,7 @@ export function exceedsMaxRounds(
 ): boolean {
   if (round === undefined) return false
   if (effectiveType === 'fix') return round > maxRounds
+  if (effectiveType === 'conflict-resolve') return round > maxRounds
   // Recheck step from the workflow (not a review coerced to recheck) is gated
   if (effectiveType === 'recheck' && originalStepType !== 'review') return round > maxRounds
   return false
@@ -376,6 +378,74 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
       }
+
+    } else if (effectiveType === 'conflict-resolve') {
+      const skipConflictResolve = (reason: string) => {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+        results[step.name] = { skipped: true }
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
+      }
+
+      if (ctx.dryRun) { skipConflictResolve('dry_run'); continue }
+
+      const conflictedFiles = findConflictedFiles(tmpDir)
+      if (conflictedFiles.length === 0) {
+        skipConflictResolve('no_conflicts')
+        continue
+      }
+
+      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (!vendor) { skipConflictResolve('no_vendor'); continue }
+      if (vendor === 'codex') { skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+
+      const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
+      if (isFork) { skipConflictResolve('fork_pr'); continue }
+
+      let existingCount = 0
+      try {
+        const gitLog = execSync('git log --oneline', { cwd: tmpDir, encoding: 'utf8' })
+        existingCount = gitLog.split('\n').filter(l => l.includes('[crosscheck]')).length
+      } catch { /* ignore */ }
+      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))
+        skipConflictResolve('commit_limit_reached')
+        continue
+      }
+
+      onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
+      let appliedCount = 0
+      let resolveTokensUsed: number | undefined
+
+      try {
+        ;({ appliedCount, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
+          tmpDir, pr.title, step.instructions ?? '',
+        ))
+      } catch (err) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
+        skipConflictResolve('resolve_error')
+        continue
+      }
+
+      if (appliedCount === 0) {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
+        results[step.name] = { applied_count: 0 }
+        continue
+      }
+
+      execSync('git add -A', { cwd: tmpDir })
+      execSync(
+        `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
+        { cwd: tmpDir },
+      )
+      const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+      execSync(`git push origin HEAD:${pr.head.ref}`, {
+        cwd: tmpDir,
+        env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+      })
+      ctx.crosscheckShas.add(newSha)
+      onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
+      results[step.name] = { applied_count: appliedCount }
     }
   }
 

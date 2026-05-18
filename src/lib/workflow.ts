@@ -7,7 +7,7 @@ import { z } from 'zod'
 export const WorkflowStepSchema = z.object({
   name: z.string(),
   // 'address' is the legacy name — normalized to 'fix' at parse time for backward compat
-  type: z.enum(['review', 'fix', 'recheck', 'address']).transform(t => t === 'address' ? 'fix' : t) as z.ZodType<'review' | 'fix' | 'recheck'>,
+  type: z.enum(['review', 'fix', 'recheck', 'address', 'conflict-resolve']).transform(t => t === 'address' ? 'fix' : t) as z.ZodType<'review' | 'fix' | 'recheck' | 'conflict-resolve'>,
   reviewer: z.enum(['auto', 'claude', 'codex', 'origin']).default('auto'),
   when: z.string().optional(),
   max_rounds: z.number().int().positive().default(1),
@@ -51,6 +51,13 @@ export const DEFAULT_RECHECK_INSTRUCTIONS = [
   'If all issues are resolved, output VERDICT: APPROVE.',
   'If issues remain, repeat the original verdict (NEEDS WORK or BLOCK) and list what is still outstanding.',
   'Do not flag new issues — focus only on resolution of the originals.',
+].join('\n')
+
+export const DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS = [
+  'Resolve all merge conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch).',
+  'Keep meaningful changes from both sides when they do not contradict.',
+  'When both sides modify the same line, prefer the incoming branch changes unless they break existing logic.',
+  'Do not change any code outside of conflict regions.',
 ].join('\n')
 
 // Default pipeline: review → fix issues (fix skipped when verdict is APPROVE).

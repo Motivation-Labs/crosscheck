@@ -322,8 +322,13 @@ export class PRBoard {
       ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
       : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
+    const round = slot.round ?? 1
+
     let crSection: string
-    if (verdict !== null) {
+    if (round >= 2 && slot.verdict === undefined) {
+      // CR ran in a prior round — show as static completed, not as error state
+      crSection = `CR ${makeBar(8, 8, t.dim, t.dim)} ${t.dim('·')}`
+    } else if (verdict !== null) {
       const crFill = this.crFillFn(verdict)
       const crLabel = this.crLabelFn(verdict)
       const tokRaw = fmtTokensRaw(slot.crTokens)
@@ -335,8 +340,6 @@ export class PRBoard {
     } else {
       crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
     }
-
-    const round = slot.round ?? 1
 
     // Round 2+: collapse Fix + Recheck into a compact "N ROUNDS" counter
     if (round >= 2) {
@@ -559,6 +562,10 @@ export class PRBoard {
     const t = this.theme
     if (slot.phase === 'reviewing') {
       return `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.spinner(frame)} ${t.dim('reviewing…')}`
+    }
+    // Round 2+: CR ran in a prior round — show as static completed, not as queued/error
+    if ((slot.round ?? 1) >= 2 && slot.verdict === undefined) {
+      return `CR ${makeBar(8, 8, t.dim, t.dim)} ${t.dim('·')}`
     }
     if (slot.verdict === undefined) {
       return `CR ${makeBar(0, 8, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`

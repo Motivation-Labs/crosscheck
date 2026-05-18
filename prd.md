@@ -283,6 +283,8 @@ These four items fix the two-phase model described in Design Principles. Any new
 
 - [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
 
+- [x] **PR Stripe: CR section shows `⚠ no verdict` for round 2+ runs** — fixed. Root cause: `completePR` computed `crSection` before extracting `slot.round`, so the round 2+ guard never fired. For recheck rounds, the review step is coerced to a recheck step, meaning `slot.verdict` is always `undefined` in the new slot; `undefined ?? null` fell into the `⚠ no verdict` branch. Also, `renderCRSection` had no round awareness, showing "queued" during live rendering for round 2+ slots. Fix: move `round` extraction above `crSection` in `completePR`; add `round >= 2 && slot.verdict === undefined` guard in both `completePR` and `renderCRSection` to render a static "prior round" dim bar (`████████ ·`) instead of an error or queued state.
+
 - [x] **`crosscheck onboard` destroys existing config customizations on re-run** — fixed in PR #74. All write logic extracted into `applyOnboardConfig`; routing.* fields now initialised on first run only and preserved exactly on re-runs; workflow.yml only written when it doesn't already exist and only deleted when the pipeline explicitly changes away from recheck.
 
 - [x] **`crosscheck onboard` hardcodes `author_routes` without asking — issue #121** — fixed in PR #125. Onboard now asks the user "Which AI do you primarily use?" as Step 5 (cross-vendor + personal mode only). The picker has three options; default is `[3] both`.

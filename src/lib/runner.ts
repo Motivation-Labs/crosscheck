@@ -388,18 +388,37 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (ctx.dryRun) { skipConflictResolve('dry_run'); continue }
 
+      // P1: The clone only has the PR head checked out — no unmerged index entries exist
+      // until we actually attempt the merge. Attempt the merge first; if it succeeds
+      // cleanly (no conflicts) abort it and skip. If it fails, the working tree now has
+      // real conflict markers and UU entries that findConflictedFiles can detect.
+      let hasMergeConflicts = false
+      try {
+        execSync(`git merge --no-commit origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Clean merge — undo the staged merge state and skip this step
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+      } catch {
+        hasMergeConflicts = true
+      }
+
+      if (!hasMergeConflicts) {
+        skipConflictResolve('no_conflicts')
+        continue
+      }
+
       const conflictedFiles = findConflictedFiles(tmpDir)
       if (conflictedFiles.length === 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         skipConflictResolve('no_conflicts')
         continue
       }
 
       const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
-      if (!vendor) { skipConflictResolve('no_vendor'); continue }
-      if (vendor === 'codex') { skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+      if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
+      if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
-      if (isFork) { skipConflictResolve('fork_pr'); continue }
+      if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
       let existingCount = 0
       try {
@@ -407,6 +426,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         existingCount = gitLog.split('\n').filter(l => l.includes('[crosscheck]')).length
       } catch { /* ignore */ }
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))
         skipConflictResolve('commit_limit_reached')
         continue
@@ -422,13 +442,33 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         skipConflictResolve('resolve_error')
         continue
       }
 
       if (appliedCount === 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
         results[step.name] = { applied_count: 0 }
+        continue
+      }
+
+      // P2: Verify every conflict region was resolved before committing. git grep
+      // scans working-tree content; any remaining <<<<<<< means the resolution is
+      // incomplete — committing those markers would corrupt the pushed branch.
+      let hasRemainingMarkers = false
+      try {
+        execSync('git grep -q -l "<<<<<<< "', { cwd: tmpDir, stdio: 'pipe' })
+        hasRemainingMarkers = true
+      } catch {
+        hasRemainingMarkers = false
+      }
+      if (hasRemainingMarkers) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: not all conflicts resolved — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber })
+        skipConflictResolve('incomplete_resolution')
         continue
       }
 

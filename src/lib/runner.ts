@@ -135,6 +135,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -144,6 +145,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -387,6 +389,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       if (ctx.dryRun) { skipConflictResolve('dry_run'); continue }
+
+      // Fast pre-check: GitHub's mergeable field tells us if the PR has conflicts without
+      // cloning. true = no conflicts (skip immediately); false = conflicts confirmed (proceed);
+      // null = GitHub is still computing — fall through to the git merge probe.
+      {
+        const octokit = createGithubClient(token)
+        const { data: prInfo } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+        if (prInfo.mergeable === true) {
+          skipConflictResolve('no_conflicts')
+          continue
+        }
+      }
 
       // P1: The clone only has the PR head checked out — no unmerged index entries exist
       // until we actually attempt the merge. Attempt the merge first; if it succeeds

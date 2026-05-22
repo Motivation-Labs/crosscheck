@@ -51,6 +51,11 @@ export const RoutingConfigSchema = z.object({
   // Maps GitHub login → vendor origin.
   // e.g. { beingzy: 'claude' } means PRs from beingzy are treated as Claude-authored
   // and will be reviewed by Codex, even without any other attribution signal.
+  //
+  // NOTE: in cross-vendor mode with BOTH vendors enabled, author_routes is bypassed
+  // and detection falls through to `fallback_reviewer` instead. A static author→vendor
+  // map would silently mis-route PRs when the author switches between agents — set
+  // `fallback_reviewer` to handle this case explicitly.
   author_routes: z.record(z.enum(['claude', 'codex'])).default({}),
   // When origin detection cannot determine a vendor (origin: human), use this reviewer
   // instead of skipping the PR.

@@ -562,6 +562,27 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
     console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
   }
+
+  // Warn when author_routes will be silently bypassed (cross-vendor + both vendors enabled)
+  // so users understand why their configured mapping isn't applying.
+  const bothVendorsEnabled = config.mode === 'cross-vendor'
+    && config.vendors.claude.enabled
+    && config.vendors.codex.enabled
+  const routedAllowedAuthors = bothVendorsEnabled
+    ? Object.entries(config.routing.author_routes).filter(([login]) =>
+        config.routing.allowed_authors.length === 0 || config.routing.allowed_authors.includes(login)
+      )
+    : []
+  if (routedAllowedAuthors.length > 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('author_routes bypassed in cross-vendor mode (both vendors enabled).')}`)
+    for (const [login, vendor] of routedAllowedAuthors) {
+      console.log(`     ${chalk.dim(`${login} → ${vendor}`)}`)
+    }
+    console.log(`     ${chalk.dim('PRs without attribution markers (body / Co-Authored-By / branch prefix)')}`)
+    console.log(`     ${chalk.dim('fall through to')} ${chalk.cyan(`fallback_reviewer: ${config.routing.fallback_reviewer ?? 'skip'}`)} ${chalk.dim('instead.')}`)
+  }
+
   console.log()
 
   // Board starts after the banner — all output below is live-updated

@@ -51,11 +51,63 @@ export function findConflictedFiles(tmpDir: string): string[] {
   }
 }
 
+// Extract every conflict region in a file with a few context lines on each side.
+// Slicing from the file prefix instead would hide conflicts that appear past the
+// budget, so the resolver couldn't produce a matching <old> block.
+const CONTEXT_LINES = 6
+const PER_FILE_MAX = 12_000
+
+export function extractConflictWindows(content: string): string {
+  const lines = content.split('\n')
+  const starts: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('<<<<<<<')) starts.push(i)
+  }
+  if (starts.length === 0) return ''
+
+  const ranges: Array<[number, number]> = []
+  for (const start of starts) {
+    let end = start
+    for (let i = start; i < lines.length; i++) {
+      if (lines[i].startsWith('>>>>>>>')) { end = i; break }
+      end = i
+    }
+    const from = Math.max(0, start - CONTEXT_LINES)
+    const to = Math.min(lines.length - 1, end + CONTEXT_LINES)
+    const prev = ranges[ranges.length - 1]
+    if (prev && from <= prev[1] + 1) {
+      prev[1] = Math.max(prev[1], to)
+    } else {
+      ranges.push([from, to])
+    }
+  }
+
+  const chunks: string[] = []
+  let total = 0
+  for (const [from, to] of ranges) {
+    const block = lines.slice(from, to + 1).join('\n')
+    const header = `... lines ${from + 1}-${to + 1} ...`
+    const piece = `${header}\n${block}`
+    if (total + piece.length > PER_FILE_MAX) {
+      chunks.push('... (remaining conflict regions truncated)')
+      break
+    }
+    chunks.push(piece)
+    total += piece.length
+  }
+  return chunks.join('\n\n')
+}
+
 function buildConflictedFilesBlock(tmpDir: string, filePaths: string[]): string {
   return filePaths.map(f => {
     try {
-      const content = readFileSync(join(tmpDir, f), 'utf8').slice(0, 4000)
-      return `### ${f}\n\`\`\`\n${content}\n\`\`\``
+      const content = readFileSync(join(tmpDir, f), 'utf8')
+      const windowed = extractConflictWindows(content)
+      // No textual conflict markers (binary / modify-delete) — surface the file by name only.
+      if (!windowed) {
+        return `### ${f}\n(no textual conflict markers — likely a non-text conflict; skip)`
+      }
+      return `### ${f}\n\`\`\`\n${windowed}\n\`\`\``
     } catch {
       return `### ${f}\n(could not read file)`
     }
@@ -66,9 +118,9 @@ export async function runConflictResolveStep(
   tmpDir: string,
   prTitle: string,
   instructions: string,
-): Promise<{ appliedCount: number; tokensUsed?: number }> {
+): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
   const conflictedFiles = findConflictedFiles(tmpDir)
-  if (conflictedFiles.length === 0) return { appliedCount: 0 }
+  if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
 
   const filesBlock = buildConflictedFilesBlock(tmpDir, conflictedFiles)
   const prompt = PROMPT_TEMPLATE
@@ -102,7 +154,7 @@ export async function runConflictResolveStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, resolvedPaths: [], tokensUsed }
 
   let appliedCount = 0
   const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
@@ -141,14 +193,16 @@ export async function runConflictResolveStep(
 
   const { writeFileSync, mkdirSync } = await import('fs')
   const { dirname } = await import('path')
+  const resolvedPaths: string[] = []
   for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
     try {
       mkdirSync(dirname(absPath), { recursive: true })
       writeFileSync(absPath, content)
       appliedCount++
+      resolvedPaths.push(filePath)
     } catch { /* skip unwritable paths */ }
   }
 
-  return { appliedCount, tokensUsed }
+  return { appliedCount, resolvedPaths, tokensUsed }
 }

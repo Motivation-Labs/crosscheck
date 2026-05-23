@@ -135,6 +135,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -144,6 +145,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -388,6 +390,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (ctx.dryRun) { skipConflictResolve('dry_run'); continue }
 
+      // Fast pre-check: GitHub's mergeable field tells us if the PR has conflicts without
+      // cloning. true = no conflicts (skip immediately); false = conflicts confirmed (proceed);
+      // null = GitHub is still computing — fall through to the git merge probe.
+      {
+        const octokit = createGithubClient(token)
+        const { data: prInfo } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+        if (prInfo.mergeable === true) {
+          skipConflictResolve('no_conflicts')
+          continue
+        }
+      }
+
       // P1: The clone only has the PR head checked out — no unmerged index entries exist
       // until we actually attempt the merge. Attempt the merge first; if it succeeds
       // cleanly (no conflicts) abort it and skip. If it fails, the working tree now has
@@ -434,10 +448,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
       let appliedCount = 0
+      let resolvedPaths: string[] = []
       let resolveTokensUsed: number | undefined
 
       try {
-        ;({ appliedCount, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
+        ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
           tmpDir, pr.title, step.instructions ?? '',
         ))
       } catch (err) {
@@ -455,11 +470,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       // P2: Verify every conflict region was resolved before committing. git grep
-      // scans working-tree content; any remaining <<<<<<< means the resolution is
-      // incomplete — committing those markers would corrupt the pushed branch.
+      // scans working-tree content for ANY conflict marker variant — a partial fix
+      // that strips <<<<<<< but leaves ======= / >>>>>>> behind must also be rejected,
+      // since those markers would land on the pushed branch verbatim.
       let hasRemainingMarkers = false
       try {
-        execSync('git grep -q -l "<<<<<<< "', { cwd: tmpDir, stdio: 'pipe' })
+        execSync('git grep -q -l -E "^(<<<<<<<|=======|>>>>>>>)( |$)"', { cwd: tmpDir, stdio: 'pipe' })
         hasRemainingMarkers = true
       } catch {
         hasRemainingMarkers = false
@@ -472,7 +488,32 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      execSync('git add -A', { cwd: tmpDir })
+      // Stage only files the resolver actually rewrote — `git add -A` would
+      // otherwise silently stage non-text conflicts (binary, modify/delete) using
+      // the worktree side as an un-reviewed resolution. Staging also has to come
+      // BEFORE the unmerged-path check below: git keeps a path in the unmerged
+      // index until it is explicitly added, so checking earlier would always fail
+      // on the resolved files themselves.
+      for (const p of resolvedPaths) {
+        try { execSync(`git add -- ${JSON.stringify(p)}`, { cwd: tmpDir }) } catch { /* skip */ }
+      }
+
+      // After staging the resolved files, anything still in U state is a conflict
+      // the resolver did not handle (binary, modify/delete, or a failed edit).
+      // Abort rather than commit a partial merge.
+      let unmergedPaths: string[] = []
+      try {
+        const out = execSync('git diff --name-only --diff-filter=U', { cwd: tmpDir, encoding: 'utf8' })
+        unmergedPaths = out.trim().split('\n').filter(Boolean)
+      } catch { /* ignore */ }
+      if (unmergedPaths.length > 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain after resolve — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
+        skipConflictResolve('unmerged_paths')
+        continue
+      }
+
       execSync(
         `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
         { cwd: tmpDir },

@@ -472,13 +472,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       // P2: Verify every conflict region was resolved before committing. Scope the
-      // check to the originally-conflicted files only — a repo-wide grep would
-      // false-positive on legitimate "=======" lines in docs (e.g. Markdown setext
-      // headings) and abort valid resolutions. Read working-tree content directly
-      // so untrusted PR-controlled paths never reach a shell.
+      // check to the union of (originally-conflicted files) ∪ (files the resolver
+      // actually rewrote) — a repo-wide grep would false-positive on legitimate
+      // "=======" lines in docs (e.g. Markdown setext headings) and abort valid
+      // resolutions, but we still need to cover any path the resolver touched in
+      // case it ever edits outside the original conflict set. Read working-tree
+      // content directly so untrusted PR-controlled paths never reach a shell.
       const MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)( |$)/m
+      const pathsToScan = Array.from(new Set([...conflictedFiles, ...resolvedPaths]))
       const filesWithMarkers: string[] = []
-      for (const f of conflictedFiles) {
+      for (const f of pathsToScan) {
         try {
           const content = readFileSync(join(tmpDir, f), 'utf8')
           if (MARKER_RE.test(content)) filesWithMarkers.push(f)

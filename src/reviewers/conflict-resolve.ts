@@ -156,23 +156,10 @@ export async function runConflictResolveStep(
 
   if (!output || output === 'NO_CHANGES') return { appliedCount: 0, resolvedPaths: [], tokensUsed }
 
-  let appliedCount = 0
-  const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
   const fileEdits = new Map<string, string>()
   const fileCache = new Map<string, string>()
 
-  let match: RegExpExecArray | null
-  while ((match = editRegex.exec(output)) !== null) {
-    const [, filePath, body] = match
-    if (filePath.includes('..') || filePath.startsWith('/')) continue
-
-    const oldMatch = body.match(/<old>([\s\S]*?)<\/old>/)
-    const newMatch = body.match(/<new>([\s\S]*?)<\/new>/)
-    if (!oldMatch || !newMatch) continue
-
-    const oldText = oldMatch[1].replace(/^\n/, '').replace(/\n$/, '')
-    const newText = newMatch[1].replace(/^\n/, '').replace(/\n$/, '')
-
+  for (const { filePath, oldText, newText } of parseResolverEdits(output, conflictedFiles)) {
     const absPath = join(tmpDir, filePath)
     let current = fileEdits.get(filePath) ?? fileCache.get(filePath)
     if (current === undefined) {
@@ -183,9 +170,6 @@ export async function runConflictResolveStep(
         continue
       }
     }
-
-    if (oldText === '') continue
-
     const updated = applyEdit(current, oldText, newText)
     if (updated === null) continue
     fileEdits.set(filePath, updated)
@@ -193,6 +177,7 @@ export async function runConflictResolveStep(
 
   const { writeFileSync, mkdirSync } = await import('fs')
   const { dirname } = await import('path')
+  let appliedCount = 0
   const resolvedPaths: string[] = []
   for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
@@ -205,4 +190,38 @@ export async function runConflictResolveStep(
   }
 
   return { appliedCount, resolvedPaths, tokensUsed }
+}
+
+export interface ResolverEdit {
+  filePath: string
+  oldText: string
+  newText: string
+}
+
+// Parses <edit path="…"><old>…</old><new>…</new></edit> blocks from resolver output.
+// Filters out anything that escapes tmpDir (`..`, absolute paths) or targets a file
+// that wasn't in the original unmerged set — the resolver must only touch the files
+// it was asked about, otherwise a buggy or prompt-injected response could land
+// arbitrary content (including unresolved markers) in unrelated tracked files.
+export function parseResolverEdits(output: string, conflictedFiles: string[]): ResolverEdit[] {
+  const conflictedSet = new Set(conflictedFiles)
+  const edits: ResolverEdit[] = []
+  const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
+  let match: RegExpExecArray | null
+  while ((match = editRegex.exec(output)) !== null) {
+    const [, filePath, body] = match
+    if (filePath.includes('..') || filePath.startsWith('/')) continue
+    if (!conflictedSet.has(filePath)) continue
+
+    const oldMatch = body.match(/<old>([\s\S]*?)<\/old>/)
+    const newMatch = body.match(/<new>([\s\S]*?)<\/new>/)
+    if (!oldMatch || !newMatch) continue
+
+    const oldText = oldMatch[1].replace(/^\n/, '').replace(/\n$/, '')
+    const newText = newMatch[1].replace(/^\n/, '').replace(/\n$/, '')
+    if (oldText === '') continue
+
+    edits.push({ filePath, oldText, newText })
+  }
+  return edits
 }

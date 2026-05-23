@@ -1,4 +1,6 @@
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import chalk from 'chalk'
 import type { Config } from '../config/schema.js'
 import type { PREvent } from '../github/webhook.js'
@@ -469,21 +471,23 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // P2: Verify every conflict region was resolved before committing. git grep
-      // scans working-tree content for ANY conflict marker variant — a partial fix
-      // that strips <<<<<<< but leaves ======= / >>>>>>> behind must also be rejected,
-      // since those markers would land on the pushed branch verbatim.
-      let hasRemainingMarkers = false
-      try {
-        execSync('git grep -q -l -E "^(<<<<<<<|=======|>>>>>>>)( |$)"', { cwd: tmpDir, stdio: 'pipe' })
-        hasRemainingMarkers = true
-      } catch {
-        hasRemainingMarkers = false
+      // P2: Verify every conflict region was resolved before committing. Scope the
+      // check to the originally-conflicted files only — a repo-wide grep would
+      // false-positive on legitimate "=======" lines in docs (e.g. Markdown setext
+      // headings) and abort valid resolutions. Read working-tree content directly
+      // so untrusted PR-controlled paths never reach a shell.
+      const MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)( |$)/m
+      const filesWithMarkers: string[] = []
+      for (const f of conflictedFiles) {
+        try {
+          const content = readFileSync(join(tmpDir, f), 'utf8')
+          if (MARKER_RE.test(content)) filesWithMarkers.push(f)
+        } catch { /* unreadable (deleted side of modify/delete) — caught by U-filter below */ }
       }
-      if (hasRemainingMarkers) {
+      if (filesWithMarkers.length > 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
-        log(chalk.yellow(`⚠  PR #${prNumber}: not all conflicts resolved — skipping commit`))
-        fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber })
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${filesWithMarkers.length} file(s) still contain conflict markers — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber, paths: filesWithMarkers })
         skipConflictResolve('incomplete_resolution')
         continue
       }
@@ -493,9 +497,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // the worktree side as an un-reviewed resolution. Staging also has to come
       // BEFORE the unmerged-path check below: git keeps a path in the unmerged
       // index until it is explicitly added, so checking earlier would always fail
-      // on the resolved files themselves.
+      // on the resolved files themselves. Use execFileSync (no shell) because
+      // resolvedPaths is derived from model output and PR-controlled filenames.
       for (const p of resolvedPaths) {
-        try { execSync(`git add -- ${JSON.stringify(p)}`, { cwd: tmpDir }) } catch { /* skip */ }
+        try {
+          execFileSync('git', ['add', '--', p], { cwd: tmpDir, stdio: 'pipe' })
+        } catch { /* skip */ }
       }
 
       // After staging the resolved files, anything still in U state is a conflict

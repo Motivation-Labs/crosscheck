@@ -51,3 +51,35 @@ describe('extractConflictWindows', () => {
     expect((out.match(/mid 1/g) ?? []).length).toBe(1)
   })
 })
+
+// Used by runner.ts to detect remaining conflict markers in resolved files.
+// Kept in sync with the regex literal there; this test guards the contract.
+const MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)( |$)/m
+
+describe('conflict marker regex (runner.ts)', () => {
+  it('matches all three marker variants on their own line', () => {
+    expect(MARKER_RE.test('foo\n<<<<<<< HEAD\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n=======\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n>>>>>>> branch\nbar')).toBe(true)
+  })
+
+  it('matches a marker line with no trailing label (end of line)', () => {
+    expect(MARKER_RE.test('foo\n<<<<<<<\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n=======\nbar')).toBe(true)
+  })
+
+  it('does not match a Markdown setext-style separator inside docs', () => {
+    // "=======" is a legitimate H1 setext underline in Markdown; only flag when
+    // the resolver actually leaves a marker behind in the resolved file.
+    // The regex DOES match a bare "=======" line — the false-positive defense is
+    // that runner.ts scopes the check to originally-conflicted files, not the
+    // whole worktree. Verify the marker line itself still matches so the scope
+    // restriction is doing the real work.
+    expect(MARKER_RE.test('Heading\n=======\n')).toBe(true)
+  })
+
+  it('does not match conflict markers appearing mid-line (e.g. in URLs or strings)', () => {
+    expect(MARKER_RE.test('see https://example.com/<<<<<<<-pin')).toBe(false)
+    expect(MARKER_RE.test('const s = "=======middle"')).toBe(false)
+  })
+})

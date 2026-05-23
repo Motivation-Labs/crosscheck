@@ -44,6 +44,15 @@ export function detectOriginFromBranch(headRef: string, config: Config): PROrigi
 
 // Full detection chain: body → commits → branch → author_routes → human
 // API failure on the commits fetch is non-fatal; falls through to branch check.
+//
+// author_routes semantics differ by mode:
+//   - single-vendor mode: applies normally (only one vendor reviews anyway, so a wrong
+//     guess just means an unwanted review, never a wrong-vendor review).
+//   - cross-vendor mode with both vendors enabled: author_routes is demoted — when the
+//     user actively uses multiple agents, a static author→vendor map will route the
+//     other agent's PRs to the wrong reviewer. We fall through to fallback_reviewer
+//     instead, which can be set to a single vendor or 'skip' to handle this case
+//     explicitly.
 export async function detectOriginFull(
   prBody: string,
   headRef: string,
@@ -67,7 +76,15 @@ export async function detectOriginFull(
   if (fromBranch !== null) return { origin: fromBranch, method: 'branch' }
 
   if (author && config.routing.author_routes[author]) {
-    return { origin: config.routing.author_routes[author], method: 'author_routes' }
+    const bothEnabled = config.mode === 'cross-vendor'
+      && config.vendors.claude.enabled
+      && config.vendors.codex.enabled
+    if (!bothEnabled) {
+      return { origin: config.routing.author_routes[author], method: 'author_routes' }
+    }
+    // Cross-vendor with both vendors enabled: log the bypass so users can spot it
+    // in logs without changing reviewer selection silently.
+    return { origin: 'human', method: 'author_routes_bypassed' }
   }
 
   return { origin: 'human', method: 'none' }

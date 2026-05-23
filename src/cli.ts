@@ -71,16 +71,18 @@ program
   .description('Manually trigger a review for a single PR URL')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses auto-detection)')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string }) => void runReview(prUrl, opts.config, opts.reviewer))
+  .option('--vendor <vendor>', 'alias for --reviewer')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string }) => void runReview(prUrl, opts.config, opts.reviewer ?? opts.vendor))
 
 program
   .command('run <pr-url>')
   .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
+  .option('--vendor <vendor>', 'alias for --reviewer')
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, opts))
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
 
 program
   .command('status')

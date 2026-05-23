@@ -101,9 +101,14 @@ routing:
   #   - my-org-bot       # a dedicated bot account
 
   # Author-based routing fallback — maps GitHub login → vendor origin.
-  # Used when no body pattern matches. Lets you skip the attribution footer requirement.
+  # Used when no body / commit / branch pattern matches. Lets you skip the attribution
+  # footer requirement when an author consistently uses a single agent.
   #   beingzy: claude    → PRs from beingzy treated as Claude-authored → Codex reviews them
   #   my-bot: codex      → PRs from my-bot treated as Codex-authored → Claude reviews them
+  # NOTE: in `mode: cross-vendor` with BOTH vendors enabled, this map is bypassed —
+  # if the same author commits via both agents, a static route is structurally wrong.
+  # In that case, rely on attribution detection (body / commits / branch) and
+  # `fallback_reviewer` below for PRs with no attribution markers.
   # author_routes:
   #   beingzy: claude
 

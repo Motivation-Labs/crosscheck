@@ -118,9 +118,9 @@ export async function runConflictResolveStep(
   tmpDir: string,
   prTitle: string,
   instructions: string,
-): Promise<{ appliedCount: number; tokensUsed?: number }> {
+): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
   const conflictedFiles = findConflictedFiles(tmpDir)
-  if (conflictedFiles.length === 0) return { appliedCount: 0 }
+  if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
 
   const filesBlock = buildConflictedFilesBlock(tmpDir, conflictedFiles)
   const prompt = PROMPT_TEMPLATE
@@ -154,7 +154,7 @@ export async function runConflictResolveStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, resolvedPaths: [], tokensUsed }
 
   let appliedCount = 0
   const editRegex = /<edit path="([^"]+)">([\s\S]*?)<\/edit>/g
@@ -193,14 +193,16 @@ export async function runConflictResolveStep(
 
   const { writeFileSync, mkdirSync } = await import('fs')
   const { dirname } = await import('path')
+  const resolvedPaths: string[] = []
   for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
     try {
       mkdirSync(dirname(absPath), { recursive: true })
       writeFileSync(absPath, content)
       appliedCount++
+      resolvedPaths.push(filePath)
     } catch { /* skip unwritable paths */ }
   }
 
-  return { appliedCount, tokensUsed }
+  return { appliedCount, resolvedPaths, tokensUsed }
 }

@@ -448,10 +448,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
       let appliedCount = 0
+      let resolvedPaths: string[] = []
       let resolveTokensUsed: number | undefined
 
       try {
-        ;({ appliedCount, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
+        ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
           tmpDir, pr.title, step.instructions ?? '',
         ))
       } catch (err) {
@@ -487,9 +488,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // P2: refuse to commit if any unmerged path remains in the index. `git add -A`
-      // would otherwise stage non-text conflicts (binary, modify/delete) using the
-      // current worktree side, silently picking a resolution that was never reviewed.
+      // Stage only files the resolver actually rewrote — `git add -A` would
+      // otherwise silently stage non-text conflicts (binary, modify/delete) using
+      // the worktree side as an un-reviewed resolution. Staging also has to come
+      // BEFORE the unmerged-path check below: git keeps a path in the unmerged
+      // index until it is explicitly added, so checking earlier would always fail
+      // on the resolved files themselves.
+      for (const p of resolvedPaths) {
+        try { execSync(`git add -- ${JSON.stringify(p)}`, { cwd: tmpDir }) } catch { /* skip */ }
+      }
+
+      // After staging the resolved files, anything still in U state is a conflict
+      // the resolver did not handle (binary, modify/delete, or a failed edit).
+      // Abort rather than commit a partial merge.
       let unmergedPaths: string[] = []
       try {
         const out = execSync('git diff --name-only --diff-filter=U', { cwd: tmpDir, encoding: 'utf8' })
@@ -497,13 +508,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } catch { /* ignore */ }
       if (unmergedPaths.length > 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain (likely non-text conflict) — skipping commit`))
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain after resolve — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
         skipConflictResolve('unmerged_paths')
         continue
       }
 
-      execSync('git add -A', { cwd: tmpDir })
       execSync(
         `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
         { cwd: tmpDir },

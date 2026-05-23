@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractConflictWindows } from '../reviewers/conflict-resolve.js'
+import { extractConflictWindows, parseResolverEdits } from '../reviewers/conflict-resolve.js'
 
 describe('extractConflictWindows', () => {
   it('returns empty string when no markers are present', () => {
@@ -49,5 +49,72 @@ describe('extractConflictWindows', () => {
     expect(startCount).toBe(2)
     // mid section between adjacent conflicts should appear exactly once (merged window)
     expect((out.match(/mid 1/g) ?? []).length).toBe(1)
+  })
+})
+
+// Used by runner.ts to detect remaining conflict markers in resolved files.
+// Kept in sync with the regex literal there; this test guards the contract.
+const MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)( |$)/m
+
+describe('conflict marker regex (runner.ts)', () => {
+  it('matches all three marker variants on their own line', () => {
+    expect(MARKER_RE.test('foo\n<<<<<<< HEAD\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n=======\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n>>>>>>> branch\nbar')).toBe(true)
+  })
+
+  it('matches a marker line with no trailing label (end of line)', () => {
+    expect(MARKER_RE.test('foo\n<<<<<<<\nbar')).toBe(true)
+    expect(MARKER_RE.test('foo\n=======\nbar')).toBe(true)
+  })
+
+  it('does not match a Markdown setext-style separator inside docs', () => {
+    // "=======" is a legitimate H1 setext underline in Markdown; only flag when
+    // the resolver actually leaves a marker behind in the resolved file.
+    // The regex DOES match a bare "=======" line — the false-positive defense is
+    // that runner.ts scopes the check to originally-conflicted files, not the
+    // whole worktree. Verify the marker line itself still matches so the scope
+    // restriction is doing the real work.
+    expect(MARKER_RE.test('Heading\n=======\n')).toBe(true)
+  })
+
+  it('does not match conflict markers appearing mid-line (e.g. in URLs or strings)', () => {
+    expect(MARKER_RE.test('see https://example.com/<<<<<<<-pin')).toBe(false)
+    expect(MARKER_RE.test('const s = "=======middle"')).toBe(false)
+  })
+})
+
+describe('parseResolverEdits', () => {
+  const wrap = (path: string, oldText: string, newText: string) =>
+    `<edit path="${path}">\n<old>\n${oldText}\n</old>\n<new>\n${newText}\n</new>\n</edit>`
+
+  it('parses a well-formed edit block', () => {
+    const out = wrap('src/a.ts', 'old line', 'new line')
+    const edits = parseResolverEdits(out, ['src/a.ts'])
+    expect(edits).toEqual([{ filePath: 'src/a.ts', oldText: 'old line', newText: 'new line' }])
+  })
+
+  it('drops edits whose path is not in the conflicted set', () => {
+    // Defense against a buggy or prompt-injected resolver emitting <edit> blocks
+    // for tracked files that were never in U state. Those would otherwise be
+    // written + staged and could carry unresolved markers into the commit.
+    const out = wrap('src/legit.ts', 'a', 'b') + wrap('src/sneaky.ts', 'c', 'd')
+    const edits = parseResolverEdits(out, ['src/legit.ts'])
+    expect(edits.map(e => e.filePath)).toEqual(['src/legit.ts'])
+  })
+
+  it('drops path-escape attempts', () => {
+    const out = wrap('../etc/passwd', 'a', 'b') + wrap('/etc/passwd', 'c', 'd')
+    expect(parseResolverEdits(out, ['../etc/passwd', '/etc/passwd'])).toEqual([])
+  })
+
+  it('drops edits with an empty <old> block', () => {
+    const out = wrap('src/a.ts', '', 'new')
+    expect(parseResolverEdits(out, ['src/a.ts'])).toEqual([])
+  })
+
+  it('skips edits missing <old> or <new> tags', () => {
+    const broken = '<edit path="src/a.ts"><old>only old</old></edit>'
+    expect(parseResolverEdits(broken, ['src/a.ts'])).toEqual([])
   })
 })

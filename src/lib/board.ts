@@ -39,7 +39,8 @@ interface PRSlot {
   branch: string
   label: string
   startedAt: number
-  completedAt?: number      // set by completePR — slot kept 5s for live retention
+  completedAt?: number      // set by completePR — slot stays in workspace until overflow eviction
+  url?: string              // PR URL, set on completion
   prLoc?: number
   phase?: PRPhase
   verdict?: string | null   // review step verdict (undefined = not yet reviewed)
@@ -205,6 +206,8 @@ function buildTheme(cfg: DisplayTheme): Theme {
 // ── PRBoard ───────────────────────────────────────────────────────────────────
 
 const CONN_LOG_MAX = 6  // max connectivity log lines kept in memory
+const FOLD_THRESHOLD = 3  // when completed count exceeds this, fold all completed PRs to 1 line
+const WORKSPACE_MAX = 25  // when total slots exceed this, evict oldest completed to scrollback
 
 export class PRBoard {
   private slots = new Map<string, PRSlot>()
@@ -289,109 +292,22 @@ export class PRBoard {
     const slot = this.slots.get(key)
     if (!slot) return
 
-    // Mark as completed — kept in slots map for 5-second live-block retention
     slot.completedAt = Date.now()
+    slot.url = data.url
     slot.label = 'done'
 
     const verdict = slot.verdict ?? null
-    const commentCount = slot.commentCount ?? 0
     const fixCount = slot.fixCount
 
-    // Count completed CRs regardless of whether verdict was parseable
     if (verdict !== null || slot.phase === 'reviewed' || slot.phase === 'rechecked' || slot.phase === 'fixed') {
       this.stats.crsCompleted++
       this.stats.crTotalMs += data.elapsedMs
     }
     if (fixCount !== undefined && fixCount > 0) this.stats.fixesApplied++
 
-    const t = this.theme
-    const ts = fmtTime()
-    const elapsed = `(${Math.round(data.elapsedMs / 1000)}s)`
-
-    // line 1 — use recheck verdict for badge when available
-    const finalVerdict = slot.recheckVerdict !== undefined ? slot.recheckVerdict : verdict
-    const badge = this.verdictBadge(finalVerdict)
-    const branch = truncate(slot.branch, 22)
-    const line1 = `${t.dim(ts)}  ${badge}  #${slot.prNumber}  ${chalk.dim(slot.repo)}  ${t.dim(branch)}  ${t.dim(elapsed)}  ${t.dim('→')} ${t.accent(data.url)}`
-
-    // line 2 — always shown: PR | CR | Fix pipeline summary
-    const pipe = chalk.dim(' | ')
-    const hasFixStep = this.steps.some(s => s.type === 'fix' || s.type === 'conflict-resolve')
-
-    const prSection = slot.prLoc !== undefined
-      ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
-      : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
-
-    const round = slot.round ?? 1
-
-    let crSection: string
-    if (round >= 2 && slot.verdict === undefined) {
-      // CR ran in a prior round — show as static completed, not as error state
-      crSection = `CR ${makeBar(8, 8, t.dim, t.dim)} ${t.dim('·')}`
-    } else if (verdict !== null) {
-      const crFill = this.crFillFn(verdict)
-      const crLabel = this.crLabelFn(verdict)
-      const tokRaw = fmtTokensRaw(slot.crTokens)
-      const crLabelStr = tokRaw
-        ? `${commentCount} issues (${verdict}, ${tokRaw})`
-        : `${commentCount} issues (${verdict})`
-      const reviewerTag = fmtReviewerTag(slot.crReviewer, slot.qualityTier)
-      crSection = `CR ${makeBar(commentCountToFilled(commentCount), 8, crFill, t.barEmpty)} ${crLabel(crLabelStr)}${reviewerTag ? ' ' + t.dim(reviewerTag) : ''}`
-    } else {
-      crSection = `CR ${makeBar(0, 8, t.barEmpty, t.barEmpty)} ${t.warning('⚠ no verdict')}`
-    }
-
-    // Round 2+: collapse Fix + Recheck into a compact "N ROUNDS" counter
-    if (round >= 2) {
-      const rv = slot.recheckVerdict ?? null
-      let roundSection: string
-      if (rv !== null) {
-        const fill = this.crFillFn(rv)
-        const label = this.crLabelFn(rv)
-        const tokRaw = fmtTokensRaw(slot.recheckTokens)
-        const roundLabel = tokRaw ? `${rv}, ${tokRaw}` : rv
-        roundSection = `${round} ROUNDS ${makeBar(0, 5, fill, t.barEmpty)} ${label(roundLabel)}`
-      } else {
-        roundSection = `${round} ROUNDS ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
-      }
-      const parts = [prSection, crSection, roundSection]
-      this.printStatic(`\n${line1}\n${parts.join(pipe)}`)
-      if (!this.isTTY) this.slots.delete(key)
-      return
-    }
-
-    let fixSection: string
-    if (!hasFixStep) {
-      fixSection = `Fix ${t.dim('—')}`
-    } else if (fixCount !== undefined && fixCount > 0) {
-      const fixTokRaw = fmtTokensRaw(slot.fixTokens)
-      fixSection = `Fix ${makeBar(fixCountToFilled(fixCount), 6, t.barFixFill, t.barEmpty)} ${t.accent(String(fixCount) + ' applied')}${fixTokRaw ? ' ' + t.dim(`(${fixTokRaw})`) : ''}`
-    } else {
-      fixSection = `Fix ${makeBar(0, 6, t.barFixFill, t.barEmpty)} ${t.dim('—')}`
-    }
-
-    const hasRecheckStep = this.steps.some(s => s.type === 'recheck')
-    let recheckSection: string | null = null
-    if (hasRecheckStep) {
-      if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
-        const fill = this.crFillFn(slot.recheckVerdict)
-        const label = this.crLabelFn(slot.recheckVerdict)
-        const tokRaw = fmtTokensRaw(slot.recheckTokens)
-        const recheckLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
-        const reviewerTag = fmtReviewerTag(slot.recheckReviewer, slot.qualityTier)
-        recheckSection = `Recheck ${makeBar(0, 5, fill, t.barEmpty)} ${label(recheckLabel)}${reviewerTag ? ' ' + t.dim(reviewerTag) : ''}`
-      } else {
-        recheckSection = `Recheck ${makeBar(0, 5, t.barEmpty, t.barEmpty)} ${t.dim('—')}`
-      }
-    }
-
-    const parts = [prSection, crSection, fixSection]
-    if (recheckSection !== null) parts.push(recheckSection)
-    this.printStatic(`\n${line1}\n${parts.join(pipe)}`)
-
-    // In non-TTY mode render() never runs, so purge the slot here instead of
-    // relying on the render loop's 5-second cleanup.
+    // Non-TTY has no live block to re-render — emit the folded line to scrollback and drop the slot.
     if (!this.isTTY) {
+      process.stdout.write(this.renderPRSlotFolded(slot) + '\n')
       this.slots.delete(key)
     }
   }
@@ -527,13 +443,20 @@ export class PRBoard {
 
     const crSection = this.renderCRSection(slot, frame)
 
+    // URL line — only shown for completed slots that have a URL. Without this,
+    // expanded completions (≤ FOLD_THRESHOLD) never surface the PR link in the
+    // live block; the URL is otherwise only rendered in the folded form.
+    const urlLine = isCompleted && slot.url
+      ? `\n    ${t.dim('→')} ${t.accent(slot.url)}`
+      : ''
+
     // Round 2+: skip Fix, collapse into compact recheck display
     const round = slot.round ?? 1
     if (round >= 2) {
       const recheckSection = this.renderRecheckSection(slot, frame)
       const parts = [prSection, crSection]
       if (recheckSection !== null) parts.push(recheckSection)
-      return `${l1}\n${parts.join(pipe)}`
+      return `${l1}\n${parts.join(pipe)}${urlLine}`
     }
 
     const fixSection = this.renderFixSection(slot, frame)
@@ -542,7 +465,7 @@ export class PRBoard {
     const parts = [prSection, crSection, fixSection]
     if (recheckSection !== null) parts.push(recheckSection)
 
-    return `${l1}\n${parts.join(pipe)}`
+    return `${l1}\n${parts.join(pipe)}${urlLine}`
   }
 
   private phaseLine1Label(slot: PRSlot, frame: string): string {
@@ -644,73 +567,154 @@ export class PRBoard {
   private render(): string {
     if (!this.config) return ''
 
-    // Clean up completed slots past the 5-second retention window
-    const now = Date.now()
-    for (const [key, slot] of this.slots) {
-      if (slot.completedAt !== undefined && now - slot.completedAt > 5000) {
-        this.slots.delete(key)
-      }
-    }
+    // When the workspace overflows, evict oldest completed slots to scrollback.
+    this.evictOverflow()
 
-    const cfg = this.config
     const t = this.theme
     const w = process.stdout.columns || 80
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
     const sep = t.separator('─'.repeat(w - 1))
 
-    // ── Section 1 (top): session summary ─────────────────────────────────────
-    const summaryRow = `${this.statsRow()}  │  ${t.dim('↑')} ${this.uptime()}`
+    const configLines = this.renderConfigPanel()
+    const statsLines = this.renderStatsPanel()
+    const prLines = this.renderPRWorkspace()
 
-    // ── Section 2 (middle): connectivity / status ─────────────────────────────
-    // Two-column fixed-width grid. B1 covers "  ● crosscheck  <label>: <value>"
-    // so the right column always starts at the same position on both rows.
-    // The row-2 indent (16 chars) aligns "workflow:" under "tunnel:" on row 1:
-    //   "  ● crosscheck  " = 2 + 1 + 1 + 10 + 2 = 16 visible chars
-    const CONN_INDENT = ' '.repeat(16)  // aligns row-2 labels under row-1 labels
-    // B1+B2 must equal w-1 (same constraint as the separator) to avoid the
-    // exact-terminal-width cursor wrap that breaks eraseLive() line counting.
-    const B1 = Math.min(52, Math.floor((w - 1) * 0.65))
-    const B2 = (w - 1) - B1
+    return [
+      ...configLines,
+      sep,
+      ...statsLines,
+      sep,
+      ...prLines,
+      sep,
+    ].join('\n')
+  }
 
-    const lb = (styled: string, width: number): string =>
-      styled + ' '.repeat(Math.max(2, width - stripAnsi(styled).length))
+  // ── Panels ─────────────────────────────────────────────────────────────────
 
-    const { type: tunnelType, url, alive } = this.tunnel
-    const tunnelLabel = tunnelType === 'serve' ? 'endpoint' : 'tunnel'
-    const tunnelDisplay = url
-      ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
-      : t.dim('connecting...')
+  private renderConfigPanel(): string[] {
+    const t = this.theme
+    const cfg = this.config!
+    const lines: string[] = []
 
-    const connRow1 = lb(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${tunnelLabel}: ${tunnelDisplay}`, B1) +
-      lb(`${cfg.mode} · ${cfg.quality.tier}`, B2)
+    lines.push(`  ${chalk.greenBright('●')} ${chalk.bold('crosscheck')}  ${t.dim(`${cfg.mode} · ${cfg.quality.tier}`)}`)
 
     const stepFlow = this.steps.map(s => s.name).join(t.dim(' → '))
+    lines.push(`  ${t.dim('workflow:')} ${stepFlow}`)
+
     const vendors: string[] = []
     if (cfg.vendors.claude.enabled) vendors.push('claude')
     if (cfg.vendors.codex.enabled) vendors.push('codex')
+    lines.push(`  ${t.dim('vendors: ')} ${vendors.join(t.dim(' · '))}`)
 
-    const connRow2 = lb(`${CONN_INDENT}workflow: ${stepFlow}`, B1) +
-      lb(vendors.join(' · '), B2)
+    return lines
+  }
 
+  private renderStatsPanel(): string[] {
+    const t = this.theme
+    const lines: string[] = []
+
+    lines.push(`  ${this.statsRow()}  ${t.dim('│')}  ${t.dim('↑')} ${this.uptime()}`)
+
+    const { type: tunnelType, url, alive } = this.tunnel
+    const tunnelLabel = tunnelType === 'serve' ? 'endpoint:' : 'tunnel:  '
+    const tunnelDisplay = url
+      ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
+      : t.dim('connecting...')
+    lines.push(`  ${t.dim(tunnelLabel)} ${tunnelDisplay}`)
+
+    // Connectivity log: already prefixed with timestamps + indent in logConnectivity()
     const activeConn = this.connLog.filter(l => l.trim())
+    lines.push(...activeConn)
 
-    // ── Section 3 (bottom): active PR catalog ──────────────────────────────────
+    return lines
+  }
+
+  private renderPRWorkspace(): string[] {
+    const t = this.theme
     const frame = FRAMES[this.frameIdx]
-    const prContent: string[] = []
 
     if (this.slots.size === 0) {
-      prContent.push(t.dim('  waiting for PRs...'))
-    } else {
-      let first = true
-      for (const slot of this.slots.values()) {
-        if (!first) prContent.push('')  // blank line between PRs
-        prContent.push(this.renderPRSlot(slot, frame))
-        first = false
-      }
+      return [t.dim('  waiting for PRs...')]
     }
 
-    return [summaryRow, sep, connRow1, connRow2, ...activeConn, sep, ...prContent, sep].join('\n')
+    let completedCount = 0
+    for (const slot of this.slots.values()) {
+      if (slot.completedAt !== undefined) completedCount++
+    }
+    const foldCompleted = completedCount > FOLD_THRESHOLD
+
+    const lines: string[] = []
+    let prevWasExpanded = false
+    let first = true
+
+    for (const slot of this.slots.values()) {
+      const isCompleted = slot.completedAt !== undefined
+      const useFolded = foldCompleted && isCompleted
+
+      if (useFolded) {
+        lines.push(this.renderPRSlotFolded(slot))
+        prevWasExpanded = false
+      } else {
+        if (!first && prevWasExpanded) lines.push('')
+        lines.push(this.renderPRSlot(slot, frame))
+        prevWasExpanded = true
+      }
+      first = false
+    }
+
+    return lines
+  }
+
+  // ── Folded PR slot ─────────────────────────────────────────────────────────
+
+  private renderPRSlotFolded(slot: PRSlot): string {
+    const t = this.theme
+    const elapsedMs = (slot.completedAt ?? Date.now()) - slot.startedAt
+    const elapsed = `(${Math.round(elapsedMs / 1000)}s)`
+    const branch = truncate(slot.branch, 22)
+
+    const parts: string[] = []
+
+    // CR verdict
+    if (slot.verdict !== undefined && slot.verdict !== null) {
+      const crFn = this.crLabelFn(slot.verdict)
+      parts.push(`CR: ${crFn(slot.verdict)}`)
+    } else if (slot.verdict === null) {
+      parts.push(t.warning('CR: ⚠'))
+    } else if ((slot.round ?? 1) >= 2) {
+      parts.push(t.dim('CR: prior-round'))
+    }
+
+    // Fix count (when fixes were applied)
+    if (slot.fixCount !== undefined && slot.fixCount > 0) {
+      parts.push(t.accent(`fix ${slot.fixCount}`))
+    }
+
+    // Recheck verdict
+    if (slot.recheckVerdict !== undefined && slot.recheckVerdict !== null) {
+      const rFn = this.crLabelFn(slot.recheckVerdict)
+      parts.push(`recheck ${rFn(slot.recheckVerdict)}`)
+    }
+
+    const urlPart = slot.url ? `  ${t.dim('→')} ${t.accent(slot.url)}` : ''
+    const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
+
+    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(elapsed)}${urlPart}`
+  }
+
+  // ── Overflow eviction ──────────────────────────────────────────────────────
+
+  private evictOverflow(): void {
+    if (this.slots.size <= WORKSPACE_MAX) return
+    let toEvict = this.slots.size - WORKSPACE_MAX
+    for (const [key, slot] of this.slots) {
+      if (toEvict <= 0) break
+      if (slot.completedAt === undefined) continue  // never evict active
+      this.printStatic(this.renderPRSlotFolded(slot))
+      this.slots.delete(key)
+      toEvict--
+    }
   }
 
   private redraw(): void {

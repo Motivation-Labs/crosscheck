@@ -150,6 +150,17 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(folded).toContain('https://github.com/acme/api/pull/142')
   })
 
+  it('renders the PR URL in the expanded completed slot (not just folded)', () => {
+    board.addPR('k1', 142, 'acme/api', 'chore/deps')
+    board.updatePR('k1', { verdict: 'APPROVE', commentCount: 0 })
+    board.completePR('k1', { elapsedMs: 45_000, url: 'https://github.com/acme/api/pull/142' })
+
+    const output = stripAnsi(invokeRender())
+    // With a single completed PR (below FOLD_THRESHOLD), the slot stays expanded
+    // via renderPRSlot. The URL must still surface so operators can click through.
+    expect(output).toContain('https://github.com/acme/api/pull/142')
+  })
+
   it('orders sections top-to-bottom: config → stats → PR workspace', () => {
     board.addPR('k1', 1, 'acme/api', 'feat/x')
     const output = stripAnsi(invokeRender())

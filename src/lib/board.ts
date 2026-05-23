@@ -443,13 +443,20 @@ export class PRBoard {
 
     const crSection = this.renderCRSection(slot, frame)
 
+    // URL line — only shown for completed slots that have a URL. Without this,
+    // expanded completions (≤ FOLD_THRESHOLD) never surface the PR link in the
+    // live block; the URL is otherwise only rendered in the folded form.
+    const urlLine = isCompleted && slot.url
+      ? `\n    ${t.dim('→')} ${t.accent(slot.url)}`
+      : ''
+
     // Round 2+: skip Fix, collapse into compact recheck display
     const round = slot.round ?? 1
     if (round >= 2) {
       const recheckSection = this.renderRecheckSection(slot, frame)
       const parts = [prSection, crSection]
       if (recheckSection !== null) parts.push(recheckSection)
-      return `${l1}\n${parts.join(pipe)}`
+      return `${l1}\n${parts.join(pipe)}${urlLine}`
     }
 
     const fixSection = this.renderFixSection(slot, frame)
@@ -458,7 +465,7 @@ export class PRBoard {
     const parts = [prSection, crSection, fixSection]
     if (recheckSection !== null) parts.push(recheckSection)
 
-    return `${l1}\n${parts.join(pipe)}`
+    return `${l1}\n${parts.join(pipe)}${urlLine}`
   }
 
   private phaseLine1Label(slot: PRSlot, frame: string): string {

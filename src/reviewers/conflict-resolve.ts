@@ -51,11 +51,63 @@ export function findConflictedFiles(tmpDir: string): string[] {
   }
 }
 
+// Extract every conflict region in a file with a few context lines on each side.
+// Slicing from the file prefix instead would hide conflicts that appear past the
+// budget, so the resolver couldn't produce a matching <old> block.
+const CONTEXT_LINES = 6
+const PER_FILE_MAX = 12_000
+
+export function extractConflictWindows(content: string): string {
+  const lines = content.split('\n')
+  const starts: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('<<<<<<<')) starts.push(i)
+  }
+  if (starts.length === 0) return ''
+
+  const ranges: Array<[number, number]> = []
+  for (const start of starts) {
+    let end = start
+    for (let i = start; i < lines.length; i++) {
+      if (lines[i].startsWith('>>>>>>>')) { end = i; break }
+      end = i
+    }
+    const from = Math.max(0, start - CONTEXT_LINES)
+    const to = Math.min(lines.length - 1, end + CONTEXT_LINES)
+    const prev = ranges[ranges.length - 1]
+    if (prev && from <= prev[1] + 1) {
+      prev[1] = Math.max(prev[1], to)
+    } else {
+      ranges.push([from, to])
+    }
+  }
+
+  const chunks: string[] = []
+  let total = 0
+  for (const [from, to] of ranges) {
+    const block = lines.slice(from, to + 1).join('\n')
+    const header = `... lines ${from + 1}-${to + 1} ...`
+    const piece = `${header}\n${block}`
+    if (total + piece.length > PER_FILE_MAX) {
+      chunks.push('... (remaining conflict regions truncated)')
+      break
+    }
+    chunks.push(piece)
+    total += piece.length
+  }
+  return chunks.join('\n\n')
+}
+
 function buildConflictedFilesBlock(tmpDir: string, filePaths: string[]): string {
   return filePaths.map(f => {
     try {
-      const content = readFileSync(join(tmpDir, f), 'utf8').slice(0, 4000)
-      return `### ${f}\n\`\`\`\n${content}\n\`\`\``
+      const content = readFileSync(join(tmpDir, f), 'utf8')
+      const windowed = extractConflictWindows(content)
+      // No textual conflict markers (binary / modify-delete) — surface the file by name only.
+      if (!windowed) {
+        return `### ${f}\n(no textual conflict markers — likely a non-text conflict; skip)`
+      }
+      return `### ${f}\n\`\`\`\n${windowed}\n\`\`\``
     } catch {
       return `### ${f}\n(could not read file)`
     }

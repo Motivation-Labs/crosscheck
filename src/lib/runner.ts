@@ -469,11 +469,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       // P2: Verify every conflict region was resolved before committing. git grep
-      // scans working-tree content; any remaining <<<<<<< means the resolution is
-      // incomplete — committing those markers would corrupt the pushed branch.
+      // scans working-tree content for ANY conflict marker variant — a partial fix
+      // that strips <<<<<<< but leaves ======= / >>>>>>> behind must also be rejected,
+      // since those markers would land on the pushed branch verbatim.
       let hasRemainingMarkers = false
       try {
-        execSync('git grep -q -l "<<<<<<< "', { cwd: tmpDir, stdio: 'pipe' })
+        execSync('git grep -q -l -E "^(<<<<<<<|=======|>>>>>>>)( |$)"', { cwd: tmpDir, stdio: 'pipe' })
         hasRemainingMarkers = true
       } catch {
         hasRemainingMarkers = false
@@ -483,6 +484,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         log(chalk.yellow(`⚠  PR #${prNumber}: not all conflicts resolved — skipping commit`))
         fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber })
         skipConflictResolve('incomplete_resolution')
+        continue
+      }
+
+      // P2: refuse to commit if any unmerged path remains in the index. `git add -A`
+      // would otherwise stage non-text conflicts (binary, modify/delete) using the
+      // current worktree side, silently picking a resolution that was never reviewed.
+      let unmergedPaths: string[] = []
+      try {
+        const out = execSync('git diff --name-only --diff-filter=U', { cwd: tmpDir, encoding: 'utf8' })
+        unmergedPaths = out.trim().split('\n').filter(Boolean)
+      } catch { /* ignore */ }
+      if (unmergedPaths.length > 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain (likely non-text conflict) — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
+        skipConflictResolve('unmerged_paths')
         continue
       }
 

@@ -11,6 +11,7 @@ import { runFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
+import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -121,6 +122,12 @@ export interface WorkflowContext {
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
   smartSwitchFallback?: 'claude' | 'codex'
+  // Caller-supplied array the runner appends to whenever it sets a remote
+  // pending status on a newly pushed sha (currently only from conflict-resolve).
+  // Lets the command-layer signal handler release those shas if SIGINT/SIGTERM
+  // fires mid-workflow — otherwise process.exit bypasses the runner's finally
+  // and the pending status is leaked indefinitely on GitHub.
+  pushedShas?: string[]
 }
 
 export interface WorkflowResult {
@@ -160,7 +167,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
   const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
+  // SHAs the workflow pushed AND set a `crosscheck/review` pending status on.
+  // Each one must be released in the finally below — otherwise the pending
+  // status would stay forever on GitHub (the 15-min staleness check is
+  // internal to crosscheck's lock detection and does not clear the status,
+  // which can block PRs in repos where `crosscheck/review` is required).
+  //
+  // Use the caller's array if provided so the command-layer signal handler
+  // can iterate the same list and release these shas if SIGINT/SIGTERM fires
+  // mid-workflow (process.exit there bypasses our finally below).
+  const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+  let workflowFailed = false
 
+  try {
   for (const step of steps) {
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
@@ -560,6 +579,18 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
       })
       ctx.crosscheckShas.add(newSha)
+      // Move the in-flight pending status to newSha so watchers on other
+      // machines (which don't share crosscheckShas) see the PR as locked when
+      // they receive the synchronize event and skip duplicate review.
+      // Track the sha so the finally below releases the pending status —
+      // without that release the status would stay pending forever on GitHub.
+      try {
+        const lockOctokit = createGithubClient(token)
+        await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+        pushedShasNeedingRelease.push(newSha)
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
+      }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
       fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
       results[step.name] = { applied_count: appliedCount }
@@ -568,4 +599,27 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
   return { verdict: verdict ?? null }
+  } catch (err) {
+    workflowFailed = true
+    throw err
+  } finally {
+    if (pushedShasNeedingRelease.length > 0) {
+      const lockOctokit = createGithubClient(token)
+      const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
+      // Drain via shift() so each released sha is synchronously removed from
+      // the shared array. The command-layer SIGINT/SIGTERM handler iterates
+      // the same array — if a late signal arrives after this finally has
+      // already released a sha, the handler won't see it and won't overwrite
+      // the released status with 'failure'. Atomic shift gives clean per-sha
+      // ownership transfer even when both loops are draining concurrently.
+      while (pushedShasNeedingRelease.length > 0) {
+        const s = pushedShasNeedingRelease.shift()!
+        try {
+          await releaseRemoteLock(lockOctokit, owner, repoName, s, outcome)
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'pushed_sha_release_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: s, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+    }
+  }
 }

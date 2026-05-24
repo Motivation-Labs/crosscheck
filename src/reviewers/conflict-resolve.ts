@@ -9,7 +9,10 @@ interface ClaudeJsonOutput {
   usage?: { input_tokens?: unknown; output_tokens?: unknown }
 }
 
-const PROMPT_TEMPLATE = `This pull request has merge conflicts. Resolve all conflict markers in the files listed below.
+// Exported so tests can verify the prompt's side-preference guidance stays in
+// sync with the merge direction in runner.ts (origin/<base> is merged into HEAD,
+// so HEAD is the PR side and the `>>>>>>>` side is the base branch).
+export const PROMPT_TEMPLATE = `This pull request has merge conflicts. Resolve all conflict markers in the files listed below.
 
 PR title: {PR_TITLE}
 
@@ -18,9 +21,11 @@ Conflicted files:
 
 {EXTRA_INSTRUCTIONS}
 
+Context: the PR's branch is checked out as HEAD, and the base branch was merged into it. That means the \`<<<<<<< HEAD\` side is the PR author's intended changes and the \`>>>>>>>\` side is the base branch. Default to preserving the PR author's intent.
+
 Rules for resolving each conflict:
 - Keep ALL meaningful changes from both sides if they are not directly contradictory
-- When both sides modify the same line, prefer the incoming branch changes (the >>>>>>> side) unless they clearly break existing logic
+- When both sides modify the same line, prefer the PR author's changes (the \`<<<<<<< HEAD\` side) over the base branch (the \`>>>>>>>\` side), unless the PR side clearly breaks existing logic on the base
 - Remove ALL conflict markers: <<<<<<<, =======, >>>>>>>
 
 For each file, output ONLY the resolved conflict regions using this format:

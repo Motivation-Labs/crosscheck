@@ -5,7 +5,9 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { findAvailablePort } from '../lib/port.js'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import { checkRepoAccessible } from '../github/client.js'
+import { checkRepoAccessible, createGithubClient } from '../github/client.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import {
@@ -135,6 +137,28 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
     `${tsIndent}origin=${chalk.yellow(origin)}  via=${chalk.dim(originMethod)}  reviewer=${chalk.cyan(reviewer)}${modeNote}`,
   )
 
+  if (!acquirePRLock(owner, repoName, prNumber, pr.head.sha)) {
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
+    inFlight.delete(key)
+    return
+  }
+
+  const lockOctokit = createGithubClient(token)
+  if (await checkRemoteLock(lockOctokit, owner, repoName, pr.head.sha)) {
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
+    inFlight.delete(key)
+    return
+  }
+  try {
+    await acquireRemoteLock(lockOctokit, owner, repoName, pr.head.sha)
+  } catch (err: unknown) {
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
+    inFlight.delete(key)
+    logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'lock' }, err)
+    return
+  }
+
   const prKey = `${owner}/${repoName}#${prNumber}`
   const isRecheckRun = reviewedPRKeys.has(prKey)
   const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
@@ -142,6 +166,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+  let stopHeartbeat = () => {}
 
   try {
     clonePRForReview({
@@ -152,6 +177,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
     const prLoc = computePRLoc(tmpDir, pr.base.ref)
     board.updatePR(key, { prLoc })
+    stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, pr.head.sha)
 
     await runWorkflow({
       owner, repoName, prNumber, pr,
@@ -172,15 +198,20 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
     })
     notifyReviewSuccess(reviewer, announce)
+    stopHeartbeat()
+    await releaseRemoteLock(lockOctokit, owner, repoName, pr.head.sha, 'success')
   } catch (err: unknown) {
+    stopHeartbeat()
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
     board.failPR(key, message)
     logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+    await releaseRemoteLock(lockOctokit, owner, repoName, pr.head.sha, 'failure')
     if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
       const failedVendor = detectFailedVendor(err)
       if (failedVendor) triggerSwitch(failedVendor, message, announce)
     }
   } finally {
+    releasePRLock(owner, repoName, prNumber, pr.head.sha)
     rmSync(tmpDir, { force: true, recursive: true })
     inFlight.delete(key)
   }
@@ -309,6 +340,25 @@ export async function runServe(opts: ServeOpts = {}) {
       console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
       console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck serve --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
     }
+
+    // Warn when author_routes will be silently bypassed (cross-vendor + both vendors enabled).
+    const bothVendorsEnabled = config.mode === 'cross-vendor'
+      && config.vendors.claude.enabled
+      && config.vendors.codex.enabled
+    const routedAllowedAuthors = bothVendorsEnabled
+      ? Object.entries(config.routing.author_routes).filter(([login]) =>
+          config.routing.allowed_authors.length === 0 || config.routing.allowed_authors.includes(login)
+        )
+      : []
+    if (routedAllowedAuthors.length > 0) {
+      console.log()
+      console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('author_routes bypassed in cross-vendor mode (both vendors enabled).')}`)
+      for (const [login, vendor] of routedAllowedAuthors) {
+        console.log(`     ${chalk.dim(`${login} → ${vendor}`)}`)
+      }
+      console.log(`     ${chalk.dim('PRs without attribution markers fall through to')} ${chalk.cyan(`fallback_reviewer: ${config.routing.fallback_reviewer ?? 'skip'}`)} ${chalk.dim('instead.')}`)
+    }
+
     console.log()
     console.log(chalk.dim('Register the endpoint above as a GitHub webhook (content-type: application/json).'))
     if (config.orgs.length > 0) {

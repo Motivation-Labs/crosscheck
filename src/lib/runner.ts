@@ -1,4 +1,6 @@
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import chalk from 'chalk'
 import type { Config } from '../config/schema.js'
 import type { PREvent } from '../github/webhook.js'
@@ -6,8 +8,9 @@ import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
+import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
-import { createGithubClient, postReviewComment } from '../github/client.js'
+import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -27,6 +30,38 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
   return stepType === 'review' && isRecheckRun ? 'recheck' : stepType
 }
 
+// Counts crosscheck-authored commits unique to this PR (ahead of base) rather
+// than the branch's full history. Long-lived integration branches like
+// `staging` accumulate [crosscheck] commits from many merged PRs — counting
+// those would trip the per-PR fix-loop guard immediately and skip fix/recheck.
+//
+// Fails closed: when `origin/<base>` isn't available (e.g. clone fetched the
+// base ref with `base_branch_fetch_skipped`), fall back to the full-history
+// count rather than returning 0. Over-counting can stop fix early; returning 0
+// would silently disable the cap and let runaway fix loops keep pushing.
+export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+  const runLog = (args: string[]): string =>
+    execFileSync(
+      'git',
+      ['log', '--oneline', ...args],
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+  const count = (out: string): number => out.split('\n').filter(l => l.includes('[crosscheck]')).length
+
+  try {
+    return count(runLog([`origin/${baseRef}..HEAD`]))
+  } catch {
+    // Scoped range unavailable — fall back to full history so the cap still
+    // applies. May over-count when the branch has prior merged crosscheck
+    // commits, but that's preferable to bypassing the safety guard.
+    try {
+      return count(runLog([]))
+    } catch {
+      return 0
+    }
+  }
+}
+
 // Returns true when fix/recheck steps should be skipped because the configured
 // max_rounds cap has been reached. The review step (even when coerced to recheck)
 // is never skipped — it always produces a verdict for the current push.
@@ -38,6 +73,7 @@ export function exceedsMaxRounds(
 ): boolean {
   if (round === undefined) return false
   if (effectiveType === 'fix') return round > maxRounds
+  if (effectiveType === 'conflict-resolve') return round > maxRounds
   // Recheck step from the workflow (not a review coerced to recheck) is gated
   if (effectiveType === 'recheck' && originalStepType !== 'review') return round > maxRounds
   return false
@@ -133,6 +169,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -142,6 +179,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       else if (effectiveType === 'recheck') onPhaseChange('', { phase: 'rechecked' })
+      else if (effectiveType === 'conflict-resolve') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
       continue
     }
 
@@ -189,10 +227,23 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } else {
         onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
-        await postReviewComment(octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand)
+        // For rechecks: look up the original review comment ID so the recheck
+        // can link back to it. Check in-run results first (single-run pipelines),
+        // then fall back to GitHub (cross-run: recheck triggered by a new push).
+        let priorReviewId: number | undefined
+        if (isRecheck) {
+          priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
+          if (priorReviewId === undefined) {
+            priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
+          }
+        }
+        const commentId = await postReviewComment(
+          octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
+          origin, verdict ?? undefined, priorReviewId, isRecheck,
+        )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
-        results[step.name] = { verdict, commentBody, commentUrl }
+        results[step.name] = { verdict, commentBody, commentUrl, commentId }
       }
 
     } else if (effectiveType === 'fix') {
@@ -225,12 +276,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Codex fix not yet implemented — skip gracefully
       if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
 
-      // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR
-      let existingCount = 0
-      try {
-        const gitLog = execSync('git log --oneline', { cwd: tmpDir, encoding: 'utf8' })
-        existingCount = gitLog.split('\n').filter(l => l.includes('[crosscheck]')).length
-      } catch { /* ignore */ }
+      // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
+      // Scope to commits ahead of base so long-lived branches (e.g. staging)
+      // don't count [crosscheck] commits from previously merged PRs.
+      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
 
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
@@ -363,6 +412,157 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
         results[step.name] = { applied_count: appliedCount }
       }
+
+    } else if (effectiveType === 'conflict-resolve') {
+      const skipConflictResolve = (reason: string) => {
+        onPhaseChange('', { phase: 'fixed', fixCount: 0 })
+        results[step.name] = { skipped: true }
+        fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
+      }
+
+      if (ctx.dryRun) { skipConflictResolve('dry_run'); continue }
+
+      // Fast pre-check: GitHub's mergeable field tells us if the PR has conflicts without
+      // cloning. true = no conflicts (skip immediately); false = conflicts confirmed (proceed);
+      // null = GitHub is still computing — fall through to the git merge probe.
+      {
+        const octokit = createGithubClient(token)
+        const { data: prInfo } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+        if (prInfo.mergeable === true) {
+          skipConflictResolve('no_conflicts')
+          continue
+        }
+      }
+
+      // P1: The clone only has the PR head checked out — no unmerged index entries exist
+      // until we actually attempt the merge. Attempt the merge first; if it succeeds
+      // cleanly (no conflicts) abort it and skip. If it fails, the working tree now has
+      // real conflict markers and UU entries that findConflictedFiles can detect.
+      let hasMergeConflicts = false
+      try {
+        execSync(`git merge --no-commit origin/${pr.base.ref}`, { cwd: tmpDir, stdio: 'pipe' })
+        // Clean merge — undo the staged merge state and skip this step
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+      } catch {
+        hasMergeConflicts = true
+      }
+
+      if (!hasMergeConflicts) {
+        skipConflictResolve('no_conflicts')
+        continue
+      }
+
+      const conflictedFiles = findConflictedFiles(tmpDir)
+      if (conflictedFiles.length === 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        skipConflictResolve('no_conflicts')
+        continue
+      }
+
+      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
+      if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+
+      const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
+      if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
+
+      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
+      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))
+        skipConflictResolve('commit_limit_reached')
+        continue
+      }
+
+      onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
+      let appliedCount = 0
+      let resolvedPaths: string[] = []
+      let resolveTokensUsed: number | undefined
+
+      try {
+        ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
+          tmpDir, pr.title, step.instructions ?? '',
+        ))
+      } catch (err) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        skipConflictResolve('resolve_error')
+        continue
+      }
+
+      if (appliedCount === 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
+        results[step.name] = { applied_count: 0 }
+        continue
+      }
+
+      // P2: Verify every conflict region was resolved before committing. Scope the
+      // check to the union of (originally-conflicted files) ∪ (files the resolver
+      // actually rewrote) — a repo-wide grep would false-positive on legitimate
+      // "=======" lines in docs (e.g. Markdown setext headings) and abort valid
+      // resolutions, but we still need to cover any path the resolver touched in
+      // case it ever edits outside the original conflict set. Read working-tree
+      // content directly so untrusted PR-controlled paths never reach a shell.
+      const MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)( |$)/m
+      const pathsToScan = Array.from(new Set([...conflictedFiles, ...resolvedPaths]))
+      const filesWithMarkers: string[] = []
+      for (const f of pathsToScan) {
+        try {
+          const content = readFileSync(join(tmpDir, f), 'utf8')
+          if (MARKER_RE.test(content)) filesWithMarkers.push(f)
+        } catch { /* unreadable (deleted side of modify/delete) — caught by U-filter below */ }
+      }
+      if (filesWithMarkers.length > 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${filesWithMarkers.length} file(s) still contain conflict markers — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_incomplete', repo: `${owner}/${repoName}`, pr: prNumber, paths: filesWithMarkers })
+        skipConflictResolve('incomplete_resolution')
+        continue
+      }
+
+      // Stage only files the resolver actually rewrote — `git add -A` would
+      // otherwise silently stage non-text conflicts (binary, modify/delete) using
+      // the worktree side as an un-reviewed resolution. Staging also has to come
+      // BEFORE the unmerged-path check below: git keeps a path in the unmerged
+      // index until it is explicitly added, so checking earlier would always fail
+      // on the resolved files themselves. Use execFileSync (no shell) because
+      // resolvedPaths is derived from model output and PR-controlled filenames.
+      for (const p of resolvedPaths) {
+        try {
+          execFileSync('git', ['add', '--', p], { cwd: tmpDir, stdio: 'pipe' })
+        } catch { /* skip */ }
+      }
+
+      // After staging the resolved files, anything still in U state is a conflict
+      // the resolver did not handle (binary, modify/delete, or a failed edit).
+      // Abort rather than commit a partial merge.
+      let unmergedPaths: string[] = []
+      try {
+        const out = execSync('git diff --name-only --diff-filter=U', { cwd: tmpDir, encoding: 'utf8' })
+        unmergedPaths = out.trim().split('\n').filter(Boolean)
+      } catch { /* ignore */ }
+      if (unmergedPaths.length > 0) {
+        try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${unmergedPaths.length} unmerged path(s) remain after resolve — skipping commit`))
+        fileLog({ level: 'warn', event: 'conflict_resolve_unmerged_paths', repo: `${owner}/${repoName}`, pr: prNumber, paths: unmergedPaths })
+        skipConflictResolve('unmerged_paths')
+        continue
+      }
+
+      execSync(
+        `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
+        { cwd: tmpDir },
+      )
+      const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+      execSync(`git push origin HEAD:${pr.head.ref}`, {
+        cwd: tmpDir,
+        env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
+      })
+      ctx.crosscheckShas.add(newSha)
+      onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
+      results[step.name] = { applied_count: appliedCount }
     }
   }
 

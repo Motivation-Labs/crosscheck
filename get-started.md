@@ -1073,7 +1073,15 @@ claude \
 
 ### Deduplication
 
-GitHub can fire both `opened` and `synchronize` events for the same push. crosscheck tracks `owner/repo#pr@sha` in an in-memory set and drops duplicate events for the same commit.
+**What's implemented today**
+
+GitHub can fire both `opened` and `synchronize` events for the same push. crosscheck tracks `owner/repo#pr@sha` in an in-memory set and drops duplicate events for the same commit within the same running process.
+
+**Known gap — concurrent sessions**
+
+If `crosscheck run <pr-url>` is invoked while a `watch`/`serve` daemon is already reviewing the same PR (or two machines pick up the same webhook), both sessions will pass the current check — which only looks at already-posted comments — and both will post a review. This is a known race condition.
+
+The fix (file lock for same-machine + GitHub commit status for cross-machine) is tracked as a P0 item and not yet implemented. Until it lands, avoid running `crosscheck run` manually on a PR that your `watch`/`serve` daemon is actively processing.
 
 ### Watch vs serve
 

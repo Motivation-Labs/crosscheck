@@ -251,6 +251,23 @@ CI/CD uses `NPM_TOKEN` stored as a GitHub Actions secret — no interactive auth
 
 These four items fix the two-phase model described in Design Principles. Any new feature that touches detection or routing depends on them being correct first.
 
+- [ ] **In-flight lock: prevent duplicate reviews when `watch` and `crosscheck run` race** — if a `watch` process receives a webhook for PR #N at the same time a user manually runs `crosscheck run <pr-url>`, both pass the existing dedup check (which only looks at posted GitHub comments) because neither has posted yet. Both complete a full review and post separate comments. Root cause confirmed via logs on 2026-05-17: `codatta/symphony#22` received 3 comments — two NEEDS WORK reviews posted 90 seconds apart (one from the webhook handler, one from a concurrent manual run), then a third APPROVE recheck after the auto-fix step.
+  - **User:** Anyone who runs `crosscheck run` on a PR that is simultaneously being processed by a running `watch`/`serve` daemon on the same or a different machine.
+  - **Acceptance Criteria:**
+    - A file lock at `~/.crosscheck/locks/<owner>-<repo>-<pr>.lock` is acquired (using `open(path, 'wx')` — atomic exclusive create) before `runWorkflow` is called. If the lock file already exists, the session logs `pr_skipped: reason: in_progress_local` and returns without reviewing.
+    - The lock file is always released in a `finally` block — including on timeout, error, and process signal. Lock directory is created on first use.
+    - A GitHub commit status `crosscheck/review` on the PR head SHA acts as the cross-machine advisory lock:
+      - Before starting, check if a `pending` status already exists and is less than 15 minutes old. If so, log `pr_skipped: reason: in_progress_remote` and return.
+      - After acquiring the file lock, immediately set the status to `pending` (description includes ISO timestamp for stale detection).
+      - On workflow completion, set the status to `success`. On unhandled error, set to `failure`. Both are best-effort (errors suppressed).
+    - Stale lock guard: a pending status older than 15 minutes is treated as abandoned (the machine crashed mid-review) and does not block a new session.
+    - The file lock only covers the same machine; the commit status covers cross-machine races. Both are required.
+    - New file: `src/lib/pr-lock.ts` — `acquirePRLock`, `releasePRLock`. New file: `src/github/review-status.ts` — `checkRemoteLock`, `acquireRemoteLock`, `releaseRemoteLock`.
+    - Lock acquisition wraps the existing call site where `runWorkflow` is invoked in `commands/run.ts` and `commands/watch.ts` (the `reviewPR` function).
+    - No change to the existing in-memory SHA dedup set — it remains as a fast-path for same-process duplicate webhook events.
+  - **Technical Notes:** `openSync(path, 'wx')` throws `EEXIST` if the file already exists — this is the atomic OS-level test-and-set. GitHub commit status API: `repos.createCommitStatus` with `state: 'pending' | 'success' | 'failure'`, `context: 'crosscheck/review'`. There is no CAS in the GitHub API; the cross-machine window is ~100–300ms of network latency, which is acceptable — the consequence of the rare race is one extra comment, not data corruption.
+  - **Tests Required:** two concurrent `acquirePRLock` calls for the same PR — second returns `false`; `releasePRLock` removes the file and a third call succeeds; `checkRemoteLock` returns `true` when status is `pending` and age < 15 min; returns `false` when age > 15 min; returns `false` when status is `success`.
+
 - [ ] **Consolidate skip decision: delete `shouldReview()`, rely solely on `assignReviewer`** — `shouldReview` (detector.ts:82) and `assignReviewer` both independently gate on `origin === 'human'` in cross-vendor mode. Adding `fallback_reviewer` to only one of them creates a silent divergence. Full spec below.
   - **Acceptance Criteria:**
     - `shouldReview` is deleted from `detector.ts` and from all exports.
@@ -265,6 +282,8 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [ ] **Comment-based attribution detection (P2 step 4)** — full spec in Next Up.
 
 - [ ] **Crosscheck annotation system (P3)** — full spec in Next Up.
+
+- [x] **PR Stripe: CR section shows `⚠ no verdict` for round 2+ runs** — fixed. Root cause: `completePR` computed `crSection` before extracting `slot.round`, so the round 2+ guard never fired. For recheck rounds, the review step is coerced to a recheck step, meaning `slot.verdict` is always `undefined` in the new slot; `undefined ?? null` fell into the `⚠ no verdict` branch. Also, `renderCRSection` had no round awareness, showing "queued" during live rendering for round 2+ slots. Fix: move `round` extraction above `crSection` in `completePR`; add `round >= 2 && slot.verdict === undefined` guard in both `completePR` and `renderCRSection` to render a static "prior round" dim bar (`████████ ·`) instead of an error or queued state.
 
 - [x] **`crosscheck onboard` destroys existing config customizations on re-run** — fixed in PR #74. All write logic extracted into `applyOnboardConfig`; routing.* fields now initialised on first run only and preserved exactly on re-runs; workflow.yml only written when it doesn't already exist and only deleted when the pipeline explicitly changes away from recheck.
 
@@ -303,6 +322,31 @@ These four items fix the two-phase model described in Design Principles. Any new
 ---
 
 ### 🔜 Next Up
+
+- [ ] **`conflict-resolve` workflow step — auto-resolve merge conflicts** — a new opt-in workflow step type that detects merge conflict markers in the cloned PR branch, uses Claude to resolve them, and pushes the result as a `[crosscheck]` commit. Runs before the review step so the reviewer always sees clean code. Repeats on subsequent pushes up to `max_rounds`. Not added to the default workflow; user must opt-in during `crosscheck onboard` after the pipeline-preset step.
+  - **User:** Anyone whose PRs frequently have merge conflicts that block review (e.g., long-lived feature branches, active rebases).
+  - **Acceptance Criteria:**
+    - New step type `'conflict-resolve'` added to `WorkflowStepSchema` enum and validated correctly.
+    - Step is placed FIRST in the generated workflow (before `review`) so the reviewer always sees conflict-free code.
+    - Step self-skips when no conflict markers are found (`git diff --name-only --diff-filter=U` returns empty).
+    - When conflicts are found: Claude resolves all `<<<<<<< / ======= / >>>>>>>` regions, applies edits using the same `<edit>` block format as the fix step, commits with `[crosscheck] resolve: ...` prefix, pushes to PR branch.
+    - `max_rounds: 3` default (hardcoded in template); caps how many times conflict-resolve can run per PR lifecycle.
+    - Fork PRs are skipped (cannot push to forks) with reason `'fork_pr'`.
+    - `MAX_CROSSCHECK_COMMITS` guard applies (same as fix step).
+    - Codex is not supported for conflict-resolve (same as fix); skips with reason `'codex_conflict_resolve_unsupported'`.
+    - `onboard` Step 7.7 — shown after pipeline preset (and after max-rounds if applicable). Prompt: "Auto-resolve merge conflicts?" with `[1] no (default)` / `[2] yes`. Default is no.
+    - `conflictResolve: true` in `OnboardDecisions` causes `buildWorkflowYaml` to prepend the `conflict-resolve` step.
+    - `detectConflictResolveEnabled(workflowDir)` reads the workflow and returns `true` when a `conflict-resolve` step is present.
+    - `applyOnboardConfig` regenerates workflow when conflict-resolve presence drifts from the user's choice.
+    - Step 10 summary shows `conflict-resolve  yes` when enabled.
+    - Board `renderFixSection` and `completePR` Fix section recognize `'conflict-resolve'` as a fix-type step (reuse `fixCount` slot; last-writer wins if both fix and conflict-resolve are in the workflow).
+  - **Technical Notes:**
+    - `src/reviewers/conflict-resolve.ts` — `findConflictedFiles(tmpDir)` + `runConflictResolveStep(tmpDir, prTitle, instructions)`. Reuses `applyEdit` from `fix.ts`. Prompt shows conflicted file content with markers, asks Claude to output `<edit>` blocks resolving each conflict.
+    - `src/lib/workflow.ts` — add `'conflict-resolve'` to `WorkflowStepSchema` type enum; add `DEFAULT_CONFLICT_RESOLVE_INSTRUCTIONS`.
+    - `src/lib/runner.ts` — add `exceedsMaxRounds` handling for `'conflict-resolve'`; add `else if (effectiveType === 'conflict-resolve')` block in `runWorkflow`.
+    - `src/lib/board.ts` — update `hasFixStep` checks to include `'conflict-resolve'`.
+    - `src/commands/onboard.ts` — add `promptConflictResolve`, `detectConflictResolveEnabled`; update `OnboardDecisions`, `buildWorkflowYaml`, `applyOnboardConfig`.
+  - **Tests Required:** `conflict-resolve: true` → workflow step count increases by 1 and first step type is `conflict-resolve`; re-run with `conflict-resolve: false` regenerates (step removed); `detectConflictResolveEnabled` returns correct values; `--yes` preserves existing setting.
 
 - [x] **Onboard — workflow, mode, and pipeline steps** — extend `crosscheck onboard` with interactive steps for review mode (cross-vendor vs single-vendor) and workflow pipeline (review-only, review→fix, review→fix→re-check). Mode step is shown only when both AI CLIs are authenticated; pipeline step always shown.
   - **User:** Anyone running `crosscheck onboard` for the first time, or re-running after installing a second AI CLI.

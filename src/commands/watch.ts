@@ -3,6 +3,7 @@ import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
+  createGithubClient,
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
@@ -44,6 +45,8 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { PersistentShaSet } from '../lib/sha-cache.js'
+import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
+import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -268,6 +271,25 @@ export async function runWatch(opts: WatchOpts = {}) {
         user: { login: params.author },
       }
 
+      if (!acquirePRLock(owner, repoName, prNumber, params.headSha)) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_local' })
+        return
+      }
+
+      const lockOctokit = createGithubClient(token)
+      if (await checkRemoteLock(lockOctokit, owner, repoName, params.headSha)) {
+        releasePRLock(owner, repoName, prNumber, params.headSha)
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote' })
+        return
+      }
+      try {
+        await acquireRemoteLock(lockOctokit, owner, repoName, params.headSha)
+      } catch (err: unknown) {
+        releasePRLock(owner, repoName, prNumber, params.headSha)
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'lock' }, err)
+        return
+      }
+
       const prKey = `${owner}/${repoName}#${prNumber}`
       const isRecheckRun = reviewedPRKeys.has(prKey)
       const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
@@ -275,6 +297,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
+      let stopHeartbeat = () => {}
 
       try {
         clonePRForReview({
@@ -285,6 +308,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
+        stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
         const { verdict } = await runWorkflow({
           owner, repoName, prNumber, pr,
@@ -308,10 +332,14 @@ export async function runWatch(opts: WatchOpts = {}) {
         // Smart-switch recovery confirmation: if a restore attempt is pending and
         // this reviewer matches the previously-degraded vendor, announce full restoration.
         notifyReviewSuccess(reviewer, bLog)
+        stopHeartbeat()
+        await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
       } catch (err: unknown) {
+        stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)
         board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+        await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
         // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
         // degrade to single-vendor with the healthy vendor for the next 30 minutes.
         if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {
@@ -319,6 +347,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (failedVendor) triggerSwitch(failedVendor, message, bLog)
         }
       } finally {
+        releasePRLock(owner, repoName, prNumber, params.headSha)
         rmSync(tmpDir, { force: true, recursive: true })
       }
     } catch (err: unknown) {
@@ -533,6 +562,27 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
     console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
   }
+
+  // Warn when author_routes will be silently bypassed (cross-vendor + both vendors enabled)
+  // so users understand why their configured mapping isn't applying.
+  const bothVendorsEnabled = config.mode === 'cross-vendor'
+    && config.vendors.claude.enabled
+    && config.vendors.codex.enabled
+  const routedAllowedAuthors = bothVendorsEnabled
+    ? Object.entries(config.routing.author_routes).filter(([login]) =>
+        config.routing.allowed_authors.length === 0 || config.routing.allowed_authors.includes(login)
+      )
+    : []
+  if (routedAllowedAuthors.length > 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('author_routes bypassed in cross-vendor mode (both vendors enabled).')}`)
+    for (const [login, vendor] of routedAllowedAuthors) {
+      console.log(`     ${chalk.dim(`${login} → ${vendor}`)}`)
+    }
+    console.log(`     ${chalk.dim('PRs without attribution markers (body / Co-Authored-By / branch prefix)')}`)
+    console.log(`     ${chalk.dim('fall through to')} ${chalk.cyan(`fallback_reviewer: ${config.routing.fallback_reviewer ?? 'skip'}`)} ${chalk.dim('instead.')}`)
+  }
+
   console.log()
 
   // Board starts after the banner — all output below is live-updated

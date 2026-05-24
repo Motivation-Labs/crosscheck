@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import yaml from 'js-yaml'
-import { applyOnboardConfig, detectCurrentPreset, type OnboardDecisions } from '../commands/onboard.js'
+import { applyOnboardConfig, detectCurrentPreset, detectConflictResolveEnabled, type OnboardDecisions } from '../commands/onboard.js'
 import { mkdirSync } from 'fs'
 
 const BASE_DECISIONS: OnboardDecisions = {
@@ -15,6 +15,7 @@ const BASE_DECISIONS: OnboardDecisions = {
   authorVendor: 'claude',
   qualityTier: 'balanced',
   pipelinePreset: 'review-only',
+  conflictResolve: false,
   tunnelBackend: 'localhost.run',
   smeeChannel: '',
   cloneProtocol: 'ssh',
@@ -513,5 +514,80 @@ describe('applyOnboardConfig — max_rounds in workflow.yml', () => {
     expect(raw.steps.find(s => s.type === 'recheck')?.max_rounds).toBe(1)
     expect(raw.steps.find(s => s.type === 'fix')?.instructions).toBe('custom fix')
     expect(raw.steps.find(s => s.type === 'recheck')?.instructions).toBe('custom recheck')
+  })
+})
+
+describe('applyOnboardConfig — conflict-resolve', () => {
+  it('conflictResolve: true prepends conflict-resolve step as first step', () => {
+    const dir = join(workflowDir, 'cr-enabled')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: true }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps[0].type).toBe('conflict-resolve')
+    expect(raw.steps).toHaveLength(3)  // conflict-resolve + review + fix
+  })
+
+  it('conflictResolve: false does not add conflict-resolve step', () => {
+    const dir = join(workflowDir, 'cr-disabled')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: false }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps.some(s => s.type === 'conflict-resolve')).toBe(false)
+    expect(raw.steps).toHaveLength(2)
+  })
+
+  it('enabling conflict-resolve on re-run regenerates workflow', () => {
+    const dir = join(workflowDir, 'cr-enable-rerun')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: false }, dir)
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: true }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps[0].type).toBe('conflict-resolve')
+  })
+
+  it('disabling conflict-resolve on re-run regenerates workflow', () => {
+    const dir = join(workflowDir, 'cr-disable-rerun')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: true }, dir)
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-fix', conflictResolve: false }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string }> }
+    expect(raw.steps.some(s => s.type === 'conflict-resolve')).toBe(false)
+  })
+
+  it('conflict-resolve has max_rounds: 3 and reviewer: origin', () => {
+    const dir = join(workflowDir, 'cr-config')
+    applyOnboardConfig(configPath, { ...BASE_DECISIONS, pipelinePreset: 'review-only', conflictResolve: true }, dir)
+    const raw = yaml.load(readFileSync(join(dir, 'workflow.yml'), 'utf8')) as { steps: Array<{ type: string; max_rounds?: number; reviewer?: string }> }
+    const crStep = raw.steps.find(s => s.type === 'conflict-resolve')
+    expect(crStep?.max_rounds).toBe(3)
+    expect(crStep?.reviewer).toBe('origin')
+  })
+})
+
+describe('detectConflictResolveEnabled', () => {
+  function seedWorkflow(content: string): void {
+    mkdirSync(workflowDir, { recursive: true })
+    writeFileSync(join(workflowDir, 'workflow.yml'), content)
+  }
+
+  it('returns false when no workflow file exists', () => {
+    expect(detectConflictResolveEnabled(workflowDir)).toBe(false)
+  })
+
+  it('returns false when workflow has no conflict-resolve step', () => {
+    seedWorkflow(yaml.dump({ on: ['opened'], steps: [{ name: 'review', type: 'review' }] }))
+    expect(detectConflictResolveEnabled(workflowDir)).toBe(false)
+  })
+
+  it('returns true when workflow has a conflict-resolve step', () => {
+    seedWorkflow(yaml.dump({
+      on: ['opened'],
+      steps: [
+        { name: 'conflict-resolve', type: 'conflict-resolve' },
+        { name: 'review', type: 'review' },
+      ],
+    }))
+    expect(detectConflictResolveEnabled(workflowDir)).toBe(true)
+  })
+
+  it('returns false for malformed workflow', () => {
+    seedWorkflow('not: valid: yaml: at all: [')
+    expect(detectConflictResolveEnabled(workflowDir)).toBe(false)
   })
 })

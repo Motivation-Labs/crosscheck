@@ -16,6 +16,12 @@ jobs:
     if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
     environment: staging
+    # id-token: write enables npm --provenance (signed attestation linking the
+    # tarball to this workflow run) and is also a prerequisite if the @motivation-labs
+    # scope is ever migrated to npm Trusted Publishers (OIDC-only, no NPM_TOKEN).
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
@@ -44,6 +50,7 @@ jobs:
           release_branches: staging   # include staging so dry-run computes new_version here
 
       - name: Stamp prerelease version
+        id: stamp
         run: |
           # Use the computed next stable version so beta always sorts above the current @latest.
           # Fall back to a patch-bump of the current package.json version if the action returned nothing.
@@ -60,10 +67,22 @@ jobs:
           else
             COUNT=$(git rev-list --count HEAD)
           fi
-          npm version "${NEXT}-beta.${COUNT}" --no-git-tag-version
+          VERSION="${NEXT}-beta.${COUNT}"
+          npm version "$VERSION" --no-git-tag-version
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm @beta
-        run: npm publish --tag beta --access public
+        run: |
+          VERSION="${{ steps.stamp.outputs.version }}"
+          # Idempotency: if a previous run already pushed this exact version (e.g. retry
+          # after a transient failure), skip the publish so we don't trip npm's
+          # "cannot publish over existing version" error and surface a real failure as
+          # if it were that one.
+          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+            echo "Version ${VERSION} already on npm — skipping publish."
+            exit 0
+          fi
+          npm publish --tag beta --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -72,6 +91,9 @@ jobs:
     if: github.ref == 'refs/heads/alpha'
     runs-on: ubuntu-latest
     environment: alpha
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +102,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
@@ -100,6 +122,7 @@ jobs:
           release_branches: alpha   # include alpha so dry-run computes new_version here
 
       - name: Stamp prerelease version
+        id: stamp
         run: |
           NEXT="${{ steps.next_ver.outputs.new_version }}"
           if [ -z "$NEXT" ]; then
@@ -113,9 +136,17 @@ jobs:
           else
             COUNT=$(git rev-list --count HEAD)
           fi
-          npm version "${NEXT}-alpha.${COUNT}" --no-git-tag-version
+          VERSION="${NEXT}-alpha.${COUNT}"
+          npm version "$VERSION" --no-git-tag-version
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm @alpha
-        run: npm publish --tag alpha --access public
+        run: |
+          VERSION="${{ steps.stamp.outputs.version }}"
+          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+            echo "Version ${VERSION} already on npm — skipping publish."
+            exit 0
+          fi
+          npm publish --tag alpha --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

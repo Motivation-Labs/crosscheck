@@ -30,6 +30,38 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
   return stepType === 'review' && isRecheckRun ? 'recheck' : stepType
 }
 
+// Counts crosscheck-authored commits unique to this PR (ahead of base) rather
+// than the branch's full history. Long-lived integration branches like
+// `staging` accumulate [crosscheck] commits from many merged PRs — counting
+// those would trip the per-PR fix-loop guard immediately and skip fix/recheck.
+//
+// Fails closed: when `origin/<base>` isn't available (e.g. clone fetched the
+// base ref with `base_branch_fetch_skipped`), fall back to the full-history
+// count rather than returning 0. Over-counting can stop fix early; returning 0
+// would silently disable the cap and let runaway fix loops keep pushing.
+export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
+  const runLog = (args: string[]): string =>
+    execFileSync(
+      'git',
+      ['log', '--oneline', ...args],
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+  const count = (out: string): number => out.split('\n').filter(l => l.includes('[crosscheck]')).length
+
+  try {
+    return count(runLog([`origin/${baseRef}..HEAD`]))
+  } catch {
+    // Scoped range unavailable — fall back to full history so the cap still
+    // applies. May over-count when the branch has prior merged crosscheck
+    // commits, but that's preferable to bypassing the safety guard.
+    try {
+      return count(runLog([]))
+    } catch {
+      return 0
+    }
+  }
+}
+
 // Returns true when fix/recheck steps should be skipped because the configured
 // max_rounds cap has been reached. The review step (even when coerced to recheck)
 // is never skipped — it always produces a verdict for the current push.
@@ -244,12 +276,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Codex fix not yet implemented — skip gracefully
       if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
 
-      // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR
-      let existingCount = 0
-      try {
-        const gitLog = execSync('git log --oneline', { cwd: tmpDir, encoding: 'utf8' })
-        existingCount = gitLog.split('\n').filter(l => l.includes('[crosscheck]')).length
-      } catch { /* ignore */ }
+      // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
+      // Scope to commits ahead of base so long-lived branches (e.g. staging)
+      // don't count [crosscheck] commits from previously merged PRs.
+      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
 
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
@@ -436,11 +466,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
 
-      let existingCount = 0
-      try {
-        const gitLog = execSync('git log --oneline', { cwd: tmpDir, encoding: 'utf8' })
-        existingCount = gitLog.split('\n').filter(l => l.includes('[crosscheck]')).length
-      } catch { /* ignore */ }
+      const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
       if (existingCount >= MAX_CROSSCHECK_COMMITS) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping conflict-resolve`))

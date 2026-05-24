@@ -34,16 +34,31 @@ export function getEffectiveStepType(stepType: string, isRecheckRun: boolean): s
 // than the branch's full history. Long-lived integration branches like
 // `staging` accumulate [crosscheck] commits from many merged PRs — counting
 // those would trip the per-PR fix-loop guard immediately and skip fix/recheck.
+//
+// Fails closed: when `origin/<base>` isn't available (e.g. clone fetched the
+// base ref with `base_branch_fetch_skipped`), fall back to the full-history
+// count rather than returning 0. Over-counting can stop fix early; returning 0
+// would silently disable the cap and let runaway fix loops keep pushing.
 export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): number {
-  try {
-    const out = execFileSync(
+  const runLog = (args: string[]): string =>
+    execFileSync(
       'git',
-      ['log', '--oneline', `origin/${baseRef}..HEAD`],
+      ['log', '--oneline', ...args],
       { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     )
-    return out.split('\n').filter(l => l.includes('[crosscheck]')).length
+  const count = (out: string): number => out.split('\n').filter(l => l.includes('[crosscheck]')).length
+
+  try {
+    return count(runLog([`origin/${baseRef}..HEAD`]))
   } catch {
-    return 0
+    // Scoped range unavailable — fall back to full history so the cap still
+    // applies. May over-count when the branch has prior merged crosscheck
+    // commits, but that's preferable to bypassing the safety guard.
+    try {
+      return count(runLog([]))
+    } catch {
+      return 0
+    }
   }
 }
 

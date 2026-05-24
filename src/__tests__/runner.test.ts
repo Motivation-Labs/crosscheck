@@ -125,9 +125,22 @@ describe('countCrosscheckCommitsForPR', () => {
     expect(countCrosscheckCommitsForPR(tmpDir, 'base')).toBe(1)
   })
 
-  it('returns 0 when origin/<base> does not exist (treats as no constraint)', () => {
+  it('falls back to full-history count when origin/<base> does not exist (fail closed)', () => {
+    // 6 [crosscheck] commits on base + 1 on feature = 7 total in the branch
+    // history. If the scoped range fails, we must still see them so the
+    // 5-commit cap trips rather than silently passing.
     commit('a.txt', 'a\n', '[crosscheck] fix one')
-    expect(countCrosscheckCommitsForPR(tmpDir, 'nonexistent-branch')).toBe(0)
+    expect(countCrosscheckCommitsForPR(tmpDir, 'nonexistent-branch')).toBe(7)
+  })
+
+  it('returns 0 only when neither the scoped range nor the full history is readable', () => {
+    // Point tmpDir at a non-repo location — both git invocations will fail.
+    const nonRepo = mkdtempSync(join(tmpdir(), 'crosscheck-not-a-repo-'))
+    try {
+      expect(countCrosscheckCommitsForPR(nonRepo, 'main')).toBe(0)
+    } finally {
+      rmSync(nonRepo, { force: true, recursive: true })
+    }
   })
 })
 

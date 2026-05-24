@@ -11,6 +11,7 @@ import { runFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
+import { acquireRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -560,6 +561,19 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
       })
       ctx.crosscheckShas.add(newSha)
+      // Move the in-flight pending status to newSha so watchers on other
+      // machines (which don't share crosscheckShas) see the PR as locked when
+      // they receive the synchronize event and skip duplicate review. The
+      // status on the original sha is left to settle when the command-layer
+      // finally runs releaseRemoteLock against it; newSha's pending status
+      // decays via the 15-min staleness check if this run errors out before
+      // completion.
+      try {
+        const lockOctokit = createGithubClient(token)
+        await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
+      }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
       fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
       results[step.name] = { applied_count: appliedCount }

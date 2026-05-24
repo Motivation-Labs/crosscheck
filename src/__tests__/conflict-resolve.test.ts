@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractConflictWindows, parseResolverEdits } from '../reviewers/conflict-resolve.js'
+import { extractConflictWindows, parseResolverEdits, PROMPT_TEMPLATE } from '../reviewers/conflict-resolve.js'
 
 describe('extractConflictWindows', () => {
   it('returns empty string when no markers are present', () => {
@@ -81,6 +81,25 @@ describe('conflict marker regex (runner.ts)', () => {
   it('does not match conflict markers appearing mid-line (e.g. in URLs or strings)', () => {
     expect(MARKER_RE.test('see https://example.com/<<<<<<<-pin')).toBe(false)
     expect(MARKER_RE.test('const s = "=======middle"')).toBe(false)
+  })
+})
+
+describe('PROMPT_TEMPLATE side preference', () => {
+  // The runner does `git merge origin/<base>` while the PR's branch is checked
+  // out as HEAD, so the `<<<<<<< HEAD` side is the PR author's changes and the
+  // `>>>>>>>` side is the base branch. The prompt must default to preserving
+  // the PR author's intent — preferring `>>>>>>>` would silently discard the
+  // PR's conflicting changes in favor of base.
+  it('prefers the PR author\'s side (<<<<<<< HEAD) over the base branch (>>>>>>>)', () => {
+    expect(PROMPT_TEMPLATE).toMatch(/prefer the PR author's changes \(the `?<<<<<<< HEAD/i)
+    // Guard against regression — must not advise preferring the >>>>>>> side
+    expect(PROMPT_TEMPLATE).not.toMatch(/prefer the incoming branch changes \(the >>>>>>>/i)
+    expect(PROMPT_TEMPLATE).not.toMatch(/prefer the >>>>>>> side/i)
+  })
+
+  it('explains which side is which so the resolver does not invert the convention', () => {
+    expect(PROMPT_TEMPLATE).toMatch(/<<<<<<< HEAD.*PR/s)
+    expect(PROMPT_TEMPLATE).toMatch(/>>>>>>>.*base/s)
   })
 })
 

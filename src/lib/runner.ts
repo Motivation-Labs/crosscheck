@@ -606,7 +606,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     if (pushedShasNeedingRelease.length > 0) {
       const lockOctokit = createGithubClient(token)
       const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
-      for (const s of pushedShasNeedingRelease) {
+      // Drain via shift() so each released sha is synchronously removed from
+      // the shared array. The command-layer SIGINT/SIGTERM handler iterates
+      // the same array — if a late signal arrives after this finally has
+      // already released a sha, the handler won't see it and won't overwrite
+      // the released status with 'failure'. Atomic shift gives clean per-sha
+      // ownership transfer even when both loops are draining concurrently.
+      while (pushedShasNeedingRelease.length > 0) {
+        const s = pushedShasNeedingRelease.shift()!
         try {
           await releaseRemoteLock(lockOctokit, owner, repoName, s, outcome)
         } catch (err) {

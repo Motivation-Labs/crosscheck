@@ -150,7 +150,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         stopHeartbeat()
         if (!opts.dryRun && lockAttemptStarted) {
           await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
-          for (const s of pushedShas) {
+          // Drain the shared array via shift() so the runner's finally (which
+          // also drains via shift) doesn't double-release. Whichever loop
+          // shifts a sha first owns its release; the other sees a shorter
+          // array. This also prevents the reverse race — a signal arriving
+          // after the runner has already released a sha as 'success' would
+          // otherwise overwrite it with 'failure' here.
+          while (pushedShas.length > 0) {
+            const s = pushedShas.shift()!
             try { await releaseRemoteLock(octokit, owner, repo, s, 'failure') } catch { /* best-effort per sha */ }
           }
         }

@@ -1,5 +1,14 @@
-import { describe, it, expect } from 'vitest'
-import { isRetryableFixError, getEffectiveStepType, exceedsMaxRounds } from '../lib/runner.js'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { execFileSync } from 'child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import {
+  isRetryableFixError,
+  getEffectiveStepType,
+  exceedsMaxRounds,
+  countCrosscheckCommitsForPR,
+} from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
   it('returns false for auth failure errors', () => {
@@ -53,6 +62,72 @@ describe('exceedsMaxRounds', () => {
 
   it('never skips a plain review step', () => {
     expect(exceedsMaxRounds('review', 'review', 1, 2)).toBe(false)
+  })
+})
+
+describe('countCrosscheckCommitsForPR', () => {
+  let tmpDir: string
+
+  // Build a repo with a `base` branch carrying [crosscheck] commits (simulating
+  // a long-lived branch like staging) and a `head` branch ahead of it. The
+  // count must include only commits unique to head.
+  const git = (...args: string[]): string =>
+    execFileSync('git', args, { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+  const commit = (file: string, content: string, message: string): void => {
+    writeFileSync(join(tmpDir, file), content)
+    git('add', file)
+    git('commit', '-m', message)
+  }
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-runner-test-'))
+    git('init', '-q', '-b', 'base')
+    git('config', 'user.email', 'test@example.com')
+    git('config', 'user.name', 'Test')
+    git('config', 'commit.gpgsign', 'false')
+
+    // base branch: 6 [crosscheck] commits from prior merged PRs
+    commit('seed.txt', 'seed\n', 'chore: initial')
+    for (let i = 0; i < 6; i++) {
+      commit(`base${i}.txt`, `b${i}\n`, `[crosscheck] fix from prior PR #${i}`)
+    }
+
+    // Promote base into refs/remotes/origin/base so the helper's
+    // `origin/<base>..HEAD` range resolves the same way it does in production
+    // (clone.ts fetches the base ref into refs/remotes/origin/<base>).
+    git('update-ref', 'refs/remotes/origin/base', 'base')
+
+    // head branch ahead of base
+    git('checkout', '-q', '-b', 'feature')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { force: true, recursive: true })
+  })
+
+  it('counts only [crosscheck] commits ahead of base (ignores base history)', () => {
+    // Two fix commits on this PR — base has 6 prior crosscheck commits we must ignore
+    commit('a.txt', 'a\n', '[crosscheck] fix round 1')
+    commit('b.txt', 'b\n', '[crosscheck] fix round 2')
+    expect(countCrosscheckCommitsForPR(tmpDir, 'base')).toBe(2)
+  })
+
+  it('returns 0 when the PR has no crosscheck commits, even if base has many', () => {
+    commit('feat.txt', 'feat\n', 'feat: human work only')
+    expect(countCrosscheckCommitsForPR(tmpDir, 'base')).toBe(0)
+  })
+
+  it('ignores non-crosscheck commits on the PR branch', () => {
+    commit('feat.txt', 'feat\n', 'feat: add thing')
+    commit('a.txt', 'a\n', '[crosscheck] fix one')
+    commit('docs.txt', 'docs\n', 'docs: update readme')
+    expect(countCrosscheckCommitsForPR(tmpDir, 'base')).toBe(1)
+  })
+
+  it('returns 0 when origin/<base> does not exist (treats as no constraint)', () => {
+    commit('a.txt', 'a\n', '[crosscheck] fix one')
+    expect(countCrosscheckCommitsForPR(tmpDir, 'nonexistent-branch')).toBe(0)
   })
 })
 

@@ -11,7 +11,7 @@ import { runFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
-import { acquireRemoteLock } from '../github/review-status.js'
+import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -161,7 +161,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
   const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
+  // SHAs the workflow pushed AND set a `crosscheck/review` pending status on.
+  // Each one must be released in the finally below — otherwise the pending
+  // status would stay forever on GitHub (the 15-min staleness check is
+  // internal to crosscheck's lock detection and does not clear the status,
+  // which can block PRs in repos where `crosscheck/review` is required).
+  const pushedShasNeedingRelease: string[] = []
+  let workflowFailed = false
 
+  try {
   for (const step of steps) {
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
@@ -563,14 +571,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       ctx.crosscheckShas.add(newSha)
       // Move the in-flight pending status to newSha so watchers on other
       // machines (which don't share crosscheckShas) see the PR as locked when
-      // they receive the synchronize event and skip duplicate review. The
-      // status on the original sha is left to settle when the command-layer
-      // finally runs releaseRemoteLock against it; newSha's pending status
-      // decays via the 15-min staleness check if this run errors out before
-      // completion.
+      // they receive the synchronize event and skip duplicate review.
+      // Track the sha so the finally below releases the pending status —
+      // without that release the status would stay pending forever on GitHub.
       try {
         const lockOctokit = createGithubClient(token)
         await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+        pushedShasNeedingRelease.push(newSha)
       } catch (err) {
         fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
       }
@@ -582,4 +589,20 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
   const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
   return { verdict: verdict ?? null }
+  } catch (err) {
+    workflowFailed = true
+    throw err
+  } finally {
+    if (pushedShasNeedingRelease.length > 0) {
+      const lockOctokit = createGithubClient(token)
+      const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
+      for (const s of pushedShasNeedingRelease) {
+        try {
+          await releaseRemoteLock(lockOctokit, owner, repoName, s, outcome)
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'pushed_sha_release_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: s, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+    }
+  }
 }

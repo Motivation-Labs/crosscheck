@@ -148,6 +148,29 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   const cloneSpinner = ora('Cloning repo...').start()
   let stopHeartbeat = () => {}
 
+  // Releases the remote lock on SIGINT/SIGTERM before the process exits.
+  // Required because pr-lock's signal handler will re-raise the signal when
+  // it's the only listener, triggering default termination — which bypasses
+  // this function's `finally` block. Without this handler, an interrupted
+  // run would leave the pending `crosscheck/review` commit status in place
+  // and block subsequent runs until the remote lock is considered stale.
+  // pr-lock's handler sees our additional listener, cleans local locks, and
+  // defers re-raise — letting us own termination here.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    void (async () => {
+      try {
+        stopHeartbeat()
+        if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+      } catch { /* best-effort — must still exit even if remote release fails */ }
+      try { releasePRLock(owner, repo, number, sha) } catch { /* ignore */ }
+      try { rmSync(tmpDir, { force: true, recursive: true }) } catch { /* ignore */ }
+      // 128 + signal number (SIGINT=2 → 130, SIGTERM=15 → 143) per POSIX convention
+      process.exit(signal === 'SIGTERM' ? 143 : 130)
+    })()
+  }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
+
   try {
     clonePRForReview({
       owner, repo, prNumber: number, baseRef: prData.base.ref,
@@ -196,6 +219,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     rmSync(tmpDir, { force: true, recursive: true })
     process.exit(2)
   } finally {
+    process.removeListener('SIGINT', onSignal)
+    process.removeListener('SIGTERM', onSignal)
     releasePRLock(owner, repo, number, sha)
     rmSync(tmpDir, { force: true, recursive: true })
   }

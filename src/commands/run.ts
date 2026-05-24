@@ -128,75 +128,111 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     return
   }
 
-  if (!opts.dryRun) {
-    if (await checkRemoteLock(octokit, owner, repo, sha)) {
-      releasePRLock(owner, repo, number, sha)
-      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
-      console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
-      return
-    }
-    try {
-      await acquireRemoteLock(octokit, owner, repo, sha)
-    } catch (err: unknown) {
-      releasePRLock(owner, repo, number, sha)
-      throw err
-    }
-  }
-
-  // Clone the repo
-  const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-run-'))
-  const cloneSpinner = ora('Cloning repo...').start()
+  // Track which resources have actually been allocated so the SIGINT/SIGTERM
+  // handler only releases what exists. The handler must be installed BEFORE
+  // calling acquireRemoteLock: GitHub may create the pending status server-side
+  // even if the network round-trip is interrupted, and without an installed
+  // listener pr-lock would re-raise the signal and orphan the pending status
+  // until it goes stale.
+  let lockAttemptStarted = false
+  let acquiredTmpDir: string | undefined
   let stopHeartbeat = () => {}
 
+  const onSignal = (signal: NodeJS.Signals): void => {
+    void (async () => {
+      try {
+        stopHeartbeat()
+        if (!opts.dryRun && lockAttemptStarted) {
+          await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+        }
+      } catch { /* best-effort — must still exit even if remote release fails */ }
+      try { releasePRLock(owner, repo, number, sha) } catch { /* ignore */ }
+      if (acquiredTmpDir) try { rmSync(acquiredTmpDir, { force: true, recursive: true }) } catch { /* ignore */ }
+      // 128 + signal number (SIGINT=2 → 130, SIGTERM=15 → 143) per POSIX convention
+      process.exit(signal === 'SIGTERM' ? 143 : 130)
+    })()
+  }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
+
   try {
-    clonePRForReview({
-      owner, repo, prNumber: number, baseRef: prData.base.ref,
-      tmpDir, token, protocol: config.clone_protocol,
-      onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
-    })
-    cloneSpinner.succeed('Repo ready')
-
-    if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
-    let activeSpinner = ora('').start()
-
-    const { verdict } = await runWorkflow({
-      owner,
-      repoName: repo,
-      prNumber: number,
-      pr,
-      tmpDir,
-      token,
-      config,
-      origin,
-      reviewStart: Date.now(),
-      log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
-      onPhaseChange: (label) => { activeSpinner.text = label },
-      crosscheckShas: new Set(),
-      dryRun: opts.dryRun,
-      steps: filteredSteps,
-    })
-
-    activeSpinner.stop()
-    console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
-
     if (!opts.dryRun) {
-      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
-    } else {
-      console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
+      if (await checkRemoteLock(octokit, owner, repo, sha)) {
+        releasePRLock(owner, repo, number, sha)
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote' })
+        console.log(chalk.yellow(`⚠  PR #${number} is already being reviewed on another machine — skipping`))
+        return
+      }
+      try {
+        // Set the flag BEFORE the await so a signal that interrupts the in-flight
+        // request still triggers releaseRemoteLock (GitHub may have already
+        // created the pending status server-side).
+        lockAttemptStarted = true
+        await acquireRemoteLock(octokit, owner, repo, sha)
+      } catch (err: unknown) {
+        releasePRLock(owner, repo, number, sha)
+        throw err
+      }
     }
 
-    stopHeartbeat()
-    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
-  } catch (err: unknown) {
-    stopHeartbeat()
-    if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
-    logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
-    console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-    releasePRLock(owner, repo, number, sha)
-    rmSync(tmpDir, { force: true, recursive: true })
-    process.exit(2)
+    // Clone the repo
+    const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-run-'))
+    acquiredTmpDir = tmpDir
+    const cloneSpinner = ora('Cloning repo...').start()
+
+    try {
+      clonePRForReview({
+        owner, repo, prNumber: number, baseRef: prData.base.ref,
+        tmpDir, token, protocol: config.clone_protocol,
+        onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: prData.base.ref }),
+      })
+      cloneSpinner.succeed('Repo ready')
+
+      if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
+      let activeSpinner = ora('').start()
+
+      const { verdict } = await runWorkflow({
+        owner,
+        repoName: repo,
+        prNumber: number,
+        pr,
+        tmpDir,
+        token,
+        config,
+        origin,
+        reviewStart: Date.now(),
+        log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
+        onPhaseChange: (label) => { activeSpinner.text = label },
+        crosscheckShas: new Set(),
+        dryRun: opts.dryRun,
+        steps: filteredSteps,
+      })
+
+      activeSpinner.stop()
+      console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
+
+      if (!opts.dryRun) {
+        console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
+      } else {
+        console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
+      }
+
+      stopHeartbeat()
+      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
+    } catch (err: unknown) {
+      stopHeartbeat()
+      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+      logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
+      console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
+      releasePRLock(owner, repo, number, sha)
+      rmSync(tmpDir, { force: true, recursive: true })
+      process.exit(2)
+    } finally {
+      releasePRLock(owner, repo, number, sha)
+      rmSync(tmpDir, { force: true, recursive: true })
+    }
   } finally {
-    releasePRLock(owner, repo, number, sha)
-    rmSync(tmpDir, { force: true, recursive: true })
+    process.removeListener('SIGINT', onSignal)
+    process.removeListener('SIGTERM', onSignal)
   }
 }

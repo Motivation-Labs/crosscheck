@@ -137,6 +137,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let lockAttemptStarted = false
   let acquiredTmpDir: string | undefined
   let stopHeartbeat = () => {}
+  // Shared with runWorkflow — the runner appends every sha for which it set
+  // a remote pending status (e.g. after a conflict-resolve push). On normal
+  // completion or workflow error, the runner's own finally releases them;
+  // but if a signal fires mid-workflow we exit via process.exit and bypass
+  // that finally, so the signal handler iterates this array too.
+  const pushedShas: string[] = []
 
   const onSignal = (signal: NodeJS.Signals): void => {
     void (async () => {
@@ -144,6 +150,9 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         stopHeartbeat()
         if (!opts.dryRun && lockAttemptStarted) {
           await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+          for (const s of pushedShas) {
+            try { await releaseRemoteLock(octokit, owner, repo, s, 'failure') } catch { /* best-effort per sha */ }
+          }
         }
       } catch { /* best-effort — must still exit even if remote release fails */ }
       try { releasePRLock(owner, repo, number, sha) } catch { /* ignore */ }
@@ -204,6 +213,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
         onPhaseChange: (label) => { activeSpinner.text = label },
         crosscheckShas: new Set(),
+        pushedShas,
         dryRun: opts.dryRun,
         steps: filteredSteps,
       })

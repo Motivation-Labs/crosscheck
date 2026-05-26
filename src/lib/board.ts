@@ -103,6 +103,22 @@ export function fmtTime(d = new Date()): string {
 // Width of a fmtTime() result — constant regardless of time of day ("01:00:00 AM".length = 11)
 export const FMT_TIME_WIDTH = 11
 
+// Format milliseconds as human duration: "45s", "4m05s", "1h02m"
+function fmtDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`
+  if (m > 0) return `${m}m${String(s).padStart(2, '0')}s`
+  return `${s}s`
+}
+
+// Short HH:MM timestamp (no seconds) for the "started" label
+function fmtStartTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
 // Format token count as a compact suffix: "(900)", "(1.2K)", "(1.5M)". Returns '' when undefined.
 export function fmtTokens(n?: number): string {
   if (n == null) return ''
@@ -405,7 +421,7 @@ export class PRBoard {
   private statsRow(): string {
     const { prsReceived, crsCompleted, fixesApplied, errorsOccurred, crTotalMs } = this.stats
     const avgCr = crsCompleted > 0
-      ? `  │  avg CR: ${Math.round(crTotalMs / crsCompleted / 1000)}s`
+      ? `  │  avg CR: ${fmtDuration(Math.round(crTotalMs / crsCompleted))}`
       : ''
     const errorPart = errorsOccurred > 0
       ? ` · ${chalk.red(`errors: ${errorsOccurred}`)}`
@@ -420,13 +436,16 @@ export class PRBoard {
     const totalElapsedMs = isCompleted
       ? slot.completedAt! - slot.startedAt
       : Date.now() - slot.startedAt
-    const eSuffix = `${Math.floor(totalElapsedMs / 1000)}s`
+    const eSuffix = fmtDuration(totalElapsedMs)
 
-    // ── Line 1: identity  <pad>  elapsed  phase-label ─────────────────────────
+    // ── Line 1: identity  <pad>  started·elapsed  phase-label ────────────────
     const branch = truncate(slot.branch, 22)
     const icon = isCompleted ? t.success('✓') : t.spinner(frame)
     const phaseLabel = this.phaseLine1Label(slot, frame)
-    const rightPart = `${t.dim(eSuffix)}  ${phaseLabel}`
+    const timePart = isCompleted
+      ? t.dim(eSuffix)
+      : `${t.dim('started ' + fmtStartTime(slot.startedAt))}  ${t.dim(eSuffix)}`
+    const rightPart = `${timePart}  ${phaseLabel}`
     const identityPlain = `   #${slot.prNumber}  ${slot.repo}  ${branch}`
     const l1Pad = Math.max(2, w - stripAnsi(identityPlain).length - stripAnsi(rightPart).length - 2)
     const prNum = isCompleted ? t.dim(`#${slot.prNumber}`) : chalk.bold(`#${slot.prNumber}`)
@@ -671,7 +690,7 @@ export class PRBoard {
   private renderPRSlotFolded(slot: PRSlot): string {
     const t = this.theme
     const elapsedMs = (slot.completedAt ?? Date.now()) - slot.startedAt
-    const elapsed = `(${Math.round(elapsedMs / 1000)}s)`
+    const elapsed = fmtDuration(elapsedMs)
     const branch = truncate(slot.branch, 22)
 
     const parts: string[] = []
@@ -700,7 +719,7 @@ export class PRBoard {
     const urlPart = slot.url ? `  ${t.dim('→')} ${t.accent(slot.url)}` : ''
     const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
 
-    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(elapsed)}${urlPart}`
+    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
   // ── Overflow eviction ──────────────────────────────────────────────────────

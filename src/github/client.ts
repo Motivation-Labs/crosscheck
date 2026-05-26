@@ -290,8 +290,9 @@ export async function getLastCrossCheckCommentId(
       const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
       if (annotationMatch) {
         const attrs = annotationMatch[1]
-        // Skip fix_failed notifications and recheck-typed annotations
-        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck')) {
+        // Skip fix_failed notifications, recheck-typed annotations, and no_diff_change notices —
+        // none of these represent a fresh review comment to reply to.
+        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck') && !attrs.includes('no_diff_change')) {
           lastId = comment.id
         }
       } else if (body.includes('### Code Review by') && !body.startsWith('> Recheck of')) {

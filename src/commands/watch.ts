@@ -45,6 +45,8 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { PersistentShaSet } from '../lib/sha-cache.js'
+import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
+import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 
@@ -211,6 +213,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   const inFlight = new Set<string>()
   // SHAs pushed by the fix step — persisted to disk so restarts don't re-review our own commits
   const crosscheckShas = new PersistentShaSet()
+  // Last-reviewed diff hash per PR — skip reviews when a new SHA has identical diff vs base
+  // (force-push, amend, no-op rebase). Persisted so restarts don't re-review unchanged content.
+  const diffHashes = new PersistentDiffHashMap()
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
@@ -294,10 +299,10 @@ export async function runWatch(opts: WatchOpts = {}) {
       const isRecheckRun = reviewedPRKeys.has(prKey)
       const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
 
-      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
       let stopHeartbeat = () => {}
+      let boardAdded = false
 
       try {
         clonePRForReview({
@@ -305,6 +310,41 @@ export async function runWatch(opts: WatchOpts = {}) {
           tmpDir, token, protocol: config.clone_protocol,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
         })
+
+        // Diff-aware skip: a new HEAD SHA with the same patch vs base as the last
+        // successfully-reviewed SHA (force-push, amend, no-op rebase) doesn't need
+        // a fresh review. Post a one-line acknowledgement so the PR author sees we noticed.
+        // When the base ref fetch failed earlier, the diff vs base is not measurable;
+        // skip the dedup check entirely and don't update the cache after this review.
+        let newDiffHash: string | null = null
+        try {
+          newDiffHash = computeDiffHash(tmpDir, params.baseRef)
+        } catch { /* base unavailable — proceed with full review, skip cache update */ }
+
+        const prev = newDiffHash ? diffHashes.get(prKey) : undefined
+        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha) {
+          const prevShort = prev.sha.slice(0, 7)
+          const nowShort = params.headSha.slice(0, 7)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
+          bLog(
+            `${chalk.dim(fmtTime())}  PR #${prNumber} ${params.action}  ${chalk.dim('no diff change since last review')}`,
+            `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
+          )
+          try {
+            await lockOctokit.rest.issues.createComment({
+              owner, repo: repoName, issue_number: prNumber,
+              body: `✓ No diff change since the last review (was \`${prevShort}\`, now \`${nowShort}\`). Skipping re-review.\n\n<!-- crosscheck: no_diff_change prev_sha=${prev.sha} sha=${params.headSha} -->`,
+            })
+            fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, kind: 'no_diff_change' })
+          } catch (err: unknown) {
+            logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
+          }
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          return
+        }
+
+        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
+        boardAdded = true
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
@@ -325,6 +365,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         void verdict
         reviewedPRKeys.add(prKey)
         prRoundCounts.set(prKey, round)
+        if (newDiffHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: newDiffHash })
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -337,7 +378,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)
-        board.failPR(key, message)
+        if (boardAdded) board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
         // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
@@ -440,10 +481,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   // ── Scope building ────────────────────────────────────────────────────────
   // Determine scopes once — these don't change between tunnel reconnects.
   // orgs, users, and repos are additive: all configured sources contribute scopes.
-  type Scope = { org: string } | { owner: string; repo: string }
-  const scopes: Scope[] = []
+  const rawScopes: Scope[] = []
 
-  for (const org of config.orgs) scopes.push({ org })
+  for (const org of config.orgs) rawScopes.push({ org })
 
   const userRepoResults: Array<{ user: string; count: number } | { user: string; error: string }> = []
   if (config.users.length > 0) {
@@ -453,7 +493,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     for (const user of config.users) {
       try {
         const repos = await listUserRepos(user, token, user === selfLogin)
-        for (const { owner, name } of repos) scopes.push({ owner, repo: name })
+        for (const { owner, name } of repos) rawScopes.push({ owner, repo: name })
         userRepoResults.push({ user, count: repos.length })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -471,10 +511,20 @@ export async function runWatch(opts: WatchOpts = {}) {
   )
   for (const { owner, name, ok } of repoChecks) {
     if (ok) {
-      scopes.push({ owner, repo: name })
+      rawScopes.push({ owner, repo: name })
     } else {
       console.log(chalk.yellow(`  ✗ repo not accessible: ${owner}/${name} — skipped`))
       fileLog({ level: 'warn', event: 'repo_inaccessible', repo: `${owner}/${name}` })
+    }
+  }
+
+  // Collapse repo scopes already covered by an org scope. Registering both produces
+  // duplicate webhook deliveries from GitHub (one per registered hook), which our
+  // in-flight dedup absorbs but still clutters logs and burns signature-verification cycles.
+  const { scopes, dropped: droppedRepos } = dedupScopes(rawScopes)
+  for (const [org, repos] of droppedRepos) {
+    for (const repo of repos) {
+      fileLog({ level: 'info', event: 'scope_deduped', org, owner: org, repo, reason: 'covered_by_org_scope' })
     }
   }
 
@@ -581,6 +631,17 @@ export async function runWatch(opts: WatchOpts = {}) {
     }
     console.log(`     ${chalk.dim('PRs without attribution markers (body / Co-Authored-By / branch prefix)')}`)
     console.log(`     ${chalk.dim('fall through to')} ${chalk.cyan(`fallback_reviewer: ${config.routing.fallback_reviewer ?? 'skip'}`)} ${chalk.dim('instead.')}`)
+  }
+
+  // Warn when repo scopes were dropped because their owner is also an org scope —
+  // both being registered causes duplicate webhook deliveries from GitHub.
+  if (droppedRepos.size > 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('redundant repo scopes — org webhook already covers these:')}`)
+    for (const [org, repos] of droppedRepos) {
+      console.log(`     ${chalk.dim(`${org}/{${repos.join(', ')}}`)}`)
+    }
+    console.log(`     ${chalk.dim('Remove these entries from')} ${chalk.cyan('config.repos')} ${chalk.dim('to silence this warning.')}`)
   }
 
   console.log()

@@ -7,9 +7,12 @@ describe('dedupScopes', () => {
       { org: 'codatta' },
       { owner: 'codatta', repo: 'humanbased-monorepo' },
     ]
-    const { scopes, dropped } = dedupScopes(input)
+    const { scopes, dropped, fallbackRepos } = dedupScopes(input)
     expect(scopes).toEqual([{ org: 'codatta' }])
     expect(dropped.get('codatta')).toEqual(['humanbased-monorepo'])
+    expect(fallbackRepos.get('codatta')).toEqual([
+      { owner: 'codatta', repo: 'humanbased-monorepo' },
+    ])
   })
 
   it('keeps repo scope when its owner is not in orgs', () => {
@@ -17,9 +20,25 @@ describe('dedupScopes', () => {
       { org: 'codatta' },
       { owner: 'beingzy', repo: 'founder-dashboard' },
     ]
-    const { scopes, dropped } = dedupScopes(input)
+    const { scopes, dropped, fallbackRepos } = dedupScopes(input)
     expect(scopes).toEqual(input)
     expect(dropped.size).toBe(0)
+    expect(fallbackRepos.size).toBe(0)
+  })
+
+  it('matches org and owner names case-insensitively while preserving display values', () => {
+    const input: Scope[] = [
+      { org: 'motivation-labs' },
+      { owner: 'Motivation-Labs', repo: 'crosscheck' },
+    ]
+    const { scopes, dropped, fallbackRepos } = dedupScopes(input)
+    expect(scopes).toEqual([{ org: 'motivation-labs' }])
+    expect([...dropped.entries()]).toEqual([
+      ['motivation-labs', ['crosscheck']],
+    ])
+    expect(fallbackRepos.get('motivation-labs')).toEqual([
+      { owner: 'Motivation-Labs', repo: 'crosscheck' },
+    ])
   })
 
   it('preserves order: orgs first, then surviving repos in original order', () => {
@@ -31,7 +50,7 @@ describe('dedupScopes', () => {
       { org: 'codatta' },
       { owner: 'codatta', repo: 'symphony' },
     ]
-    const { scopes, dropped } = dedupScopes(input)
+    const { scopes, dropped, fallbackRepos } = dedupScopes(input)
     expect(scopes).toEqual([
       { org: 'Motivation-Labs' },
       { owner: 'beingzy', repo: 'a' },
@@ -41,6 +60,10 @@ describe('dedupScopes', () => {
     expect([...dropped.entries()]).toEqual([
       ['Motivation-Labs', ['monorepo']],
       ['codatta', ['symphony']],
+    ])
+    expect([...fallbackRepos.entries()]).toEqual([
+      ['Motivation-Labs', [{ owner: 'Motivation-Labs', repo: 'monorepo' }]],
+      ['codatta', [{ owner: 'codatta', repo: 'symphony' }]],
     ])
   })
 

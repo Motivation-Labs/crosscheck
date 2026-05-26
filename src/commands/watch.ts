@@ -521,10 +521,11 @@ export async function runWatch(opts: WatchOpts = {}) {
   // Collapse repo scopes already covered by an org scope. Registering both produces
   // duplicate webhook deliveries from GitHub (one per registered hook), which our
   // in-flight dedup absorbs but still clutters logs and burns signature-verification cycles.
-  const { scopes, dropped: droppedRepos } = dedupScopes(rawScopes)
+  const { scopes, dropped: droppedRepos, fallbackRepos } = dedupScopes(rawScopes)
   for (const [org, repos] of droppedRepos) {
     for (const repo of repos) {
-      fileLog({ level: 'info', event: 'scope_deduped', org, owner: org, repo, reason: 'covered_by_org_scope' })
+      const fallback = fallbackRepos.get(org)?.find(s => s.repo === repo)
+      fileLog({ level: 'info', event: 'scope_deduped', org, owner: fallback?.owner ?? org, repo, reason: 'covered_by_org_scope' })
     }
   }
 
@@ -543,6 +544,27 @@ export async function runWatch(opts: WatchOpts = {}) {
   type RegisteredHook =
     | { type: 'org'; org: string; hookId: number }
     | { type: 'repo'; owner: string; repo: string; hookId: number }
+
+  function webhookFailureReason(msg: string, isOrg: boolean): string {
+    const isCreds = /bad credentials|\[401\]/i.test(msg)
+    const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+      || (isOrg && /\[404\]/i.test(msg))
+    return isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
+  }
+
+  function addWebhookFailure(
+    failures: Map<string, { labels: string[]; msg: string }>,
+    reason: string,
+    label: string,
+    msg: string,
+  ): void {
+    const bucket = failures.get(reason)
+    if (bucket) {
+      bucket.labels.push(label)
+    } else {
+      failures.set(reason, { labels: [label], msg })
+    }
+  }
 
   // Mutable tunnel session state — replaced on each reconnect
   let currentTunnelProc: ChildProcess | null = null
@@ -686,6 +708,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     // Register webhooks pointing at the smee channel URL (idempotent — skip if already set).
     // The smee channel URL never changes, so this survives restarts without creating duplicates.
     let smeeOk = 0, smeeFail = 0
+    let smeeTotal = scopes.length
     const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
     for (const scope of scopes) {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
@@ -702,14 +725,27 @@ export async function runWatch(opts: WatchOpts = {}) {
         fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        const isCreds = /bad credentials|\[401\]/i.test(msg)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-          || ('org' in scope && /\[404\]/i.test(msg))
-        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
+        const fallbackOrg = 'org' in scope ? scope.org : null
         smeeFail++
-        const bucket = smeeFailuresByReason.get(reason)
-        if (bucket) { bucket.labels.push(label) } else { smeeFailuresByReason.set(reason, { labels: [label], msg }) }
+        addWebhookFailure(smeeFailuresByReason, webhookFailureReason(msg, fallbackOrg !== null), label, msg)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
+
+        const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
+        smeeTotal += fallback.length
+        await Promise.all(fallback.map(async ({ owner, repo }) => {
+          const repoLabel = `${owner}/${repo}`
+          try {
+            const existing = await findRepoWebhook(owner, repo, channelUrl, token)
+            if (!existing) await registerRepoWebhook(owner, repo, channelUrl, webhookSecret, token)
+            smeeOk++
+            fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: repoLabel, url: channelUrl, fallback_for_org: fallbackOrg })
+          } catch (fallbackErr: unknown) {
+            const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+            smeeFail++
+            addWebhookFailure(smeeFailuresByReason, webhookFailureReason(fallbackMsg, false), repoLabel, fallbackMsg)
+            fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackMsg, fallback_for_org: fallbackOrg })
+          }
+        }))
       }
     }
 
@@ -729,7 +765,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       }
       cLog(`  ${chalk.dim(sample)}`)
     }
-    const smeeTotal = scopes.length
     cLog(`${smeeFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${smeeOk}/${smeeTotal}${smeeFail > 0 ? ` (${smeeFail} failed)` : ''}`)
 
     let smeeRetryDelay = 5_000
@@ -799,6 +834,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
     let hookOk = 0, hookFail = 0
+    let hookTotal = scopes.length
     const failuresByReason = new Map<string, { labels: string[]; msg: string }>()
 
     await Promise.all(scopes.map(async (scope) => {
@@ -847,18 +883,46 @@ export async function runWatch(opts: WatchOpts = {}) {
         hookOk++
         fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
       } else {
+        const fallbackOrg = 'org' in scope ? scope.org : null
         hookFail++
-        const isCreds = /bad credentials|\[401\]/i.test(lastErr)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(lastErr)
-          || ('org' in scope && /\[404\]/i.test(lastErr))
-        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${lastErr}`
-        const bucket = failuresByReason.get(reason)
-        if (bucket) {
-          bucket.labels.push(label)
-        } else {
-          failuresByReason.set(reason, { labels: [label], msg: lastErr })
-        }
+        addWebhookFailure(failuresByReason, webhookFailureReason(lastErr, fallbackOrg !== null), label, lastErr)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
+
+        const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
+        hookTotal += fallback.length
+        await Promise.all(fallback.map(async ({ owner, repo }) => {
+          const repoLabel = `${owner}/${repo}`
+          let fallbackHookId: number | null = null
+          let fallbackLastErr = ''
+          try {
+            fallbackHookId = await findRepoWebhook(owner, repo, webhookUrl, token)
+          } catch { /* ignore — proceed to register */ }
+          if (fallbackHookId === null) {
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (attempt > 0) {
+                const delay = 2 ** attempt * 1000
+                fileLog({ level: 'warn', event: 'webhook_register_retry', scope: repoLabel, attempt, message: fallbackLastErr, fallback_for_org: fallbackOrg })
+                await new Promise(r => setTimeout(r, delay))
+              }
+              try {
+                fallbackHookId = await registerRepoWebhook(owner, repo, webhookUrl, webhookSecret, token)
+                break
+              } catch (fallbackErr: unknown) {
+                fallbackLastErr = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+              }
+            }
+          }
+
+          if (fallbackHookId !== null) {
+            currentRegistered.push({ type: 'repo', owner, repo, hookId: fallbackHookId })
+            hookOk++
+            fileLog({ level: 'info', event: 'webhook_registered', scope: repoLabel, url: webhookUrl, fallback_for_org: fallbackOrg })
+          } else {
+            hookFail++
+            addWebhookFailure(failuresByReason, webhookFailureReason(fallbackLastErr, false), repoLabel, fallbackLastErr)
+            fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackLastErr, fallback_for_org: fallbackOrg })
+          }
+        }))
       }
     }))
 
@@ -881,7 +945,6 @@ export async function runWatch(opts: WatchOpts = {}) {
     }
 
     // Single aggregated connectivity line instead of one per repo
-    const hookTotal = scopes.length
     cLog(`${hookFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${hookOk}/${hookTotal}${hookFail > 0 ? ` (${hookFail} failed)` : ''}`)
     fileLog({ level: 'info', event: 'webhooks_registered', count: hookOk, total: hookTotal, failed: hookFail, url: webhookUrl })
 

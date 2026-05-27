@@ -365,7 +365,18 @@ export async function runWatch(opts: WatchOpts = {}) {
         void verdict
         reviewedPRKeys.add(prKey)
         prRoundCounts.set(prKey, round)
-        if (newDiffHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: newDiffHash })
+        // Recompute the diff hash AFTER runWorkflow — workflow steps such as
+        // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
+        // so the pre-workflow hash may not represent the content that was actually
+        // reviewed. Caching the stale hash would cause a later force-push back to
+        // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
+        if (newDiffHash) {
+          let reviewedHash: string | null = null
+          try {
+            reviewedHash = computeDiffHash(tmpDir, params.baseRef)
+          } catch { /* base unavailable post-workflow — skip cache update */ }
+          if (reviewedHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: reviewedHash })
+        }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,

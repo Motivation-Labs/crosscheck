@@ -710,6 +710,8 @@ export async function runWatch(opts: WatchOpts = {}) {
     let smeeOk = 0, smeeFail = 0
     let smeeTotal = scopes.length
     const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const succeededOrgs = new Set<string>()
+
     for (const scope of scopes) {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
       try {
@@ -717,6 +719,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         if ('org' in scope) {
           existing = await findOrgWebhook(scope.org, channelUrl, token)
           if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+          succeededOrgs.add(scope.org)
         } else {
           existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
           if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
@@ -746,6 +749,22 @@ export async function runWatch(opts: WatchOpts = {}) {
             fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackMsg, fallback_for_org: fallbackOrg })
           }
         }))
+      }
+    }
+
+    // Cleanup: org hook succeeded → delete any stale repo-level hooks for repos now covered by the org hook.
+    // Without this, a repo hook registered before the org scope was added would keep firing,
+    // re-introducing the duplicate-delivery problem the scope dedup is meant to fix.
+    for (const [org, repos] of droppedRepos) {
+      if (!succeededOrgs.has(org)) continue
+      for (const repo of repos) {
+        try {
+          const staleId = await findRepoWebhook(org, repo, channelUrl, token)
+          if (staleId) {
+            await deleteRepoWebhook(org, repo, staleId, token)
+            fileLog({ level: 'info', event: 'webhook_deleted', scope: `${org}/${repo}`, reason: 'covered_by_org_hook' })
+          }
+        } catch { /* best-effort */ }
       }
     }
 

@@ -278,9 +278,15 @@ export async function prHasCrossCheckComment(
 //      canonical "### Code Review by" header, exclude rechecks by the
 //      "> Recheck of" prefix.
 export function isFreshReviewComment(body: string): boolean {
-  const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
-  if (annotationMatch) {
-    const attrs = annotationMatch[1]
+  // Parse the LAST annotation in the body, not the first. The canonical
+  // crosscheck annotation is appended as a footer by postReviewComment; any
+  // earlier `<!-- crosscheck: ... -->` occurrence is quoted example text in
+  // the review body (Codex's own reviews routinely reference marker names),
+  // and reading the first one misclassifies legitimate reviews.
+  const annotationMatches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
+  const lastAnnotation = annotationMatches.at(-1)
+  if (lastAnnotation) {
+    const attrs = lastAnnotation[1]
     if (/\btype=review\b/.test(attrs)) return true
     if (/\btype=/.test(attrs)) return false
     // Untyped annotation: only the 2026-05-18 pre-type review/recheck shape

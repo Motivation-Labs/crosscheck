@@ -82,4 +82,25 @@ describe('isFreshReviewComment', () => {
   it('returns false for an unrelated human comment with neither annotation nor header', () => {
     expect(isFreshReviewComment('LGTM, merging now.')).toBe(false)
   })
+
+  // Guards Codex's PR #149 second-recheck [P2]: review bodies often quote
+  // other crosscheck marker names as part of the finding text (Codex itself
+  // referenced `<!-- crosscheck: fix_applied -->` while reviewing this PR).
+  // Classification must read the FOOTER annotation appended by
+  // postReviewComment, not the first occurrence in the body.
+  it('classifies by the footer annotation, ignoring earlier quoted markers in the body', () => {
+    const body = '### Code Review by ⚡ Codex\n\n'
+      + 'The finding references `<!-- crosscheck: fix_applied -->` as an example of '
+      + 'a non-review annotation.\n\n'
+      + '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->'
+    expect(isFreshReviewComment(body)).toBe(true)
+  })
+
+  it('classifies as recheck when the footer says recheck even if an earlier quoted annotation looks like a review', () => {
+    const body = '> Recheck of [original review](#issuecomment-1)\n\n'
+      + '### Code Review by ⚡ Codex\n\n'
+      + 'Quote of the prior review annotation: `<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->`\n\n'
+      + '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=recheck -->'
+    expect(isFreshReviewComment(body)).toBe(false)
+  })
 })

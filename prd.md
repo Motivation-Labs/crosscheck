@@ -1153,10 +1153,11 @@ These four items fix the two-phase model described in Design Principles. Any new
     - Existing `logs.retention_days` (default 7, max 30) governs both local diagnostics and the telemetry aggregation window. A user who keeps 7-day retention can only ever transmit the last 7 days of aggregated counts — there is no shadow buffer.
 
     **B. Logger upgrades required to source the categories** — every event below must carry the listed fields before category aggregators can be wired up. These are additive and require no schema change to existing consumers.
-    - `review_complete` already has `reviewer`, `verdict`, `tokens_used`, `duration_ms` — **add** `step_type: 'review' | 'recheck'` and `step_name: string` (the workflow step name). Today this event is emitted for both review and recheck and they're indistinguishable from the log alone.
+    - `review_complete` already has `reviewer`, `verdict`, `tokens_used`, `duration_ms` — **add** `step_type: 'review' | 'recheck'`, `step_name: string` (the workflow step name), and `instruction_fingerprint: string` (SHA-256 prefix of the `instructions.md` content active at review time). The first two split review vs recheck (today indistinguishable in the log); the third lets section A's correlation between verdicts and instruction versions actually be built.
     - `fix_complete` already has `applied_count`, `sha`, `delivery`, `tokens_used` — **add** `vendor: 'claude' | 'codex'` and `duration_ms`. Without `vendor` here, tokens-by-vendor aggregation is impossible.
     - `conflict_resolve_complete` already has `conflicts_resolved`, `sha`, `tokens_used` — **add** `vendor` and `duration_ms`.
     - `fix_applied_comment_posted` / `conflict_resolved_comment_posted` / `fix_failed_comment_posted` — **already in place** (PR #149); no change.
+    - New event `optimize_applied` — emitted by `crosscheck optimize` after writing a new `instructions.md` with `{ fingerprint_before, fingerprint_after, source }`. Sources `diagnose` "before/after optimize" deltas in section A.
     - New event `session_idle` — emitted by `watch`/`serve` when no PR has been active for `IDLE_THRESHOLD_MS` (default 60_000ms). Carries no per-PR data.
     - New event `telemetry_sent` — emitted after a successful upload with `{ period, categories, payload_bytes, http_status }`. On failure: `telemetry_send_failed` with `{ category: 'auth' | 'network' | 'rate_limit' | 'server' | 'other', http_status?, message }`.
 
@@ -1180,7 +1181,7 @@ These four items fix the two-phase model described in Design Principles. Any new
     - **`verdicts`** (v1) — `{ review: { APPROVE, NEEDS_WORK, BLOCK }, recheck: { APPROVE, NEEDS_WORK, BLOCK } }`. Broken out by step type so the recheck-improves-verdict signal is observable.
     - **`tokens`** (v1) — `{ by_vendor: { claude, codex }, by_step: { review, recheck, fix, conflict_resolve } }`. Both views over the same totals. Cents/USD never included — token counts only.
     - **`durations`** (v1) — coarse histogram buckets (p50/p90/p99 in ms) for `review`, `recheck`, `fix`, `conflict_resolve` step durations. No per-PR latencies.
-    - **`platform`** (v1) — `{ os: 'darwin' | 'linux' | 'win32', node_version: 'major.minor', crosscheck_version, deployment_mode: 'personal' | 'team', daemon: 'watch' | 'serve', cross_vendor: boolean }`. No hostname, IP, CPU model, RAM, or arch beyond the OS string.
+    - **`platform`** (v1) — `{ os: 'darwin' | 'linux' | 'win32', node_major: int (e.g. 24), deployment_mode: 'personal' | 'team', daemon: 'watch' | 'serve', cross_vendor: boolean }`. `crosscheck_version` is NOT in this category — it lives in the envelope (see section F). `node_major` is the integer major version only (no minor, no patch, no `-prerelease` tags) so it fits the value-shape contract in section H. No hostname, IP, CPU model, RAM, or arch beyond the OS string.
 
     **E. Consent model — categorical, additive, never auto-enable:**
     - Master switch: `telemetry.enabled` (default `false`). When false, no transmission ever happens regardless of category state.
@@ -1192,10 +1193,11 @@ These four items fix the two-phase model described in Design Principles. Any new
 
     **F. Idle-triggered upload + transparency banner:**
     - `watch`/`serve` track `lastActivityAt`, updated on every webhook event, review start/complete, fix push, comment post, or status check. A `session_idle` event fires when `Date.now() - lastActivityAt > IDLE_THRESHOLD_MS` (configurable; default 60s).
-    - On each idle event, if (i) `telemetry.enabled === true`, (ii) at least one category is opted in, and (iii) the current UTC ISO week is later than `telemetry.last_sent_period`, assemble and POST a payload. Otherwise: idle is a no-op.
-    - Cadence ceiling: at most one upload per UTC ISO week per install. Idle that fires more often than that is a no-op for telemetry purposes.
+    - **Sendable categories** at any idle moment = `{ c ∈ registry | telemetry.categories[c.id] === true AND telemetry.consented[c.id] >= c.version }`. The second clause is critical: when a category's version is bumped, the user's prior opt-in (`categories[c.id] === true`) is preserved but is no longer "current" until they re-consent. A bumped category is **excluded from the upload** until the consent prompt clears, even if every other category continues to ship. This stops a stale opt-in from auto-shipping a new shape.
+    - On each idle event, if (i) `telemetry.enabled === true`, (ii) `sendableCategories.length > 0`, and (iii) the current UTC ISO week is later than `telemetry.last_sent_period`, assemble and POST a payload built from sendable categories only. Otherwise: idle is a no-op for telemetry purposes (consent-prompt dispatch in section E still runs).
+    - Cadence ceiling: at most one upload per UTC ISO week per install. Idle that fires more often than that is a no-op.
     - Transmission: HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). 5-second timeout. No retry on the same idle event; if it fails, log `telemetry_send_failed` and try again at the next qualifying idle.
-    - **Wire shape — envelope + categories:** the POST body is JSON with a fixed envelope plus one key per opted-in category. The envelope is the only place identifying-ish metadata lives, and every envelope key is part of the schema contract:
+    - **Wire shape — envelope + categories:** the POST body is JSON with a fixed envelope plus one key per sendable category. The envelope is the only place identifying-ish metadata lives, and every envelope key is part of the schema contract:
       ```jsonc
       {
         // ─── envelope (always present, fixed shape, versioned independently) ───
@@ -1203,16 +1205,16 @@ These four items fix the two-phase model described in Design Principles. Any new
         "install_id":     "a1b2c3d4-...-...",       // UUIDv4, locally generated, never identity-derived
         "crosscheck_version": "0.10.4",
         "period":         "2026-W21",               // UTC ISO week
-        "period_from":    "2026-05-19T00:00:00Z",
-        "period_to":      "2026-05-26T00:00:00Z",
+        "period_from":    "2026-05-18T00:00:00Z",   // Mon, inclusive
+        "period_to":      "2026-05-25T00:00:00Z",   // Mon of next week, exclusive
         "sent_at":        "2026-05-28T03:15:42Z",
         "categories":     ["pipeline", "tokens", "platform"],  // mirror of which keys below are present
 
-        // ─── one key per opted-in category (each shape governed by its registry entry) ───
+        // ─── one key per sendable category (each shape governed by its registry entry) ───
         "pipeline": { "prs_received": 47, "reviews": 47, "rechecks": 12, "fixes_succeeded": 18, "fixes_failed": 7 },
         "tokens":   { "by_vendor": { "claude": 412300, "codex": 98700 },
                       "by_step":   { "review": 412000, "fix": 98000, "conflict_resolve": 1000 } },
-        "platform": { "os": "darwin", "node_version": "24.x", "deployment_mode": "personal",
+        "platform": { "os": "darwin", "node_major": 24, "deployment_mode": "personal",
                       "daemon": "watch", "cross_vendor": true }
       }
       ```
@@ -1221,7 +1223,8 @@ These four items fix the two-phase model described in Design Principles. Any new
       ```
       [telemetry] uploaded 0.4 KB usage report at 2026-05-28 03:15:42 UTC
                   install: a1b2c3d4  (rotate: `crosscheck telemetry reset-id`)
-                  period:  2026-W21  (Mon 2026-05-19 → Sun 2026-05-25)
+                  version: 0.10.4    (in the envelope, not the platform category)
+                  period:  2026-W21  (Mon 2026-05-18 → Sun 2026-05-24)
                   endpoint: https://telemetry.crosscheck.dev/v1/report
                   categories sent: pipeline, tokens, platform
                   payload:
@@ -1229,8 +1232,8 @@ These four items fix the two-phase model described in Design Principles. Any new
                                  fixes_succeeded: 18, fixes_failed: 7 }
                     tokens   = { by_vendor: { claude: 412300, codex: 98700 },
                                  by_step:   { review: 412000, fix: 98000, conflict_resolve: 1000 } }
-                    platform = { os: darwin, node: 24.x, version: 0.10.4,
-                                 deployment_mode: personal, daemon: watch, cross_vendor: true }
+                    platform = { os: darwin, node_major: 24, deployment_mode: personal,
+                                 daemon: watch, cross_vendor: true }
                   to opt out: `crosscheck telemetry disable [<category>|all]`
       ```
     - Banner is printed even when `--quiet` is set — the user is owed transparency about what left their machine. The only flag that suppresses it is `--no-banner-telemetry` (deliberately verbose so accidental suppression is unlikely).
@@ -1288,6 +1291,7 @@ These four items fix the two-phase model described in Design Principles. Any new
     - **Consent state machine:** first-run prompt with no input → master stays `false`, no categories opted in. First-run prompt with `tokens platform` → those two categories enabled, others not, `consented.tokens === 1`, `consented.platform === 1`. New category added in registry → existing categories' state preserved, prompt shows only the new category on next idle, decline persists. Bumping `tokens.version` from 1 to 2 → prompt re-fires for `tokens` only.
     - **Idle dispatcher:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. Subsequent activity resets the clock. With `telemetry.enabled: false`, idle never calls `maybeSend`.
     - **Cadence ceiling:** two idle events in the same UTC week → one HTTP POST. Idle in a new week → one more POST. `last_sent_period` advances.
+    - **Version-consent gate:** opt-in with `consented[tokens] === 1` while the registry has `tokens.version === 1` → `tokens` is sendable. Bump the registry to `tokens.version === 2` without re-consenting → `tokens` is NOT in the next POST. Re-consent to v2 → `tokens` is back in the POST. Other categories at current-version consent continue to ship throughout. An assertion guards `(consented[id] < category.version) ⇒ id ∉ payload.categories`.
     - **Banner content:** mock the transport. After a successful send, the banner stdout contains the exact endpoint URL, install_id prefix, period range, every opted-in category id, and the literal payload values. `--no-banner-telemetry` suppresses the banner but the POST still goes out.
     - **Transmission failure paths:** network error → `telemetry_send_failed { category: 'network' }` event; 401 → `category: 'auth'`; 429 → `category: 'rate_limit'`; 5xx → `category: 'server'`. None of these throw to the caller.
     - **`telemetry preview` is offline-safe:** runs with `enabled: false`, makes zero network calls, prints the same banner format with a `(dry-run — not sent)` suffix.

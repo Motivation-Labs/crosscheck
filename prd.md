@@ -1142,6 +1142,108 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
+- [ ] **Auto-fix gate redesign — outcome-based invariant, bounded inner loop, single coherent gate** — replace today's two overlapping guards (`step.max_rounds` in workflow.yml + the hard-coded `MAX_CROSSCHECK_COMMITS` in runner.ts) with one purpose-built gate, give `workflow.yml` a real loop primitive so a non-APPROVE recheck can drive another fix attempt, and tie the whole thing to a measured product outcome instead of an internal-state knob. The current shape was assembled piece by piece — `max_rounds` resets on daemon restart, `MAX_CROSSCHECK_COMMITS` persists across sessions, and they were never reasoned about together. Concretely, log analysis on 2026-05-28 across 397 `review_complete` events with the `round` field showed that on initial reviews (round=1, n=203) fix is attempted 18.2% of the time and succeeds 10.8%; on rechecks (round≥2, n=194) fix is attempted 10.3% and succeeds 5.7%, with `max_rounds` (28.4%) the dominant blocker — but without a stated product invariant there's no way to say whether those rates are correct, bad, or excellent. This entry redesigns the gates around a measured outcome. **Lands in three sequential PRs (instrumentation → design land + grammar → tune defaults) so behavior changes only after data justifies them.**
+  - **User:** Anyone running `watch`/`serve` whose PRs receive non-APPROVE verdicts. Power users authoring custom `workflow.yml`. Maintainers tuning crosscheck's default behavior.
+  - **Acceptance Criteria:**
+
+    **A. The product invariant — what auto-fix is optimizing for:**
+    - The primary outcome metric is **resolution rate**: of PRs whose *initial* review verdict was `NEEDS_WORK` or `BLOCK`, the fraction that subsequently receive a `verdict=APPROVE` from any reviewer within the configured `resolution_window_days` (default: 14, max: 30). Verdict source can be crosscheck (auto-recheck after a fix), a manually-triggered `crosscheck review`, or another approval pathway — what matters is the PR closed its review loop.
+    - Secondary metric: **time-to-APPROVE** (p50, p90) measured from the first non-APPROVE verdict to the first APPROVE verdict.
+    - Guardrail counter-metrics — none of these may regress when defaults are tuned:
+      - Mean `[crosscheck]` commits per resolved PR (defends against the bot dominating the branch).
+      - Wasted-fix rate: % of `fix_complete` events that are NOT followed by an APPROVE recheck within 2 subsequent verdicts on the same PR.
+      - Fix→regression rate: % of `fix_complete` events whose next verdict on the same PR is *worse* than the verdict that triggered them (e.g. NEEDS_WORK → BLOCK after a bot fix).
+    - Resolution rate is computed across rolling 14-day windows and surfaced by `crosscheck diagnose --resolution`. Comparing windows before and after a defaults change is the evidence used to accept or revert the change.
+
+    **B. Instrumentation prerequisites — land first, no behavior changes:**
+    - `step_type: 'review' | 'recheck'` on `review_complete` (already specified in the telemetry entry's section B — this redesign declares it a hard dependency, not a parallel ask).
+    - New `workflow_complete` event with `{ workflow_id, steps_run: string[], last_step, last_verdict, ended_reason: 'completed' | 'max_iterations' | 'progress_gate' | 'error' | 'manual_abort', total_duration_ms }`. Emitted exactly once per `runWorkflow` invocation, in a `finally` so it fires even on errors. Closes the "no_followup vs crash" ambiguity (the 17.2% no_followup on initial reviews is currently indistinguishable from a session crash).
+    - New `pr_resolution` event with `{ owner, repo, pr, initial_verdict, final_verdict, initial_verdict_at, final_verdict_at, crosscheck_commits, human_commits_after_first_review, resolution_path: 'crosscheck_only' | 'human_only' | 'mixed' | 'never_resolved' }`. Emitted by a daily sweep job that scans local logs + the PR's GitHub timeline; idempotent on `(owner, repo, pr)`.
+    - `crosscheck diagnose` gains a `--resolution [--since=14d]` subcommand surfacing: resolution rate, time-to-APPROVE distribution, the corrected post-review outcome table (Initial / Recheck / Unknown — using the `round` field), and the three guardrail counter-metrics. No new flags affect existing diagnose output.
+
+    **C. The single new gate — `fix_attempts_since_progress`:**
+    - Both `step.max_rounds` (per-process, resets on restart) and `MAX_CROSSCHECK_COMMITS` (lifetime, persistent) are retired from the gate path. They are kept readable for migration warnings only (see section E).
+    - The new gate counts **consecutive fix attempts that have not produced progress**, persisted at `~/.crosscheck/state/pr-progress.json` keyed by `<owner>/<repo>#<pr>`:
+      ```jsonc
+      {
+        "codatta/humanbased-monorepo#173": {
+          "fix_attempts_since_progress": 1,
+          "last_progress_at": "2026-05-28T04:44:57Z",
+          "last_progress_signal": "fix_complete"
+        }
+      }
+      ```
+    - **Progress signals (any one resets the counter to 0):**
+      - The PR receives a `verdict=APPROVE` from any reviewer (the goal was reached).
+      - A non-crosscheck commit is pushed to the PR branch (a human is engaging — let them).
+      - A human comment is posted on the PR after the most recent fix attempt (human acknowledged or directed work).
+    - **Increment signal:** every `fix_complete` and every `fix_skipped(fix_error)` (the timeout cases) bumps the counter by 1.
+    - **Gate:** `fix` step is skipped with reason `progress_gate` when `fix_attempts_since_progress >= fix_attempts_max` (default: **3**, configurable in `routing` or `post_review`).
+    - State file is read in `runWorkflow` start, written transactionally (write to `.tmp`, rename) on each update. Corrupted state file → treat as if the PR is at counter=0, log `pr_progress_state_corrupt` once, continue.
+    - Stale entry pruning: entries older than 90 days (configurable) are dropped by the daily sweep.
+
+    **D. Workflow grammar — a `loop` block that the recheck verdict actually drives:**
+    - Today's grammar is a flat `steps: [...]` array. The redesign adds a `loop` block as a step type:
+      ```yaml
+      steps:
+        - name: review
+          type: review
+        - name: fix-recheck-loop
+          type: loop
+          until: last_verdict == 'APPROVE'   # exits when condition becomes true
+          max_iterations: 3                  # safety cap; separate from the progress gate
+          steps:
+            - name: fix
+              type: fix
+              when: last_verdict != 'APPROVE'
+            - name: recheck
+              type: recheck
+      ```
+    - The loop exits when **ANY** of the following becomes true (defense in depth):
+      1. `until:` condition is met (the happy path — verdict is APPROVE).
+      2. `max_iterations:` reached (safety cap on the loop body itself).
+      3. The progress gate (section C) fires inside the loop — `fix` is skipped with reason `progress_gate`, loop terminates with `ended_reason: 'progress_gate'`.
+      4. Any step inside the loop throws an unhandled error.
+    - The loop's `until:` and inner `when:` clauses reference a new variable `last_verdict` — the most recent review verdict in the current `runWorkflow` invocation. This makes the recheck verdict actually drive what happens next, instead of being advisory.
+    - Existing flat workflows continue to work — the runner treats them as a single-iteration loop with `until: true` (always exits after one pass). No behavior change for current users.
+
+    **E. Migration — old keys deprecated, never silently changed:**
+    - On `runWorkflow` start, if the loaded `workflow.yml` contains `step.max_rounds` on any step, log `workflow_deprecated_field { field: 'step.max_rounds', step: <name> }` at `warn` and map the field to the closest equivalent: `loop.max_iterations` if the step is inside an explicit `loop:`; otherwise ignored (with the warning).
+    - If `MAX_CROSSCHECK_COMMITS` is referenced anywhere in user config or env, log `commit_limit_deprecated` once per session.
+    - New CLI `crosscheck workflow migrate` reads the user's workflow.yml, rewrites it using the new grammar with mapped semantics, and writes a diff to stdout before applying. Idempotent: running on an already-new workflow exits with `nothing to migrate`.
+    - **`get-started.md` adds a migration section** with the before/after workflow.yml side-by-side and an explanation of the gate change.
+
+    **F. Defaults are chosen AFTER measurement, not now:**
+    - The instrumentation PR (section B) ships with no behavior changes. The grammar PR (sections C+D+E) ships with defaults chosen to be conservative: `fix_attempts_max: 3`, `loop.max_iterations: 3` — close to today's combined behavior.
+    - A third PR proposes the production defaults backed by ≥ 14 days of `pr_resolution` data showing: projected resolution-rate delta, projected commits-per-resolved-PR delta, and zero regression on the wasted-fix and fix→regression guardrails. That PR's description must include the actual numbers from `diagnose --resolution` runs before and after a local A/B on the author's own monitored repos.
+    - No defaults change is acceptable on instinct. If the data isn't conclusive, defaults stay where they are.
+
+  - **Technical Notes:**
+    - New file: `src/lib/pr-progress.ts` — `loadState()`, `saveState()`, `recordFixAttempt(owner,repo,pr)`, `recordProgress(owner,repo,pr,signal)`, `getCounter(owner,repo,pr)`, `pruneStale(daysOld)`. NDJSON-adjacent — same write pattern as logger.ts (atomic rename) but a single JSON file because reads are random-access by PR key.
+    - New file: `src/lib/workflow-loop.ts` — parses the `loop:` block, evaluates `until:` and `max_iterations:`, dispatches inner steps, increments the progress counter via `pr-progress.ts`. Pure function over the step list; no I/O beyond delegating to existing runner step handlers.
+    - `src/lib/workflow.ts`: extend the zod schema with the `loop` step type; keep backward compat for flat workflows.
+    - `src/lib/runner.ts`: the existing for-loop over `workflow.steps` dispatches `loop` steps to `workflow-loop.ts`. The `fix` step handler queries `pr-progress.getCounter` and emits `step_skipped(progress_gate)` when over the threshold. The retired `step.max_rounds` and `MAX_CROSSCHECK_COMMITS` gates are removed from the hot path; their migration warnings live in `loadWorkflow()`.
+    - `src/lib/logger.ts`: add `workflow_complete`, `pr_resolution`, `workflow_deprecated_field`, `commit_limit_deprecated`, `pr_progress_state_corrupt`, `step_skipped(progress_gate)` to the known event vocabulary.
+    - `src/commands/diagnose.ts`: implement `--resolution [--since]`; reads `pr_resolution` events from the local NDJSON, plus the existing `review_complete` events with the `round` and `step_type` fields, and computes the table above.
+    - New file: `src/commands/workflow.ts` — handlers for `crosscheck workflow migrate` and `crosscheck workflow validate`.
+    - Schema additions to `src/config/schema.ts`:
+      ```ts
+      post_review: z.object({
+        // ... existing fields ...
+        fix_attempts_max: z.number().int().min(1).default(3),
+        resolution_window_days: z.number().int().min(1).max(30).default(14),
+        progress_state_path: z.string().default('~/.crosscheck/state/pr-progress.json'),
+        progress_state_stale_days: z.number().int().min(7).default(90),
+      })
+      ```
+  - **Tests Required:**
+    - **Progress state file:** corruption (`{` truncated) is recoverable — `getCounter` returns 0, single warn log, no throw. Concurrent writes from two `runWorkflow` invocations on the same machine never lose updates (test uses two child processes; atomic rename guarantees one wins, neither corrupts). Stale entries past `progress_state_stale_days` are pruned.
+    - **Progress signal handling:** APPROVE verdict resets counter to 0. Human commit on branch (non-`[crosscheck]` author/message) resets to 0. Human comment after the most recent fix attempt resets to 0. Two consecutive `fix_complete` events (no progress signal between) leave counter at 2. After 3 consecutive bumps with no progress, `fix` step emits `step_skipped(progress_gate)`.
+    - **Loop primitive:** flat workflow runs as a single-iteration loop (current behavior). Loop with `until: last_verdict == 'APPROVE'` and a fix that lands an APPROVE on iteration 2 exits at 2. Loop with `max_iterations: 3` and a verdict that never reaches APPROVE exits with `ended_reason: 'max_iterations'`. Loop where the inner fix step hits the progress gate exits with `ended_reason: 'progress_gate'`. An exception in an inner step propagates with `ended_reason: 'error'`.
+    - **Migration:** workflow.yml with `step.max_rounds: 3` on a `fix` step → warning logged, gate behavior is now the progress gate, not `max_rounds`. `crosscheck workflow migrate` rewrites the file in idempotent diff form. Re-running `migrate` on the rewritten file says `nothing to migrate`.
+    - **Resolution metric:** synthetic log fixture where 10 PRs got initial NEEDS_WORK, 7 reached APPROVE within 14 days, 1 reached APPROVE on day 15, 2 stayed open → resolution rate is 70%. Of the 7 resolved, 4 closed via crosscheck commits (resolution_path: `crosscheck_only`) and 3 via human commits (`human_only`). Guardrail counters compute correctly.
+    - **No behavior change on instrumentation-only PR:** running the section-B PR against a frozen workflow.yml and a fixed set of webhook events produces the same set of GitHub comments and the same PR state as the prior commit — only the local log is richer.
+
 - [ ] **Tiered Feedback Loops — local usage analytics, instruction-effectiveness signals, and safe opt-in telemetry** — three-tier system that measures crosscheck's real-world impact, feeds those signals back into `optimize`, and—only with explicit consent—sends de-identified aggregate counts to inform future development. Privacy-first by design: sensitive data never leaves the machine; telemetry is opt-in (off by default).
   - **User:** All crosscheck users benefit from better defaults driven by real usage. Contributors to the project benefit from aggregate signal. Power users benefit from local analytics surfaced in `diagnose`.
   - **Acceptance Criteria:**

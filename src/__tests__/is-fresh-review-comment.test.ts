@@ -63,6 +63,22 @@ describe('isFreshReviewComment', () => {
     )).toBe(false)
   })
 
+  // Guards Codex's PR #149 [P2]: 2026-05-18 annotated reviews (between commits
+  // 9a0c324 and 36c915d) carry `<!-- crosscheck: origin reviewer verdict -->`
+  // without a `type=` field. They must still classify as fresh reviews so
+  // recheck backlink discovery survives the upgrade.
+  it('returns true for a pre-type-era annotated review (annotation without type=, has reviewer=, has header)', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK -->',
+    )).toBe(true)
+  })
+
+  it('returns false for a pre-type-era annotated recheck (no type=, has reviewer=, "> Recheck of" prefix)', () => {
+    expect(isFreshReviewComment(
+      '> Recheck of [original review](#issuecomment-1)\n\n### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK -->',
+    )).toBe(false)
+  })
+
   it('returns false for an unrelated human comment with neither annotation nor header', () => {
     expect(isFreshReviewComment('LGTM, merging now.')).toBe(false)
   })

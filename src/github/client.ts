@@ -264,17 +264,32 @@ export async function prHasCrossCheckComment(
 }
 
 // True iff `body` is a fresh review comment that a recheck should link back to.
-// Annotation is the source of truth: a comment carrying `<!-- crosscheck: ... -->`
-// is a review only when its tag contains `type=review`. Any other crosscheck
-// annotation (`type=recheck`, `fix_failed`, `fix_applied`, `conflict_resolved`,
-// `no_diff_change`, future markers) is non-review by construction.
-// The header/prefix check is a legacy fallback for pre-annotation comments only.
+// Classification cascade:
+//   1. Annotation with `type=review`      → review.
+//   2. Annotation with any other `type=`  → not a review (recheck, etc.).
+//   3. Annotation without `type=` but carrying `reviewer=` → pre-type-era review
+//      (2026-05-18 annotated comments between commits 9a0c324 and 36c915d carry
+//      `origin/reviewer/verdict` without a `type=` field). Fall through to the
+//      header check so these are still found by getLastCrossCheckCommentId.
+//   4. Annotation without `type=` and without `reviewer=` → summary or
+//      notification marker (`fix_failed`, `fix_applied`, `conflict_resolved`,
+//      `no_diff_change`, future bare markers). Not a review.
+//   5. No annotation → legacy pre-annotation comment. Identify reviews by the
+//      canonical "### Code Review by" header, exclude rechecks by the
+//      "> Recheck of" prefix.
 export function isFreshReviewComment(body: string): boolean {
   const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
   if (annotationMatch) {
-    return annotationMatch[1].includes('type=review')
+    const attrs = annotationMatch[1]
+    if (/\btype=review\b/.test(attrs)) return true
+    if (/\btype=/.test(attrs)) return false
+    // Untyped annotation: only the 2026-05-18 pre-type review/recheck shape
+    // carries `reviewer=`; summary/notification markers do not. Without it,
+    // this is a non-review annotation and must not match.
+    if (!/\breviewer=/.test(attrs)) return false
+    // Untyped + has reviewer= → pre-type review; verify with the legacy header
+    // check below (the recheck prefix excludes pre-type rechecks).
   }
-  // Legacy (pre-annotation era): identify reviews by the header, exclude rechecks by the prefix.
   return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
 }
 

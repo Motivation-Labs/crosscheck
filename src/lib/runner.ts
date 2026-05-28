@@ -13,6 +13,7 @@ import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
+import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 
@@ -379,6 +380,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ctx.crosscheckShas.add(newSha)
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed })
+
+        // Post a summary comment so the silent commit push is visible on the timeline
+        // as a comment card. Best-effort — a failure here must not fail the run.
+        try {
+          const octokit = createGithubClient(token)
+          const body = buildFixAppliedCommentBody({
+            owner, repo: repoName, sha: newSha, appliedCount,
+            reviewCommentId: reviewResult.commentId,
+          })
+          await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+          fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'fix_applied_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
@@ -593,6 +609,24 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
       fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
+
+      // Post a summary comment so the silent merge-commit push is visible on the
+      // timeline as a comment card. Best-effort — a failure here must not fail the run.
+      // Prefer the resolver's actual rewrite set; fall back to the originally-conflicted
+      // list if the resolver didn't surface paths.
+      try {
+        const octokit = createGithubClient(token)
+        const body = buildConflictResolvedCommentBody({
+          owner, repo: repoName, sha: newSha,
+          conflictCount: conflictedFiles.length,
+          files: resolvedPaths.length > 0 ? resolvedPaths : conflictedFiles,
+        })
+        await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+        fileLog({ level: 'info', event: 'conflict_resolved_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'conflict_resolved_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+      }
+
       results[step.name] = { applied_count: appliedCount }
     }
   }

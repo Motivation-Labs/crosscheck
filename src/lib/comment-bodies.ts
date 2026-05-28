@@ -1,0 +1,70 @@
+// Comment bodies posted after silent-commit step pushes (fix in commit mode,
+// conflict-resolve) so the timeline shows a card instead of just a "X pushed
+// N commits" line. Pure functions — kept here so they can be unit-tested
+// without exercising the runner.
+
+// Cap the file list at this length to keep comment bodies readable when a
+// resolve touches many files.
+const MAX_FILES_LISTED = 20
+
+export interface FixAppliedCommentInput {
+  owner: string
+  repo: string
+  sha: string
+  appliedCount: number
+  reviewCommentId?: number
+}
+
+export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): string {
+  const { owner, repo, sha, appliedCount, reviewCommentId } = input
+  const shortSha = sha.slice(0, 7)
+  const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
+  const backlink = reviewCommentId
+    ? ` addressing the [code review](#issuecomment-${reviewCommentId})`
+    : ''
+  const plural = appliedCount !== 1 ? 's' : ''
+  return [
+    '### ✅ Auto-fix applied',
+    '',
+    `Pushed [\`${shortSha}\`](${commitUrl})${backlink}: **${appliedCount} change${plural} applied**.`,
+    '',
+    '---',
+    '_Applied by crosscheck via Claude Code._',
+    '',
+    '<!-- crosscheck: fix_applied -->',
+  ].join('\n')
+}
+
+export interface ConflictResolvedCommentInput {
+  owner: string
+  repo: string
+  sha: string
+  conflictCount: number
+  files: string[]
+}
+
+export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentInput): string {
+  const { owner, repo, sha, conflictCount, files } = input
+  const shortSha = sha.slice(0, 7)
+  const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
+  const plural = conflictCount !== 1 ? 's' : ''
+
+  const shown = files.slice(0, MAX_FILES_LISTED)
+  const remainder = files.length - shown.length
+  const fileLines = shown.map(p => `- \`${p}\``)
+  if (remainder > 0) fileLines.push(`- _...and ${remainder} more_`)
+
+  return [
+    '### 🔀 Conflicts resolved',
+    '',
+    `Resolved ${conflictCount} conflict${plural} in:`,
+    ...fileLines,
+    '',
+    `Pushed [\`${shortSha}\`](${commitUrl}).`,
+    '',
+    '---',
+    '_Resolved by crosscheck via Claude Code._',
+    '',
+    '<!-- crosscheck: conflict_resolved -->',
+  ].join('\n')
+}

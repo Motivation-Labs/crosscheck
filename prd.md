@@ -368,6 +368,50 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/onboard.ts` — add `promptConflictResolve`, `detectConflictResolveEnabled`; update `OnboardDecisions`, `buildWorkflowYaml`, `applyOnboardConfig`.
   - **Tests Required:** `conflict-resolve: true` → workflow step count increases by 1 and first step type is `conflict-resolve`; re-run with `conflict-resolve: false` regenerates (step removed); `detectConflictResolveEnabled` returns correct values; `--yes` preserves existing setting.
 
+- [ ] **`ck run --smart` — resume workflow at the correct step based on PR state** — today `ck run <pr-url>` always restarts the configured workflow from step 1 (review). On a PR that already has a crosscheck review and a fix commit, this re-reviews work that was already addressed and posts a duplicate first-round comment. Smart mode inspects the PR's existing crosscheck artifacts (review comments + their verdicts, `[crosscheck]` fix commits, recheck comments, HEAD SHA vs last reviewed SHA) and resumes the workflow at the step that matches current state — so `ck run` becomes idempotent across re-invocations against the same PR. The first thing smart mode posts is a one-line "taking over" announcement naming the resume step; subsequent step-wise comments behave exactly like a normal run.
+  - **User:** Anyone who manually runs `ck run` on a PR that has already been partially processed by crosscheck (either by an earlier `ck run`, by `watch`/`serve`, or by a different operator on a different machine). Also resolves the operational pain of "I want to push crosscheck forward one step on this PR without re-running the whole pipeline".
+  - **Acceptance Criteria:**
+    - New flag `--smart` on `ck run` (additive, optional; default behavior unchanged). Long-form only — no short alias to keep the surface minimal. Combinable with `--reviewer`, `--steps`, `--config`, and `--dry-run`. When `--steps` is also provided, `--steps` wins (explicit beats inferred) and a `dim`-style note is logged.
+    - **State detection (pure helper `detectResumeStep` in `src/lib/smart-run.ts`):**
+      Inputs: ordered list of issue comments on the PR (with their `<!-- crosscheck: ... -->` annotations parsed via the existing annotation contract), the PR's HEAD SHA, the configured workflow steps. Output: `{ resumeStep: WorkflowStep | null, reason: string, lastReviewSha: string | null, lastReviewVerdict: 'APPROVE' | 'NEEDS WORK' | 'BLOCK' | null }`.
+      Resolution rules — evaluated top-down, stop at first match:
+      1. **No prior crosscheck review comment** → `resumeStep = first step (review)`, reason `no_prior_review`. (Identical to default behavior; smart mode is a no-op here.)
+      2. **Last crosscheck review verdict was `APPROVE` AND HEAD SHA matches the SHA the review was posted against** → `resumeStep = null`, reason `already_approved_unchanged`. Skip entirely with a one-line console + announcement comment ("already approved at <sha>, nothing to do").
+      3. **Last crosscheck review verdict was `NEEDS WORK` or `BLOCK` AND no `<!-- crosscheck: fix_applied -->` comment exists for that review's SHA chain** → `resumeStep = fix step`, reason `review_pending_fix`.
+      4. **A `fix_applied` comment exists for the last review AND no recheck has run against HEAD** → `resumeStep = recheck step`, reason `fix_pending_recheck`.
+      5. **Last crosscheck artifact is a recheck AND new non-crosscheck commits have landed since (HEAD SHA differs from the recheck's annotated SHA)** → `resumeStep = first step (review)`, reason `new_commits_after_recheck`. The new review is round 2; the existing annotation chain remains as history.
+      6. **Configured workflow has no matching step type for the inferred resume** (e.g. user runs `--smart` against a `review-only` workflow but state says "fix pending") → fall back to first step + warning printed: `--smart inferred '<step>' but workflow has no such step; restarting from review`.
+    - **Announcement comment:** Before the resumed step runs, smart mode posts exactly one issue comment with the standard annotation tag. Body shape:
+      ```
+      ### 🤖 Crosscheck (smart resume)
+      Resuming at **<step name>** — <human reason>.
+      <!-- crosscheck: smart_resume step=<step_name> reason=<reason_slug> from_sha=<short_sha> -->
+      ```
+      `<reason_slug>` matches the values in the resolution rules above (`review_pending_fix`, `fix_pending_recheck`, `new_commits_after_recheck`). When `resumeStep` is the very first step (rules 1 and 5), no announcement is posted — that case is observationally identical to a fresh run, so adding a comment would be noise.
+    - **Resume execution:** smart mode rewrites the `filteredSteps` array passed to `runWorkflow` to start at the resolved step (preserving subsequent steps). The runner then behaves exactly as today — same step-wise comments, same verdict posting, same `pushedShas` lock semantics. No changes to `runner.ts` are required if the slice is built before `runWorkflow` is called.
+    - **Idempotency guard:** if rule 2 fires (already approved, unchanged), no `acquireRemoteLock` / `acquirePRLock` is taken — we exit before clone. This avoids surfacing a useless `pending` commit status for a no-op.
+    - **Dry-run interaction:** with `--smart --dry-run`, detection runs and the resume decision is printed, but no announcement comment is posted and no workflow step runs.
+    - **Logging:** new event `smart_resume_decided` emitted at info level with `{ pr, resume_step, reason, last_review_sha, last_review_verdict, head_sha }`.
+    - Out of scope for v1: smart mode for `watch`/`serve` (webhook-driven flows already key off the synchronize/opened action and already dedup on existing comments — smart mode is specifically a manual-resume feature for `ck run`).
+  - **Technical Notes:**
+    - New file: `src/lib/smart-run.ts` — exports `detectResumeStep(opts) → ResumeDecision` (pure, no I/O) and `buildResumeAnnouncementBody(decision) → string` (pure). Keeps the detection logic unit-testable without mocking GitHub.
+    - Issue comments are fetched via existing `listPRComments` (`src/github/client.ts`); annotation parsing already exists in `src/lib/annotation.ts`. `fix_applied` and `conflict_resolved` annotations are emitted by `src/lib/comment-bodies.ts` and must be added to the annotation parser if not already covered (verify before implementation).
+    - `commands/run.ts` change is minimal: after fetching PR data and resolving `filteredSteps`, branch on `opts.smart` → call `detectResumeStep` with comments + head SHA + steps → if `resumeStep === null` print the no-op message and return early; else slice `filteredSteps` to start at the resume step, post the announcement comment via `octokit.rest.issues.createComment`, then proceed into the existing clone + `runWorkflow` flow unchanged.
+    - The announcement comment is posted *before* `acquireRemoteLock` so observers see crosscheck's intent immediately; if lock acquisition then fails (another machine is mid-review), the announcement is left behind. This is acceptable — it documents that *a* smart run attempted to take over, even if it lost the race. Alternative (post after lock) is rejected: it would mean the comment never appears if the run is interrupted between lock and step execution, hiding intent.
+    - `--smart` does **not** override `--reviewer`. Both flags are independent. The resume step's `reviewer` field is pinned the same way as today (the `.map(...)` block at `commands/run.ts:98–100`).
+    - Depends on P3 annotations being present in posted comments — which is already shipped per the annotation contract in CLAUDE.md. If a legacy PR has crosscheck comments without annotation tags, smart mode treats them as "no prior crosscheck artifact" (rule 1 fires) and starts from review. Document this in the help text.
+  - **Tests Required:**
+    - `detectResumeStep` unit tests, one per rule (1–6), feeding synthetic comment arrays + SHAs + step lists.
+    - PR with one APPROVE review + no new commits → rule 2, `resumeStep = null`.
+    - PR with one NEEDS WORK review + no fix commit → rule 3, `resumeStep = fix`.
+    - PR with NEEDS WORK review + matching `fix_applied` annotation → rule 4, `resumeStep = recheck`.
+    - PR with recheck APPROVE + a later non-crosscheck commit (different SHA, no `[crosscheck]` prefix) → rule 5, `resumeStep = review`, round 2.
+    - PR with `--smart` but workflow is `review-only` and state says "fix pending" → rule 6, fallback to first step + warning logged.
+    - Integration: `ck run --smart <url>` with no prior reviews behaves byte-identically to `ck run <url>` (no announcement comment, no extra API calls beyond the comments-list fetch).
+    - Integration: `ck run --smart --dry-run` prints decision and does not post any comment.
+    - `--smart --steps fix` → `--steps` wins; smart detection is skipped; note logged.
+    - `buildResumeAnnouncementBody` produces a body that round-trips through the existing annotation parser yielding `smart_resume` + the expected `step`/`reason`/`from_sha` fields.
+
 - [x] **Onboard — workflow, mode, and pipeline steps** — extend `crosscheck onboard` with interactive steps for review mode (cross-vendor vs single-vendor) and workflow pipeline (review-only, review→fix, review→fix→re-check). Mode step is shown only when both AI CLIs are authenticated; pipeline step always shown.
   - **User:** Anyone running `crosscheck onboard` for the first time, or re-running after installing a second AI CLI.
   - **Acceptance Criteria:**
@@ -1186,13 +1230,24 @@ These four items fix the two-phase model described in Design Principles. Any new
     **E. Consent model — categorical, additive, never auto-enable:**
     - Master switch: `telemetry.enabled` (default `false`). When false, no transmission ever happens regardless of category state.
     - Per-category state: `telemetry.categories.<id>` (default `false` for each).
-    - Per-category consent record: `telemetry.consented.<id>` = highest category version the user has been prompted for. Used to detect new versions on upgrade.
-    - **First-run flow** — when `crosscheck watch` or `crosscheck serve` starts and `telemetry.enabled` has never been set, on the first idle moment (not at startup — see F): show a single consent screen listing every registered category, its one-sentence summary, and the literal field list. The user picks per-category (`all | none | <space-separated category ids>`); default is `none`. Persist `telemetry.enabled` and `telemetry.categories.*` to `~/.crosscheck/config.yml`. Set `telemetry.consented.<id>` to each category's current version.
-    - **Upgrade flow** — when a new category exists in the registry that the user has never seen (`telemetry.consented[id] === undefined`), or its version is higher than what the user consented to, prompt for just that category on the next idle moment. Existing categories' opt-in state is preserved. The user is never asked about a category they've already declined unless they explicitly run `crosscheck telemetry reset`.
-    - The consent prompt never blocks PR processing — it's printed at idle, and the user has 30 seconds to respond; non-response = `none` for this session, prompt again next idle.
+    - Per-category consent record: `telemetry.consented.<id>` = highest category version the user has **explicitly responded to** (accepted OR declined). Used to detect new versions on upgrade. **Undefined means the user has not yet given a response** — even if they were shown the prompt and let it time out.
+    - Prompt rate-limit: `telemetry.last_prompted_at` (ISO timestamp, per-install, not per-category) is set every time a prompt is shown. The next prompt is suppressed until `now - last_prompted_at >= telemetry.prompt_cooldown_ms` (default 24h). Without this, a 60-second idle threshold plus a 30-second timeout would re-show the same prompt every couple of minutes.
+    - **First-run flow** — when `crosscheck watch` or `crosscheck serve` starts and `consented` is empty, on the first idle moment that clears the cooldown (see F): show a single consent screen listing every registered category, its one-sentence summary, and the literal field list. The user picks: `all`, `none`, `<space-separated category ids>`, or types nothing for 30s.
+    - **Upgrade flow** — when a new category exists in the registry whose `id` has never been responded to (`consented[id] === undefined`), or whose `version` is higher than `consented[id]`, prompt for just that category on the next cooldown-cleared idle moment. Categories the user already accepted continue to ship at their consented versions. Categories the user already explicitly declined stay declined; they are never re-prompted at the same version.
+    - **Three response paths, each with distinct persistence behavior:**
+
+      | Outcome | `telemetry.enabled` | `telemetry.categories[id]` | `telemetry.consented[id]` | Re-prompt at same version? |
+      |---|---|---|---|---|
+      | Explicit `none` (declines everything in the prompt) | `false` (set explicitly) | `false` for every listed `id` | set to `category.version` for every listed `id` | No — only on `crosscheck telemetry reset` or a version bump |
+      | Explicit category list (e.g. `tokens platform`) | `true` | `true` for chosen, `false` for unchosen-but-listed | set to `category.version` for ALL listed (chosen AND declined) | No for these versions |
+      | 30-second timeout, no input on stdin | **left untouched** | **left untouched** | **left untouched for every listed `id`** | Yes — at the next idle moment that has cleared `prompt_cooldown_ms` |
+
+      The critical row is the third: a timeout MUST NOT advance `consented[id]` or flip the master switch. Treating timeout as "default `none`" would silently mark every category seen and the user would never be re-prompted after one missed prompt. Conversely, an explicit `none` IS persisted — the user actively chose to decline.
+    - The consent prompt never blocks PR processing. It's printed at idle (see F); the dispatcher reads stdin for up to 30 seconds. On timeout, it logs `consent_prompt_timeout` and exits without persisting anything. `last_prompted_at` IS still set in all three rows, so the cooldown applies equally to declined, accepted, and timed-out prompts — a user who keeps walking away does not get pestered.
 
     **F. Idle-triggered upload + transparency banner:**
-    - `watch`/`serve` track `lastActivityAt`, updated on every webhook event, review start/complete, fix push, comment post, or status check. A `session_idle` event fires when `Date.now() - lastActivityAt > IDLE_THRESHOLD_MS` (configurable; default 60s).
+    - `watch`/`serve` track `lastActivityAt`, **updated only on user/PR work**: incoming webhook events, review start/complete, recheck start/complete, fix push, conflict-resolve push, comment post, and the `crosscheck/review` commit-status write that brackets a PR run. Background polling does NOT reset the timer — explicitly excluded: tunnel health checks (`waitForTunnelEnd` polls localhost.run every 60s), webhook listing/re-registration, signature verification of inbound payloads, and any other periodic task whose cadence could match or exceed `IDLE_THRESHOLD_MS`. Without this exclusion, the 60s tunnel poll would keep the session looking active forever and idle would never fire.
+    - A `session_idle` event fires when `Date.now() - lastActivityAt > IDLE_THRESHOLD_MS` (configurable; default 60s).
     - **Sendable categories** at any idle moment = `{ c ∈ registry | telemetry.categories[c.id] === true AND telemetry.consented[c.id] >= c.version }`. The second clause is critical: when a category's version is bumped, the user's prior opt-in (`categories[c.id] === true`) is preserved but is no longer "current" until they re-consent. A bumped category is **excluded from the upload** until the consent prompt clears, even if every other category continues to ship. This stops a stale opt-in from auto-shipping a new shape.
     - On each idle event, if (i) `telemetry.enabled === true`, (ii) `sendableCategories.length > 0`, and (iii) the current UTC ISO week is later than `telemetry.last_sent_period`, assemble and POST a payload built from sendable categories only. Otherwise: idle is a no-op for telemetry purposes (consent-prompt dispatch in section E still runs).
     - Cadence ceiling: at most one upload per UTC ISO week per install. Idle that fires more often than that is a no-op.
@@ -1266,13 +1321,15 @@ These four items fix the two-phase model described in Design Principles. Any new
       ```ts
       telemetry: z.object({
         enabled: z.boolean().default(false),
-        install_id: z.string().default(''),                 // empty until first opt-in
-        categories: z.record(z.boolean()).default({}),      // <id> → bool
-        consented: z.record(z.number()).default({}),        // <id> → highest version seen
-        last_sent_at: z.string().nullable().default(null),  // ISO timestamp
-        last_sent_period: z.string().nullable().default(null), // e.g. '2026-W21'
+        install_id: z.string().default(''),                       // empty until first opt-in
+        categories: z.record(z.boolean()).default({}),            // <id> → bool
+        consented: z.record(z.number()).default({}),              // <id> → highest version EXPLICITLY responded to (accept or decline)
+        last_sent_at: z.string().nullable().default(null),        // ISO timestamp
+        last_sent_period: z.string().nullable().default(null),    // e.g. '2026-W21'
+        last_prompted_at: z.string().nullable().default(null),    // ISO; set every time a prompt is shown (including timeouts)
         endpoint: z.string().default('https://telemetry.crosscheck.dev/v1/report'),
         idle_threshold_ms: z.number().int().min(10_000).default(60_000),
+        prompt_cooldown_ms: z.number().int().min(60_000).default(86_400_000), // 24h between consent prompts
       }).default({})
       ```
     - `src/lib/logger.ts`: extend `review_complete`, `fix_complete`, `conflict_resolve_complete` payloads as listed in section B. Add `session_idle` and `telemetry_sent` / `telemetry_send_failed` to the event vocabulary.
@@ -1288,8 +1345,14 @@ These four items fix the two-phase model described in Design Principles. Any new
     - **Category id reservation:** a test asserts the registry rejects a category whose `id` shadows an envelope key.
     - **No PII in synthetic input:** seed `~/.crosscheck/logs/...ndjson` with synthetic records containing fake repo names (`secret-repo`), user logins (`alice@example.com`), and SHAs. Run aggregation across the full pipeline. Assert that none of those strings appear anywhere in the assembled payload's JSON serialization — guards against an aggregator accidentally passing a raw field through.
     - **Logger upgrades:** `review_complete` now carries `step_type` and `step_name`; `fix_complete` and `conflict_resolve_complete` carry `vendor` and `duration_ms`.
-    - **Consent state machine:** first-run prompt with no input → master stays `false`, no categories opted in. First-run prompt with `tokens platform` → those two categories enabled, others not, `consented.tokens === 1`, `consented.platform === 1`. New category added in registry → existing categories' state preserved, prompt shows only the new category on next idle, decline persists. Bumping `tokens.version` from 1 to 2 → prompt re-fires for `tokens` only.
-    - **Idle dispatcher:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. Subsequent activity resets the clock. With `telemetry.enabled: false`, idle never calls `maybeSend`.
+    - **Consent state machine:**
+      - Explicit `none` response → `enabled: false`, every listed category gets `categories[id] = false` AND `consented[id] = c.version`. Prompt is not re-shown at the same versions.
+      - Explicit `tokens platform` response → `enabled: true`, those two categories `true`, others listed-but-unchosen `false`, `consented[id] = c.version` for every listed id (chosen AND unchosen).
+      - 30-second timeout (no stdin input within the window) → `consented[id]` is NOT advanced for any listed category, `enabled` and `categories` are unchanged. `last_prompted_at` IS updated. The same prompt fires again only after `prompt_cooldown_ms` has elapsed since `last_prompted_at`, NOT on every subsequent idle.
+      - New category appended to registry after the user has accepted a different one → the new id's `consented[id]` is `undefined`; existing accepted categories continue to ship; only the new category appears in the next prompt (after cooldown).
+      - Version bump on a previously-accepted category (`tokens.version` 1 → 2) → next cooldown-cleared idle prompts ONLY for `tokens`, other categories' opt-in state is preserved.
+    - **Prompt cooldown:** with `prompt_cooldown_ms=3_600_000` (1h) and `IDLE_THRESHOLD_MS=10_000`, two timeouts inside the cooldown window emit exactly one prompt and one `consent_prompt_timeout` log entry; the second idle does not re-prompt.
+    - **Idle dispatcher activity sources:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. A simulated `waitForTunnelEnd` 60s poll during a 70-second silence does NOT reset `lastActivityAt` and `session_idle` still fires. A simulated webhook event DOES reset `lastActivityAt`. With `telemetry.enabled: false`, idle never calls `maybeSend`.
     - **Cadence ceiling:** two idle events in the same UTC week → one HTTP POST. Idle in a new week → one more POST. `last_sent_period` advances.
     - **Version-consent gate:** opt-in with `consented[tokens] === 1` while the registry has `tokens.version === 1` → `tokens` is sendable. Bump the registry to `tokens.version === 2` without re-consenting → `tokens` is NOT in the next POST. Re-consent to v2 → `tokens` is back in the POST. Other categories at current-version consent continue to ship throughout. An assertion guards `(consented[id] < category.version) ⇒ id ∉ payload.categories`.
     - **Banner content:** mock the transport. After a successful send, the banner stdout contains the exact endpoint URL, install_id prefix, period range, every opted-in category id, and the literal payload values. `--no-banner-telemetry` suppresses the banner but the POST still goes out.

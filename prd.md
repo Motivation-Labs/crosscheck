@@ -1178,8 +1178,10 @@ These four items fix the two-phase model described in Design Principles. Any new
       - A human comment is posted on the PR after the most recent fix attempt (human acknowledged or directed work).
     - **Increment signal:** every `fix_complete` and every `fix_skipped(fix_error)` (the timeout cases) bumps the counter by 1.
     - **Gate:** `fix` step is skipped with reason `progress_gate` when `fix_attempts_since_progress >= fix_attempts_max` (default: **3**, configurable in `routing` or `post_review`).
-    - State file is read in `runWorkflow` start, written transactionally (write to `.tmp`, rename) on each update. Corrupted state file → treat as if the PR is at counter=0, log `pr_progress_state_corrupt` once, continue.
-    - Stale entry pruning: entries older than 90 days (configurable) are dropped by the daily sweep.
+    - **Concurrency model — one file per PR + the existing per-PR lock.** A single shared `pr-progress.json` would have an unavoidable lost-update bug across different PRs sharing the file: two concurrent `runWorkflow` invocations for different PRs could both read snapshot S0, both write their respective increment, and the later write would overwrite the earlier. Sharding by PR sidesteps this entirely: each file has exactly one writer because `acquirePRLock(owner, repo, pr, sha)` (already held during `runWorkflow`) serializes all access to the same PR's progress file. Read/modify/write inside that critical section is safe, and the existing atomic-rename pattern (`.tmp` → final) handles crash safety. Cross-PR concurrency works because the files are disjoint — no contention.
+    - The PR's file is read at `runWorkflow` start (after `acquirePRLock` succeeds) and written transactionally on each update. Missing file → counter=0, normal write creates it. Corrupted file (malformed JSON) → treat as counter=0, log `pr_progress_state_corrupt { path }` once, overwrite on next update. The corrupt-file recovery test is now strictly per-file (no cross-PR fallout).
+    - **Test for the concurrency model:** spawn two child processes that each call `recordFixAttempt('owner', 'repo', N)` simultaneously for *different* PR numbers; both succeed, both files end with `counter=1`, neither corrupts. Spawn two processes calling `recordFixAttempt` for the *same* PR: one process's `acquirePRLock` returns `true`, the other returns `false` (or waits per the existing lock contract) — only the holder updates the file. The test asserts the resulting counter is exactly 1 (no double-increment) and exactly one of the processes was the writer.
+    - Stale entry pruning: files whose `last_progress_at` is older than 90 days (configurable) are deleted by the daily sweep. Pruning takes `acquirePRLock` per file before unlink; if a lock can't be obtained the file is skipped this sweep (a write is in flight).
 
     **D. Workflow grammar — a `loop` block that the recheck verdict actually drives:**
     - Today's grammar is a flat `steps: [...]` array. The redesign adds a `loop` block as a step type:
@@ -1219,7 +1221,7 @@ These four items fix the two-phase model described in Design Principles. Any new
     - No defaults change is acceptable on instinct. If the data isn't conclusive, defaults stay where they are.
 
   - **Technical Notes:**
-    - New file: `src/lib/pr-progress.ts` — `loadState()`, `saveState()`, `recordFixAttempt(owner,repo,pr)`, `recordProgress(owner,repo,pr,signal)`, `getCounter(owner,repo,pr)`, `pruneStale(daysOld)`. NDJSON-adjacent — same write pattern as logger.ts (atomic rename) but a single JSON file because reads are random-access by PR key.
+    - New file: `src/lib/pr-progress.ts` — `loadPRState(owner,repo,pr)`, `savePRState(owner,repo,pr,state)`, `recordFixAttempt(owner,repo,pr)`, `recordProgress(owner,repo,pr,signal)`, `getCounter(owner,repo,pr)`, `pruneStale(daysOld)`. One JSON file per PR under `~/.crosscheck/state/pr-progress/`, written via atomic rename (`.tmp` → final). Callers MUST hold `acquirePRLock(owner,repo,pr,sha)` for the duration of any read-modify-write cycle; `pr-progress.ts` does not acquire the lock itself (it inherits the runner's critical section).
     - New file: `src/lib/workflow-loop.ts` — parses the `loop:` block, evaluates `until:` and `max_iterations:`, dispatches inner steps, increments the progress counter via `pr-progress.ts`. Pure function over the step list; no I/O beyond delegating to existing runner step handlers.
     - `src/lib/workflow.ts`: extend the zod schema with the `loop` step type; keep backward compat for flat workflows.
     - `src/lib/runner.ts`: the existing for-loop over `workflow.steps` dispatches `loop` steps to `workflow-loop.ts`. The `fix` step handler queries `pr-progress.getCounter` and emits `step_skipped(progress_gate)` when over the threshold. The retired `step.max_rounds` and `MAX_CROSSCHECK_COMMITS` gates are removed from the hot path; their migration warnings live in `loadWorkflow()`.
@@ -1232,12 +1234,12 @@ These four items fix the two-phase model described in Design Principles. Any new
         // ... existing fields ...
         fix_attempts_max: z.number().int().min(1).default(3),
         resolution_window_days: z.number().int().min(1).max(30).default(14),
-        progress_state_path: z.string().default('~/.crosscheck/state/pr-progress.json'),
+        progress_state_dir: z.string().default('~/.crosscheck/state/pr-progress'),
         progress_state_stale_days: z.number().int().min(7).default(90),
       })
       ```
   - **Tests Required:**
-    - **Progress state file:** corruption (`{` truncated) is recoverable — `getCounter` returns 0, single warn log, no throw. Concurrent writes from two `runWorkflow` invocations on the same machine never lose updates (test uses two child processes; atomic rename guarantees one wins, neither corrupts). Stale entries past `progress_state_stale_days` are pruned.
+    - **Progress state file:** a corrupted per-PR file (`{` truncated) is recoverable — `getCounter` for that PR returns 0, single `pr_progress_state_corrupt` warn log naming the file path, no throw, no impact on any other PR's file. Files for stale PRs past `progress_state_stale_days` are pruned (with per-file `acquirePRLock` per the concurrency model above).
     - **Progress signal handling:** APPROVE verdict resets counter to 0. Human commit on branch (non-`[crosscheck]` author/message) resets to 0. Human comment after the most recent fix attempt resets to 0. Two consecutive `fix_complete` events (no progress signal between) leave counter at 2. After 3 consecutive bumps with no progress, `fix` step emits `step_skipped(progress_gate)`.
     - **Loop primitive:**
       - **Flat-workflow single-pass:** a workflow with no `type: loop` step (the canonical pre-redesign shape: `review → fix → recheck`) runs each step exactly once, in declaration order. The runner does not invoke `workflow-loop.ts`. A test asserts the recorded `workflow_complete.steps_run` equals the configured `steps[].name` array in order, byte-identical to the pre-redesign runner's behavior on the same input.

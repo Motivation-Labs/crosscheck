@@ -263,12 +263,25 @@ export async function prHasCrossCheckComment(
   return false
 }
 
-// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment (not recheck, not fix_failed).
+// True iff `body` is a fresh review comment that a recheck should link back to.
+// Annotation is the source of truth: a comment carrying `<!-- crosscheck: ... -->`
+// is a review only when its tag contains `type=review`. Any other crosscheck
+// annotation (`type=recheck`, `fix_failed`, `fix_applied`, `conflict_resolved`,
+// `no_diff_change`, future markers) is non-review by construction.
+// The header/prefix check is a legacy fallback for pre-annotation comments only.
+export function isFreshReviewComment(body: string): boolean {
+  const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
+  if (annotationMatch) {
+    return annotationMatch[1].includes('type=review')
+  }
+  // Legacy (pre-annotation era): identify reviews by the header, exclude rechecks by the prefix.
+  return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
+}
+
+// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment.
 // Used by recheck steps to link back to the original review that raised issues.
-// Matching rules (in priority order):
-//   1. New format: has <!-- crosscheck: type=review ... --> annotation
-//   2. Legacy format: has "### Code Review by" header but no recheck prefix (pre-annotation era)
-// Explicitly excluded: type=recheck annotations, fix_failed notifications.
+// Classification is delegated to `isFreshReviewComment` — annotation is the
+// source of truth, with a header-based fallback for pre-annotation comments.
 export async function getLastCrossCheckCommentId(
   owner: string,
   repo: string,
@@ -286,17 +299,7 @@ export async function getLastCrossCheckCommentId(
     const data = await res.json() as Array<{ id: number; body: string }>
     if (data.length === 0) break
     for (const comment of data) {
-      const body = comment.body
-      const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
-      if (annotationMatch) {
-        const attrs = annotationMatch[1]
-        // Skip fix_failed notifications, recheck-typed annotations, and no_diff_change notices —
-        // none of these represent a fresh review comment to reply to.
-        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck') && !attrs.includes('no_diff_change')) {
-          lastId = comment.id
-        }
-      } else if (body.includes('### Code Review by') && !body.startsWith('> Recheck of')) {
-        // Legacy: pre-annotation comment that is not a recheck
+      if (isFreshReviewComment(comment.body)) {
         lastId = comment.id
       }
     }

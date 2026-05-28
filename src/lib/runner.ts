@@ -1,4 +1,5 @@
 import { execSync, execFileSync } from 'child_process'
+import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import chalk from 'chalk'
@@ -61,6 +62,55 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
     } catch {
       return 0
     }
+  }
+}
+
+// Subset of WorkflowContext + accumulators the workflow_complete event needs.
+// Kept narrow so this can be tested without constructing a full WorkflowContext.
+export interface WorkflowCompleteInputs {
+  owner: string
+  repoName: string
+  prNumber: number
+  workflowId: string
+  workflowStart: number
+  stepsRun: string[]
+  results: Record<string, StepResult>
+  workflowFailed: boolean
+  round?: number
+  now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
+}
+
+// Reasons workflow can end. Today's runner emits only 'completed' and 'error';
+// 'progress_gate' arrives with the single-gate work (PR-C of the redesign) and
+// 'max_iterations' with the loop primitive (PR-D). 'manual_abort' is reserved
+// for SIGINT/SIGTERM-driven exits — the current signal handler bypasses the
+// finally so it's not wired up here yet.
+export type WorkflowEndedReason =
+  | 'completed'
+  | 'error'
+  | 'progress_gate'
+  | 'max_iterations'
+  | 'manual_abort'
+
+export function buildWorkflowCompleteEvent(
+  inputs: WorkflowCompleteInputs,
+): Record<string, unknown> {
+  const lastVerdict = Object.values(inputs.results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
+  const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
+  const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
+  const now = inputs.now ?? Date.now()
+  return {
+    level: inputs.workflowFailed ? 'warn' : 'info',
+    event: 'workflow_complete',
+    repo: `${inputs.owner}/${inputs.repoName}`,
+    pr: inputs.prNumber,
+    workflow_id: inputs.workflowId,
+    steps_run: inputs.stepsRun,
+    last_step: lastStep,
+    last_verdict: lastVerdict,
+    ended_reason: endedReason,
+    total_duration_ms: now - inputs.workflowStart,
+    ...(inputs.round !== undefined && { round: inputs.round }),
   }
 }
 
@@ -180,8 +230,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
 
+  // workflow_complete event accumulators. Each step the runner dispatches is
+  // recorded in stepsRun (including ones that get logged as step_skipped —
+  // the event records the workflow's declared shape, the per-step skip
+  // reasons live in their own step_skipped log entries).
+  const workflowId = randomUUID()
+  const workflowStart = Date.now()
+  const stepsRun: string[] = []
+
   try {
   for (const step of steps) {
+    stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
     if (exceedsMaxRounds(effectiveType, step.type, step.max_rounds, ctx.round)) {
@@ -655,5 +714,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
       }
     }
+
+    // workflow_complete fires exactly once per runWorkflow invocation, in the
+    // finally so it lands on both happy-path returns AND on caught exceptions.
+    // Closes the "no_followup vs crash" log ambiguity called out in
+    // prd.md:1145 §B (the analysis of 411 review_complete events on
+    // 2026-05-28 found 17.2% of initial reviews with no follow-up event —
+    // indistinguishable from a session crash without this event).
+    fileLog(buildWorkflowCompleteEvent({
+      owner, repoName, prNumber,
+      workflowId, workflowStart, stepsRun, results, workflowFailed,
+      round: ctx.round,
+    }) as Parameters<typeof fileLog>[0])
   }
 }

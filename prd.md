@@ -1147,9 +1147,10 @@ These four items fix the two-phase model described in Design Principles. Any new
   - **Acceptance Criteria:**
 
     **A. Local metrics layer (always-on, local only, never transmitted):**
-    - Every event already emitted by `src/lib/logger.ts` continues to be appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Telemetry is a *consumer* of these logs, not a separate write path — there is one source of truth on disk.
+    - Every event already emitted by `src/lib/logger.ts` continues to be appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. **These local logs deliberately contain identifying fields** — `owner`, `repo`, `pr`, `sha`, comment URLs — because `diagnose` and `optimize` need them to correlate events across a PR's lifetime. The local log stream is not sanitized and never leaves the machine.
+    - Telemetry is a *read-only consumer* of these logs through a **mandatory aggregation step** (`src/lib/telemetry/aggregate.ts`). The aggregation step is the sanitization checkpoint: it reads identifying fields when it needs to *count* things (e.g. distinct PR shas to compute `prs_received`) and emits only numeric counts, enums from a fixed vocabulary, or omits the field. No identifying value ever flows out of `aggregate` into the payload — that invariant is enforced by the schema test in section H, not by trust.
     - `diagnose` reads the same logs to surface reviewer-pair distribution, verdict distribution, fix success rate, follow-fix rate (new commit lands on a PR that previously got NEEDS_WORK or BLOCK), and the instruction fingerprint in effect at review time. None of this requires telemetry to be enabled.
-    - Existing `logs.retention_days` (default 7, max 30) governs both local diagnostics and the telemetry aggregation window. A user who keeps 7-day retention can only ever transmit the last 7 days of counts — there is no shadow buffer.
+    - Existing `logs.retention_days` (default 7, max 30) governs both local diagnostics and the telemetry aggregation window. A user who keeps 7-day retention can only ever transmit the last 7 days of aggregated counts — there is no shadow buffer.
 
     **B. Logger upgrades required to source the categories** — every event below must carry the listed fields before category aggregators can be wired up. These are additive and require no schema change to existing consumers.
     - `review_complete` already has `reviewer`, `verdict`, `tokens_used`, `duration_ms` — **add** `step_type: 'review' | 'recheck'` and `step_name: string` (the workflow step name). Today this event is emitted for both review and recheck and they're indistinguishable from the log alone.
@@ -1194,6 +1195,28 @@ These four items fix the two-phase model described in Design Principles. Any new
     - On each idle event, if (i) `telemetry.enabled === true`, (ii) at least one category is opted in, and (iii) the current UTC ISO week is later than `telemetry.last_sent_period`, assemble and POST a payload. Otherwise: idle is a no-op.
     - Cadence ceiling: at most one upload per UTC ISO week per install. Idle that fires more often than that is a no-op for telemetry purposes.
     - Transmission: HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). 5-second timeout. No retry on the same idle event; if it fails, log `telemetry_send_failed` and try again at the next qualifying idle.
+    - **Wire shape — envelope + categories:** the POST body is JSON with a fixed envelope plus one key per opted-in category. The envelope is the only place identifying-ish metadata lives, and every envelope key is part of the schema contract:
+      ```jsonc
+      {
+        // ─── envelope (always present, fixed shape, versioned independently) ───
+        "schema_version": 1,                        // envelope schema; bumped only on breaking wire changes
+        "install_id":     "a1b2c3d4-...-...",       // UUIDv4, locally generated, never identity-derived
+        "crosscheck_version": "0.10.4",
+        "period":         "2026-W21",               // UTC ISO week
+        "period_from":    "2026-05-19T00:00:00Z",
+        "period_to":      "2026-05-26T00:00:00Z",
+        "sent_at":        "2026-05-28T03:15:42Z",
+        "categories":     ["pipeline", "tokens", "platform"],  // mirror of which keys below are present
+
+        // ─── one key per opted-in category (each shape governed by its registry entry) ───
+        "pipeline": { "prs_received": 47, "reviews": 47, "rechecks": 12, "fixes_succeeded": 18, "fixes_failed": 7 },
+        "tokens":   { "by_vendor": { "claude": 412300, "codex": 98700 },
+                      "by_step":   { "review": 412000, "fix": 98000, "conflict_resolve": 1000 } },
+        "platform": { "os": "darwin", "node_version": "24.x", "deployment_mode": "personal",
+                      "daemon": "watch", "cross_vendor": true }
+      }
+      ```
+    - Envelope keys are reserved and may never collide with a category `id`. The registry MUST reject any category whose `id` shadows an envelope key (`schema_version`, `install_id`, `crosscheck_version`, `period`, `period_from`, `period_to`, `sent_at`, `categories`).
     - **Banner format** — printed to the running terminal immediately after a successful upload, prefixed with `[telemetry]` so it's grep-able:
       ```
       [telemetry] uploaded 0.4 KB usage report at 2026-05-28 03:15:42 UTC
@@ -1222,8 +1245,13 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `crosscheck telemetry categories` — lists every registered category with id, version, summary, and field list (same source the consent prompt and `PRIVACY.md` use).
 
     **H. Privacy invariants — non-negotiable, enforced in code review and tests:**
-    - **Never collected, period**: code diffs, PR titles/descriptions/bodies, commit messages, file paths, branch names, repo names, GitHub user/org logins, email addresses, IP addresses, machine hostnames, CPU/GPU info beyond the OS string, install paths.
-    - The payload schema is enumerated by the union of `category.fields` arrays. A test checks that every key in the assembled payload appears in some category's `fields` list — any unknown key fails CI.
+
+    Scope note — these invariants apply to **what is transmitted** (the POST body in section F). Local logs at `~/.crosscheck/logs/` are PII-rich by design (see section A) because `diagnose`/`optimize` need them; nothing in section H prohibits writing identifying fields to local logs. The aggregation step in section A is the boundary.
+
+    - **Never transmitted, period**: code diffs, PR titles/descriptions/bodies, commit messages, file paths, branch names, repo names, GitHub user/org logins, email addresses, IP addresses, machine hostnames, CPU/GPU info beyond the OS string, install paths.
+    - **Payload schema is closed.** Top-level keys are exactly: every envelope key (`schema_version`, `install_id`, `crosscheck_version`, `period`, `period_from`, `period_to`, `sent_at`, `categories`) PLUS one key per id in `categories[]`. Any other top-level key fails the schema check.
+    - **Category contents are bounded.** Each category's value object may only contain keys listed in its registry `fields[]`. Recursively for nested objects (e.g. `tokens.by_vendor`), the allowed sub-keys are also enumerated in `fields[]` using dot notation (`by_vendor.claude`, `by_vendor.codex`, …).
+    - **Value-shape contract.** Every leaf value in a category payload is either a non-negative integer, a fixed-vocabulary enum string declared in the category source, a boolean, or `null`. Free-text strings or numbers outside `[0, Number.MAX_SAFE_INTEGER]` fail the schema check.
     - The full field list is auto-generated into `PRIVACY.md` at the repo root from the registry: running `npm run privacy:doc` writes a Markdown table with every category, version, and field. CI fails if `PRIVACY.md` is out of date with the registry (same pattern as type generators).
     - The consent prompt references `PRIVACY.md` by URL (`https://github.com/Motivation-Labs/crosscheck/blob/main/PRIVACY.md`).
     - `install_id` is a UUIDv4 generated locally. It is never seeded from a GitHub identity, hostname, MAC, or any other system identifier. It is stored only in `~/.crosscheck/config.yml`. Rotation is a single CLI command.
@@ -1253,8 +1281,9 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `crosscheck init` adds a one-line note pointing at the consent flow without prompting up front — the user shouldn't be hit with a privacy decision during install.
   - **Tests Required:**
     - **Registry shape:** every category exports a unique kebab-case `id`, a positive integer `version`, a non-empty `summary`, a non-empty `fields[]`, and an `aggregate` function. A failing test if any category violates the contract.
-    - **Schema check on payload:** the assembled payload's top-level keys are exactly the opted-in category ids; each category's inner keys are a subset of its `fields[]`. A test asserts no extra keys, no missing required keys.
-    - **No PII in synthetic input:** seed the logs with synthetic records containing fake repo names, user logins, and PR titles. Run aggregation. Assert that none of those strings appear anywhere in the assembled payload.
+    - **Schema check on payload:** the assembled payload's top-level keys are exactly `{schema_version, install_id, crosscheck_version, period, period_from, period_to, sent_at, categories} ∪ <opted-in category ids>` — no more, no less. For each opted-in category, its value object's keys are a subset of that category's `fields[]` (with nested keys checked via dot-notation entries). A test asserts no extra keys, no missing envelope keys, no opted-in category missing its data block.
+    - **Category id reservation:** a test asserts the registry rejects a category whose `id` shadows an envelope key.
+    - **No PII in synthetic input:** seed `~/.crosscheck/logs/...ndjson` with synthetic records containing fake repo names (`secret-repo`), user logins (`alice@example.com`), and SHAs. Run aggregation across the full pipeline. Assert that none of those strings appear anywhere in the assembled payload's JSON serialization — guards against an aggregator accidentally passing a raw field through.
     - **Logger upgrades:** `review_complete` now carries `step_type` and `step_name`; `fix_complete` and `conflict_resolve_complete` carry `vendor` and `duration_ms`.
     - **Consent state machine:** first-run prompt with no input → master stays `false`, no categories opted in. First-run prompt with `tokens platform` → those two categories enabled, others not, `consented.tokens === 1`, `consented.platform === 1`. New category added in registry → existing categories' state preserved, prompt shows only the new category on next idle, decline persists. Bumping `tokens.version` from 1 to 2 → prompt re-fires for `tokens` only.
     - **Idle dispatcher:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. Subsequent activity resets the clock. With `telemetry.enabled: false`, idle never calls `maybeSend`.

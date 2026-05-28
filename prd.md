@@ -1163,14 +1163,13 @@ These four items fix the two-phase model described in Design Principles. Any new
 
     **C. The single new gate — `fix_attempts_since_progress`:**
     - Both `step.max_rounds` (per-process, resets on restart) and `MAX_CROSSCHECK_COMMITS` (lifetime, persistent) are retired from the gate path. They are kept readable for migration warnings only (see section E).
-    - The new gate counts **consecutive fix attempts that have not produced progress**, persisted at `~/.crosscheck/state/pr-progress.json` keyed by `<owner>/<repo>#<pr>`:
+    - The new gate counts **consecutive fix attempts that have not produced progress**, persisted as **one file per PR** under `~/.crosscheck/state/pr-progress/<owner>__<repo>__<pr>.json` (one file per PR, not a single shared file — see the concurrency note below):
       ```jsonc
+      // ~/.crosscheck/state/pr-progress/codatta__humanbased-monorepo__173.json
       {
-        "codatta/humanbased-monorepo#173": {
-          "fix_attempts_since_progress": 1,
-          "last_progress_at": "2026-05-28T04:44:57Z",
-          "last_progress_signal": "fix_complete"
-        }
+        "fix_attempts_since_progress": 1,
+        "last_progress_at": "2026-05-28T04:44:57Z",
+        "last_progress_signal": "fix_complete"
       }
       ```
     - **Progress signals (any one resets the counter to 0):**
@@ -1199,13 +1198,14 @@ These four items fix the two-phase model described in Design Principles. Any new
             - name: recheck
               type: recheck
       ```
-    - The loop exits when **ANY** of the following becomes true (defense in depth):
+    - **`until:` is evaluated AFTER each iteration's body, not before.** A loop always runs its body at least once; the condition is checked once the body completes (do-until semantics). This is the only sane choice for the canonical use case — `until: last_verdict == 'APPROVE'` against a loop whose first iteration runs the `fix` step — because `last_verdict` may be undefined or stale on entry, and evaluating before the body would either exit early or short-circuit the loop the moment an APPROVE arrives without running the fix that earned it.
+    - The loop exits when **ANY** of the following becomes true (defense in depth), checked at end-of-iteration after the body has run:
       1. `until:` condition is met (the happy path — verdict is APPROVE).
       2. `max_iterations:` reached (safety cap on the loop body itself).
       3. The progress gate (section C) fires inside the loop — `fix` is skipped with reason `progress_gate`, loop terminates with `ended_reason: 'progress_gate'`.
       4. Any step inside the loop throws an unhandled error.
     - The loop's `until:` and inner `when:` clauses reference a new variable `last_verdict` — the most recent review verdict in the current `runWorkflow` invocation. This makes the recheck verdict actually drive what happens next, instead of being advisory.
-    - Existing flat workflows continue to work — the runner treats them as a single-iteration loop with `until: true` (always exits after one pass). No behavior change for current users.
+    - **Flat-workflow compatibility — explicit single-pass path, NOT a loop wrapper.** Workflows that contain no `type: loop` step are dispatched by today's runner: each `steps[]` entry is invoked exactly once, in declaration order, with the existing `when:` semantics. The runner does NOT synthesize a virtual `loop` around them — wrapping with `until: true` would either exit before any step ran (if evaluated pre-body) or still iterate based on `last_verdict` (if evaluated post-body and any future `until:` default leaked in). Single-pass dispatch is observably identical to today's runner. A workflow that wants iteration must declare a `type: loop` step explicitly.
 
     **E. Migration — old keys deprecated, never silently changed:**
     - On `runWorkflow` start, if the loaded `workflow.yml` contains `step.max_rounds` on any step, log `workflow_deprecated_field { field: 'step.max_rounds', step: <name> }` at `warn` and map the field to the closest equivalent: `loop.max_iterations` if the step is inside an explicit `loop:`; otherwise ignored (with the warning).
@@ -1239,7 +1239,10 @@ These four items fix the two-phase model described in Design Principles. Any new
   - **Tests Required:**
     - **Progress state file:** corruption (`{` truncated) is recoverable — `getCounter` returns 0, single warn log, no throw. Concurrent writes from two `runWorkflow` invocations on the same machine never lose updates (test uses two child processes; atomic rename guarantees one wins, neither corrupts). Stale entries past `progress_state_stale_days` are pruned.
     - **Progress signal handling:** APPROVE verdict resets counter to 0. Human commit on branch (non-`[crosscheck]` author/message) resets to 0. Human comment after the most recent fix attempt resets to 0. Two consecutive `fix_complete` events (no progress signal between) leave counter at 2. After 3 consecutive bumps with no progress, `fix` step emits `step_skipped(progress_gate)`.
-    - **Loop primitive:** flat workflow runs as a single-iteration loop (current behavior). Loop with `until: last_verdict == 'APPROVE'` and a fix that lands an APPROVE on iteration 2 exits at 2. Loop with `max_iterations: 3` and a verdict that never reaches APPROVE exits with `ended_reason: 'max_iterations'`. Loop where the inner fix step hits the progress gate exits with `ended_reason: 'progress_gate'`. An exception in an inner step propagates with `ended_reason: 'error'`.
+    - **Loop primitive:**
+      - **Flat-workflow single-pass:** a workflow with no `type: loop` step (the canonical pre-redesign shape: `review → fix → recheck`) runs each step exactly once, in declaration order. The runner does not invoke `workflow-loop.ts`. A test asserts the recorded `workflow_complete.steps_run` equals the configured `steps[].name` array in order, byte-identical to the pre-redesign runner's behavior on the same input.
+      - **Do-until semantics:** loop with `until: last_verdict == 'APPROVE'` whose first iteration's recheck returns APPROVE exits at iteration 1 (not 0 — the body must run once before the condition is evaluated). Loop where iteration 2 lands the APPROVE exits at 2. A test seeds `last_verdict = 'APPROVE'` before loop entry and asserts the loop still runs one full iteration.
+      - **Safety caps:** loop with `max_iterations: 3` and a verdict that never reaches APPROVE exits with `ended_reason: 'max_iterations'`. Loop where the inner fix step hits the progress gate exits with `ended_reason: 'progress_gate'`. An exception in an inner step propagates with `ended_reason: 'error'`.
     - **Migration:** workflow.yml with `step.max_rounds: 3` on a `fix` step → warning logged, gate behavior is now the progress gate, not `max_rounds`. `crosscheck workflow migrate` rewrites the file in idempotent diff form. Re-running `migrate` on the rewritten file says `nothing to migrate`.
     - **Resolution metric:** synthetic log fixture where 10 PRs got initial NEEDS_WORK, 7 reached APPROVE within 14 days, 1 reached APPROVE on day 15, 2 stayed open → resolution rate is 70%. Of the 7 resolved, 4 closed via crosscheck commits (resolution_path: `crosscheck_only`) and 3 via human commits (`human_only`). Guardrail counters compute correctly.
     - **No behavior change on instrumentation-only PR:** running the section-B PR against a frozen workflow.yml and a fixed set of webhook events produces the same set of GitHub comments and the same PR state as the prior commit — only the local log is richer.

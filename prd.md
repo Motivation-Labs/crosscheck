@@ -1142,88 +1142,127 @@ These four items fix the two-phase model described in Design Principles. Any new
 - [ ] **Test `serve` mode** — run on a fixed port, register webhook manually, verify reviews post correctly
 - [ ] **`crosscheck review` result feedback** — after posting, log a link to the PR comment
 
-- [ ] **Tiered Feedback Loops — local usage analytics, instruction-effectiveness signals, and safe opt-in telemetry** — three-tier system that measures crosscheck's real-world impact, feeds those signals back into `optimize`, and—only with explicit consent—sends de-identified aggregate counts to inform future development. Privacy-first by design: sensitive data never leaves the machine; telemetry is opt-in (off by default).
-  - **User:** All crosscheck users benefit from better defaults driven by real usage. Contributors to the project benefit from aggregate signal. Power users benefit from local analytics surfaced in `diagnose`.
+- [ ] **Modular opt-in telemetry — categorical consent, idle-triggered upload, transparency banner** — collect de-identified aggregate counts about pipeline activity, vendor token consumption, and platform shape, and send them weekly to inform crosscheck's roadmap. The collection layer is a registry of **versioned categories**; each category is independently opt-in, individually documented, and added without forcing existing users to re-consent to everything. Local metrics capture is always-on (it powers `diagnose` and `optimize`); transmission is opt-in and never blocks crosscheck's main work. Idle-triggered upload prints a banner showing exactly what was sent — the user always sees the payload that left their machine.
+  - **User:** All crosscheck users get better defaults driven by real-world usage. Contributors get aggregate signal about which paths actually run. Power users get the same numbers on the same machine via `diagnose`.
   - **Acceptance Criteria:**
 
-    **Tier 1 — Local count statistics (always-on, local only):**
-    - After every review, append a metrics record to `~/.crosscheck/metrics/YYYY-MM.ndjson` containing: `{ ts, reviewer_pair, verdict, duration_ms, comments_count, pr_sha_prefix }`. `pr_sha_prefix` is the first 8 characters of the PR's head SHA — enough to detect follow-up commits later, not enough to identify the repo or author.
-    - `reviewer_pair` values: `claude_reviews_codex`, `codex_reviews_claude`, `claude_reviews_claude`, `codex_reviews_codex`.
-    - Follow-fix detection: when a new commit arrives on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two reviews by `pr_sha_prefix`. This tracks whether AI review comments actually get addressed.
-    - `crosscheck diagnose` incorporates Tier 1 data: adds a **Usage** section reporting reviewer-pair distribution, average comments per review, verdict distribution over the period, and follow-fix rate.
-    - Metrics files are subject to the same `logs.retention_days` setting as event logs. Stored in `~/.crosscheck/metrics/`, never in the project directory.
-    - No code content, no PR title, no repo name, no file names, no author identities stored.
+    **A. Local metrics layer (always-on, local only, never transmitted):**
+    - Every event already emitted by `src/lib/logger.ts` continues to be appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. Telemetry is a *consumer* of these logs, not a separate write path — there is one source of truth on disk.
+    - `diagnose` reads the same logs to surface reviewer-pair distribution, verdict distribution, fix success rate, follow-fix rate (new commit lands on a PR that previously got NEEDS_WORK or BLOCK), and the instruction fingerprint in effect at review time. None of this requires telemetry to be enabled.
+    - Existing `logs.retention_days` (default 7, max 30) governs both local diagnostics and the telemetry aggregation window. A user who keeps 7-day retention can only ever transmit the last 7 days of counts — there is no shadow buffer.
 
-    **Tier 2 — Instruction effectiveness tracking (always-on, local only):**
-    - When `optimize` applies a new `instructions.md`, snapshot the current instruction fingerprint (SHA-256 of the file) and log it with a timestamp to `~/.crosscheck/metrics/optimize-history.ndjson`.
-    - In subsequent metric records, include the active `instruction_fingerprint` so outcomes (verdict distribution, follow-fix rate) can be correlated with the instruction version in effect at review time.
-    - `crosscheck diagnose --since <date>` can compare verdict distribution before and after each `optimize` run, surfacing the delta: "After optimize on 2025-05-01: APPROVE rate +12%, BLOCK rate −5%."
-    - `crosscheck optimize` reads these deltas when selecting which instruction changes to keep vs. revert. If a fingerprint correlates with worse outcomes, `optimize` flags it as a candidate for rollback.
-    - Instruction text is never stored — only the SHA-256 fingerprint. The actual text lives in `instructions.md` under the user's control.
+    **B. Logger upgrades required to source the categories** — every event below must carry the listed fields before category aggregators can be wired up. These are additive and require no schema change to existing consumers.
+    - `review_complete` already has `reviewer`, `verdict`, `tokens_used`, `duration_ms` — **add** `step_type: 'review' | 'recheck'` and `step_name: string` (the workflow step name). Today this event is emitted for both review and recheck and they're indistinguishable from the log alone.
+    - `fix_complete` already has `applied_count`, `sha`, `delivery`, `tokens_used` — **add** `vendor: 'claude' | 'codex'` and `duration_ms`. Without `vendor` here, tokens-by-vendor aggregation is impossible.
+    - `conflict_resolve_complete` already has `conflicts_resolved`, `sha`, `tokens_used` — **add** `vendor` and `duration_ms`.
+    - `fix_applied_comment_posted` / `conflict_resolved_comment_posted` / `fix_failed_comment_posted` — **already in place** (PR #149); no change.
+    - New event `session_idle` — emitted by `watch`/`serve` when no PR has been active for `IDLE_THRESHOLD_MS` (default 60_000ms). Carries no per-PR data.
+    - New event `telemetry_sent` — emitted after a successful upload with `{ period, categories, payload_bytes, http_status }`. On failure: `telemetry_send_failed` with `{ category: 'auth' | 'network' | 'rate_limit' | 'server' | 'other', http_status?, message }`.
 
-    **Tier 3 — Privacy & consent design (non-negotiable constraints):**
-    - Telemetry is **opt-in**. `telemetry.enabled` defaults to `false` in config. No data is transmitted unless the user explicitly enables it.
-    - On first `watch`/`serve` run after install, display a one-time consent prompt:
-      ```
-        crosscheck can send anonymous usage counts to Motivation Labs to improve future versions.
-        No code, no repo names, no PR content, no usernames — only aggregate numbers.
-        Enable? [y/N]:
-      ```
-      Default answer is N. Response is persisted to `~/.crosscheck/config.yml` as `telemetry.enabled`. The prompt is never shown again. Users can change the setting at any time via `crosscheck telemetry [enable|disable|status]`.
-    - `crosscheck init` output includes a **Telemetry** row: current state (enabled/disabled) and a link to the privacy doc.
-    - Data categories that may **never** be collected or transmitted: code diffs, PR titles, PR descriptions, commit messages, file paths, repo names, GitHub usernames or org names, IP addresses, machine hostnames.
-    - A `PRIVACY.md` at the repo root documents exactly which fields are in a telemetry payload. This document is referenced in the consent prompt and `get-started.md`.
-
-    **Tier 4 — Safe telemetry payload (only when `telemetry.enabled: true`):**
-    - `install_id`: a UUID generated once at first install and stored in `~/.crosscheck/config.yml`. Never linked to a GitHub identity, email, or hostname. Rotatable via `crosscheck telemetry reset-id`.
-    - Transmission: weekly batch, sent at the start of the first `watch`/`serve` session of each UTC week. HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). No per-event streaming.
-    - Payload schema (all fields are counts or enums — no free text, no identifiers):
-      ```json
-      {
-        "install_id": "<uuid>",
-        "version": "0.2.0",
-        "platform": "darwin | linux | win32",
-        "period": "2025-W20",
-        "sessions": 12,
-        "prs_reviewed": 47,
-        "comments_posted": 134,
-        "reviews_by_pair": {
-          "claude_reviews_codex": 23,
-          "codex_reviews_claude": 18,
-          "claude_reviews_claude": 4,
-          "codex_reviews_codex": 2
-        },
-        "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
-        "follow_fix_rate": 0.73,
-        "optimize_runs": 2
+    **C. Telemetry category registry (the modular core):**
+    - A telemetry **category** is a self-contained module under `src/lib/telemetry/categories/<id>.ts` exporting:
+      ```ts
+      export interface TelemetryCategory {
+        id: string                                  // stable kebab-case identifier
+        version: number                             // bump when the field shape changes semantically
+        summary: string                             // one-sentence user-facing description (shown in consent prompt)
+        fields: string[]                            // documented field list (auto-generates PRIVACY.md entry)
+        aggregate(records: LogRecord[], period: { from: Date; to: Date }): Record<string, unknown>
       }
       ```
-    - If the HTTP request fails (network error, server error), log locally and retry at the next weekly opportunity. Never block startup on telemetry.
-    - `crosscheck telemetry status` shows: enabled/disabled, install_id (first 8 chars), date of last transmission, and the full payload that would be sent.
-    - `crosscheck telemetry dry-run` prints the payload without sending it, regardless of `enabled` state. Useful for users who want to audit before enabling.
+    - `src/lib/telemetry/registry.ts` exports `ALL_CATEGORIES: TelemetryCategory[]`. Adding a new category = drop a file, append to the registry export, ship. No other change required; the consent prompt, payload assembly, CLI listing, and `PRIVACY.md` generator auto-discover.
+    - `version` is per-category. Bumping a category's version requires the user to see a one-time prompt for that category only, not a global re-opt-in.
+    - Aggregators MUST return only numeric counts, enums from a fixed vocabulary, or omit the field. Returning a string that came from PR/user/repo data is a privacy violation enforced at code review (and by the schema check in tests, see H below).
+
+    **D. v1 categories shipping with this feature:**
+    - **`pipeline`** (v1) — counts per period: `prs_received`, `prs_skipped` (with reasons enum: `in_progress_local`, `in_progress_remote`, `no_vendor`, `no_review_comment`, `fork_pr`, `commit_limit_reached`, `dry_run`, `legacy_auto_fix_disabled`, `other`), `reviews`, `rechecks`, `fixes_attempted`, `fixes_succeeded`, `fixes_failed`, `conflict_resolves_attempted`, `conflict_resolves_succeeded`, `sessions`, `idle_intervals`.
+    - **`verdicts`** (v1) — `{ review: { APPROVE, NEEDS_WORK, BLOCK }, recheck: { APPROVE, NEEDS_WORK, BLOCK } }`. Broken out by step type so the recheck-improves-verdict signal is observable.
+    - **`tokens`** (v1) — `{ by_vendor: { claude, codex }, by_step: { review, recheck, fix, conflict_resolve } }`. Both views over the same totals. Cents/USD never included — token counts only.
+    - **`durations`** (v1) — coarse histogram buckets (p50/p90/p99 in ms) for `review`, `recheck`, `fix`, `conflict_resolve` step durations. No per-PR latencies.
+    - **`platform`** (v1) — `{ os: 'darwin' | 'linux' | 'win32', node_version: 'major.minor', crosscheck_version, deployment_mode: 'personal' | 'team', daemon: 'watch' | 'serve', cross_vendor: boolean }`. No hostname, IP, CPU model, RAM, or arch beyond the OS string.
+
+    **E. Consent model — categorical, additive, never auto-enable:**
+    - Master switch: `telemetry.enabled` (default `false`). When false, no transmission ever happens regardless of category state.
+    - Per-category state: `telemetry.categories.<id>` (default `false` for each).
+    - Per-category consent record: `telemetry.consented.<id>` = highest category version the user has been prompted for. Used to detect new versions on upgrade.
+    - **First-run flow** — when `crosscheck watch` or `crosscheck serve` starts and `telemetry.enabled` has never been set, on the first idle moment (not at startup — see F): show a single consent screen listing every registered category, its one-sentence summary, and the literal field list. The user picks per-category (`all | none | <space-separated category ids>`); default is `none`. Persist `telemetry.enabled` and `telemetry.categories.*` to `~/.crosscheck/config.yml`. Set `telemetry.consented.<id>` to each category's current version.
+    - **Upgrade flow** — when a new category exists in the registry that the user has never seen (`telemetry.consented[id] === undefined`), or its version is higher than what the user consented to, prompt for just that category on the next idle moment. Existing categories' opt-in state is preserved. The user is never asked about a category they've already declined unless they explicitly run `crosscheck telemetry reset`.
+    - The consent prompt never blocks PR processing — it's printed at idle, and the user has 30 seconds to respond; non-response = `none` for this session, prompt again next idle.
+
+    **F. Idle-triggered upload + transparency banner:**
+    - `watch`/`serve` track `lastActivityAt`, updated on every webhook event, review start/complete, fix push, comment post, or status check. A `session_idle` event fires when `Date.now() - lastActivityAt > IDLE_THRESHOLD_MS` (configurable; default 60s).
+    - On each idle event, if (i) `telemetry.enabled === true`, (ii) at least one category is opted in, and (iii) the current UTC ISO week is later than `telemetry.last_sent_period`, assemble and POST a payload. Otherwise: idle is a no-op.
+    - Cadence ceiling: at most one upload per UTC ISO week per install. Idle that fires more often than that is a no-op for telemetry purposes.
+    - Transmission: HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). 5-second timeout. No retry on the same idle event; if it fails, log `telemetry_send_failed` and try again at the next qualifying idle.
+    - **Banner format** — printed to the running terminal immediately after a successful upload, prefixed with `[telemetry]` so it's grep-able:
+      ```
+      [telemetry] uploaded 0.4 KB usage report at 2026-05-28 03:15:42 UTC
+                  install: a1b2c3d4  (rotate: `crosscheck telemetry reset-id`)
+                  period:  2026-W21  (Mon 2026-05-19 → Sun 2026-05-25)
+                  endpoint: https://telemetry.crosscheck.dev/v1/report
+                  categories sent: pipeline, tokens, platform
+                  payload:
+                    pipeline = { prs_received: 47, reviews: 47, rechecks: 12,
+                                 fixes_succeeded: 18, fixes_failed: 7 }
+                    tokens   = { by_vendor: { claude: 412300, codex: 98700 },
+                                 by_step:   { review: 412000, fix: 98000, conflict_resolve: 1000 } }
+                    platform = { os: darwin, node: 24.x, version: 0.10.4,
+                                 deployment_mode: personal, daemon: watch, cross_vendor: true }
+                  to opt out: `crosscheck telemetry disable [<category>|all]`
+      ```
+    - Banner is printed even when `--quiet` is set — the user is owed transparency about what left their machine. The only flag that suppresses it is `--no-banner-telemetry` (deliberately verbose so accidental suppression is unlikely).
+
+    **G. CLI surface — `crosscheck telemetry <subcommand>`:**
+    - `crosscheck telemetry status` — table: master switch, per-category enabled/declined/never-prompted, install_id (first 8 chars), last upload timestamp + period, endpoint URL.
+    - `crosscheck telemetry enable [<category>|all]` — opts in. With no category, prints the current state and exits. `all` opts in to every registered category at its current version.
+    - `crosscheck telemetry disable [<category>|all]` — opts out. `all` also flips the master switch to `false` so a stray idle never sends.
+    - `crosscheck telemetry preview` — prints the payload that would be sent right now (across the current week's logs), regardless of `enabled` state. Identical format to the banner, plus `(dry-run — not sent)` suffix. Useful before opting in.
+    - `crosscheck telemetry reset-id` — generates a new `install_id`. Existing collected logs are unaffected; only future uploads carry the new id.
+    - `crosscheck telemetry reset` — clears all consent state (master switch back to `false`, all category state cleared, `last_sent_*` cleared). Forces re-prompt next idle.
+    - `crosscheck telemetry categories` — lists every registered category with id, version, summary, and field list (same source the consent prompt and `PRIVACY.md` use).
+
+    **H. Privacy invariants — non-negotiable, enforced in code review and tests:**
+    - **Never collected, period**: code diffs, PR titles/descriptions/bodies, commit messages, file paths, branch names, repo names, GitHub user/org logins, email addresses, IP addresses, machine hostnames, CPU/GPU info beyond the OS string, install paths.
+    - The payload schema is enumerated by the union of `category.fields` arrays. A test checks that every key in the assembled payload appears in some category's `fields` list — any unknown key fails CI.
+    - The full field list is auto-generated into `PRIVACY.md` at the repo root from the registry: running `npm run privacy:doc` writes a Markdown table with every category, version, and field. CI fails if `PRIVACY.md` is out of date with the registry (same pattern as type generators).
+    - The consent prompt references `PRIVACY.md` by URL (`https://github.com/Motivation-Labs/crosscheck/blob/main/PRIVACY.md`).
+    - `install_id` is a UUIDv4 generated locally. It is never seeded from a GitHub identity, hostname, MAC, or any other system identifier. It is stored only in `~/.crosscheck/config.yml`. Rotation is a single CLI command.
+    - The endpoint MUST reject any payload that includes a field not listed in the version's schema. This is a server-side belt-and-suspenders on top of the client-side schema check (server design is out of scope for this PR but the contract is recorded here).
 
   - **Technical Notes:**
-    - New file: `src/lib/metrics.ts` — `appendMetric(record)`, `readMetrics(since?)`, `computeSummary(records)`. Module-level singleton; respects `logs.enabled` (if logs are disabled, metrics are too). NDJSON append, same pattern as `logger.ts`.
-    - New file: `src/lib/telemetry.ts` — `maybeSendTelemetry(config)`: checks enabled + weekly cadence (`~/.crosscheck/.telemetry-last-sent`), aggregates `metrics/` files, POSTs payload, updates sentinel. All errors are caught and logged locally; never throws to caller.
-    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry [enable|disable|status|dry-run|reset-id]`.
-    - Schema additions: `telemetry: { enabled: boolean (default false), install_id: string (auto-generated) }`.
-    - `watch.ts`/`serve.ts`: call `maybeSendTelemetry(config)` early in startup (after consent check on first run).
-    - `review.ts`: call `appendMetric(...)` after each review completes (success or failure verdict).
-    - `optimize.ts`: call `appendMetric({ event: 'optimize_run', fingerprint_before, fingerprint_after })` after applying changes.
-    - `diagnose.ts`: extend output with Tier 1 usage summary section and Tier 2 instruction-effectiveness delta table.
-    - `init.ts`: add Telemetry row to status table.
-    - New file: `PRIVACY.md` at repo root, included in npm package. Documents full payload schema, data retention, opt-out instructions, and contact for data deletion requests.
+    - New directory: `src/lib/telemetry/` — `category.ts` (interface), `registry.ts` (list of all categories), `categories/{pipeline,verdicts,tokens,durations,platform}.ts`, `aggregate.ts` (reads logs over `[from, to]`, runs each enabled category's `aggregate`, assembles payload), `transmit.ts` (HTTPS POST + banner emit), `consent.ts` (first-run + upgrade prompts, persists state), `idle.ts` (the idle detector and dispatcher used by `watch`/`serve`).
+    - Schema additions to `src/config/schema.ts`:
+      ```ts
+      telemetry: z.object({
+        enabled: z.boolean().default(false),
+        install_id: z.string().default(''),                 // empty until first opt-in
+        categories: z.record(z.boolean()).default({}),      // <id> → bool
+        consented: z.record(z.number()).default({}),        // <id> → highest version seen
+        last_sent_at: z.string().nullable().default(null),  // ISO timestamp
+        last_sent_period: z.string().nullable().default(null), // e.g. '2026-W21'
+        endpoint: z.string().default('https://telemetry.crosscheck.dev/v1/report'),
+        idle_threshold_ms: z.number().int().min(10_000).default(60_000),
+      }).default({})
+      ```
+    - `src/lib/logger.ts`: extend `review_complete`, `fix_complete`, `conflict_resolve_complete` payloads as listed in section B. Add `session_idle` and `telemetry_sent` / `telemetry_send_failed` to the event vocabulary.
+    - `src/lib/runner.ts`: thread `step_type` and `step_name` into the existing `fileLog({ event: 'review_complete', ... })` calls. Add `vendor` to fix and conflict-resolve `fileLog` calls. Capture `duration_ms` around the step body.
+    - `src/commands/watch.ts` / `src/commands/serve.ts`: install the idle detector at startup. On each `session_idle` event, call `consent.maybePrompt()` first (which may block at most 30s for input), then `telemetry.maybeSend()` if the master switch and at least one category are enabled.
+    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry <subcommand>` handlers. One small command per subcommand, all delegating to functions in `src/lib/telemetry/`.
+    - New file: `PRIVACY.md` at the repo root, generated by `scripts/gen-privacy-doc.ts` (run via `npm run privacy:doc`). CI step `npm run privacy:doc -- --check` fails the build if the file is out of date.
+    - `crosscheck status` shows the master switch and a one-line summary of which categories are enabled.
+    - `crosscheck init` adds a one-line note pointing at the consent flow without prompting up front — the user shouldn't be hit with a privacy decision during install.
   - **Tests Required:**
-    - `appendMetric` with `logs.enabled: false` writes nothing.
-    - Metrics records contain no sensitive fields (schema-level check on allowed keys).
-    - `maybeSendTelemetry` with `enabled: false` makes no HTTP request.
-    - `maybeSendTelemetry` within the same UTC week as last send makes no HTTP request.
-    - `maybeSendTelemetry` in a new week POSTs the correct aggregated payload.
-    - Consent prompt on first run persists response; not shown again on second run.
-    - `telemetry dry-run` prints payload structure matching schema; makes no HTTP request.
-    - `diagnose` with Tier 1 data shows reviewer-pair distribution and follow-fix rate.
-    - `diagnose` with two instruction fingerprints shows before/after verdict delta.
-    - Follow-fix event emitted when new commit arrives on a PR with prior `NEEDS_WORK`/`BLOCK` verdict.
+    - **Registry shape:** every category exports a unique kebab-case `id`, a positive integer `version`, a non-empty `summary`, a non-empty `fields[]`, and an `aggregate` function. A failing test if any category violates the contract.
+    - **Schema check on payload:** the assembled payload's top-level keys are exactly the opted-in category ids; each category's inner keys are a subset of its `fields[]`. A test asserts no extra keys, no missing required keys.
+    - **No PII in synthetic input:** seed the logs with synthetic records containing fake repo names, user logins, and PR titles. Run aggregation. Assert that none of those strings appear anywhere in the assembled payload.
+    - **Logger upgrades:** `review_complete` now carries `step_type` and `step_name`; `fix_complete` and `conflict_resolve_complete` carry `vendor` and `duration_ms`.
+    - **Consent state machine:** first-run prompt with no input → master stays `false`, no categories opted in. First-run prompt with `tokens platform` → those two categories enabled, others not, `consented.tokens === 1`, `consented.platform === 1`. New category added in registry → existing categories' state preserved, prompt shows only the new category on next idle, decline persists. Bumping `tokens.version` from 1 to 2 → prompt re-fires for `tokens` only.
+    - **Idle dispatcher:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. Subsequent activity resets the clock. With `telemetry.enabled: false`, idle never calls `maybeSend`.
+    - **Cadence ceiling:** two idle events in the same UTC week → one HTTP POST. Idle in a new week → one more POST. `last_sent_period` advances.
+    - **Banner content:** mock the transport. After a successful send, the banner stdout contains the exact endpoint URL, install_id prefix, period range, every opted-in category id, and the literal payload values. `--no-banner-telemetry` suppresses the banner but the POST still goes out.
+    - **Transmission failure paths:** network error → `telemetry_send_failed { category: 'network' }` event; 401 → `category: 'auth'`; 429 → `category: 'rate_limit'`; 5xx → `category: 'server'`. None of these throw to the caller.
+    - **`telemetry preview` is offline-safe:** runs with `enabled: false`, makes zero network calls, prints the same banner format with a `(dry-run — not sent)` suffix.
+    - **`PRIVACY.md` is current:** running the generator on the registry produces a file byte-equal to the committed `PRIVACY.md`. The `--check` mode used in CI returns non-zero when drift is detected.
 
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.

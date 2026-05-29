@@ -46,5 +46,5 @@ export function parseSelection(answer: string, prs: PRStatus[]): PRStatus[] {
     selectedIndexes.add(value - 1)
   }
 
-  return [...selectedIndexes].sort((a, b) => a - b).map(index => prs[index])
+  return [...selectedIndexes].map(index => prs[index])
 }

@@ -31,8 +31,8 @@ describe('parseSelection', () => {
     expect(parseSelection('all', prs).map(item => item.number)).toEqual([1, 2, 3])
   })
 
-  it('selects comma-separated PR indexes in order', () => {
-    expect(parseSelection('3,1,1', prs).map(item => item.number)).toEqual([1, 3])
+  it('selects comma-separated PR indexes in operator order', () => {
+    expect(parseSelection('3,1,1', prs).map(item => item.number)).toEqual([3, 1])
   })
 
   it('returns an empty selection for blank input', () => {

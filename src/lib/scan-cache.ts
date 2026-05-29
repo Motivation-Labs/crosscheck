@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { ScanResult } from './pr-status.js'
@@ -52,5 +52,8 @@ export function readScanCache(options: ReadScanCacheOptions): ScanCachePayload |
 
 export function writeScanCache(payload: ScanCachePayload, cacheDir = DEFAULT_CACHE_DIR): void {
   mkdirSync(cacheDir, { recursive: true })
-  writeFileSync(cachePath(cacheDir), JSON.stringify(payload, null, 2) + '\n')
+  const path = cachePath(cacheDir)
+  const tempPath = `${path}.${process.pid}.tmp`
+  writeFileSync(tempPath, JSON.stringify(payload, null, 2) + '\n')
+  renameSync(tempPath, path)
 }

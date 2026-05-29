@@ -32,7 +32,6 @@ describe('parseCrosscheckAnnotation', () => {
       'quoted <!-- crosscheck: fix_applied -->\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
     )
     expect(annotation).toEqual({
-      marker: 'origin',
       origin: 'claude',
       reviewer: 'codex',
       verdict: 'NEEDS_WORK',
@@ -127,6 +126,27 @@ describe('derivePRStatus', () => {
     expect(status.reviewState).toBe('RECHECK')
     expect(status.nextAction).toBe('recheck')
     expect(status.freshness).toBe('stale')
+  })
+
+  it('treats same-timestamp fix activity as needing recheck', () => {
+    const timestamp = '2026-05-27T11:00:00.000Z'
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }],
+      logEvents: [{
+        ts: timestamp,
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 1,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('RECHECK')
+    expect(status.nextAction).toBe('recheck')
   })
 
   it('keeps NEEDS_WORK when no fix has landed yet', () => {

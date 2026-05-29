@@ -28,7 +28,7 @@ export type NextAction = 'review' | 'run' | 'recheck' | null
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
 export interface CrosscheckAnnotation {
-  marker: string
+  marker?: string
   origin?: string
   reviewer?: string
   verdict?: CrosscheckVerdict
@@ -151,6 +151,11 @@ interface TimedVerdict {
   annotation: CrosscheckAnnotation | null
 }
 
+const GITHUB_SCAN_CONCURRENCY = 8
+
+// These events intentionally count as activity even when a run has no code
+// changes. `kickass` is a retry queue: a just-attempted no-op should cool down
+// before the operator sees the same PR again.
 const WORKFLOW_ACTIVITY_EVENTS = new Set([
   'review_complete',
   'fix_complete',
@@ -174,11 +179,11 @@ export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | 
     attrs.set(part.slice(0, eq), part.slice(eq + 1))
   }
 
-  const first = parts[0] ?? 'unknown'
-  const marker = first.includes('=') ? first.slice(0, first.indexOf('=')) : first
+  const first = parts[0]
+  const marker = first && !first.includes('=') ? first : undefined
   const verdict = normalizeVerdict(attrs.get('verdict'))
   return {
-    marker,
+    ...(marker && { marker }),
     ...(attrs.has('origin') && { origin: attrs.get('origin') }),
     ...(attrs.has('reviewer') && { reviewer: attrs.get('reviewer') }),
     ...(verdict && { verdict }),
@@ -246,9 +251,10 @@ export async function scanOpenPRStatuses(
   const now = options.now ?? new Date()
   const [repoScopes, logEvents] = await Promise.all([
     buildRepoScopes(config, token),
-    Promise.resolve(loadWorkflowLogEvents()),
+    loadWorkflowLogEvents(),
   ])
   const octokit = createGithubClient(token)
+  const limitGithub = createConcurrencyLimiter(GITHUB_SCAN_CONCURRENCY)
 
   const perRepoPRs = await Promise.all(
     repoScopes.map(async ({ owner, repo }) => {
@@ -276,13 +282,13 @@ export async function scanOpenPRStatuses(
           timelineEvents,
           merge,
         ] = await Promise.all([
-          listIssueComments(owner, repo, pr.number, token),
-          listPRReviewComments(owner, repo, pr.number, token),
-          listPRCommitActivity(owner, repo, pr.number, token),
-          listCommitStatuses(owner, repo, pr.headSha, token),
-          listCheckRuns(owner, repo, pr.headSha, token),
-          listTimelineEvents(owner, repo, pr.number, token),
-          getPRMergeSummary(octokit, owner, repo, pr.number, pr.baseRef),
+          limitGithub(() => listIssueComments(owner, repo, pr.number, token)),
+          limitGithub(() => listPRReviewComments(owner, repo, pr.number, token)),
+          limitGithub(() => listPRCommitActivity(owner, repo, pr.number, token)),
+          limitGithub(() => listCommitStatuses(owner, repo, pr.headSha, token)),
+          limitGithub(() => listCheckRuns(owner, repo, pr.headSha, token)),
+          limitGithub(() => listTimelineEvents(owner, repo, pr.number, token)),
+          limitGithub(() => getPRMergeSummary(octokit, owner, repo, pr.number, pr.baseRef)),
         ])
 
         return derivePRStatus({
@@ -399,7 +405,7 @@ function latestTimedVerdict(input: PRStatusInput, annotations: TimedAnnotation[]
 function latestAppliedFixAfter(events: PRWorkflowLogEvent[], after: string | undefined): PRWorkflowLogEvent | null {
   const afterMs = after ? Date.parse(after) : 0
   return events
-    .filter(event => Date.parse(event.ts) > afterMs)
+    .filter(event => Date.parse(event.ts) >= afterMs)
     .filter(event => {
       if (event.event === 'fix_complete') return typeof event.applied_count === 'number' && event.applied_count > 0
       if (event.event === 'conflict_resolve_complete') return typeof event.conflicts_resolved === 'number' && event.conflicts_resolved > 0
@@ -419,6 +425,26 @@ function nextActionForState(state: ReviewState): NextAction {
   if (state === 'RECHECK') return 'recheck'
   if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'run'
   return null
+}
+
+function createConcurrencyLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: Array<() => void> = []
+
+  return async function limitTask<T>(task: () => Promise<T>): Promise<T> {
+    if (active >= limit) {
+      await new Promise<void>(resolve => {
+        waiting.push(resolve)
+      })
+    }
+    active += 1
+    try {
+      return await task()
+    } finally {
+      active -= 1
+      waiting.shift()?.()
+    }
+  }
 }
 
 function maxTimestampMs(values: Array<string | undefined>): number | null {

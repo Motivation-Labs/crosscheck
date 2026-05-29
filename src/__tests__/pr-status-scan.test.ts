@@ -90,4 +90,25 @@ describe('scanOpenPRStatuses', () => {
       expect.any(Error),
     )
   })
+
+  it('caps concurrent per-PR GitHub activity requests', async () => {
+    mockListOpenPRs.mockResolvedValue(Array.from({ length: 20 }, (_, index) => openPR(index + 1)))
+    let active = 0
+    let maxActive = 0
+    mockListIssueComments.mockImplementation(async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise(resolve => setTimeout(resolve, 1))
+      active -= 1
+      return []
+    })
+
+    await scanOpenPRStatuses(
+      ConfigSchema.parse({ repos: [{ owner: 'acme', name: 'web' }] }),
+      'token',
+      { now: new Date('2026-05-29T00:00:00.000Z'), staleAfterMs: 24 * 60 * 60 * 1000 },
+    )
+
+    expect(maxActive).toBeLessThanOrEqual(8)
+  })
 })

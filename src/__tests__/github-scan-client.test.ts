@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listCheckRuns, listCommitStatuses, listIssueComments, listOpenPRs, listOrgRepos, listUserRepos } from '../github/client.js'
+import { listCheckRuns, listCommitStatuses, listIssueComments, listOpenPRs, listOrgRepos, listTimelineEvents, listUserRepos } from '../github/client.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -94,5 +94,16 @@ describe('scan GitHub client helpers', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404))
 
     await expect(listOpenPRs('acme', 'web', 'token')).resolves.toEqual([])
+  })
+
+  it('uses the standard GitHub JSON media type for timeline events', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse([{ event: 'ready_for_review', created_at: '2026-05-29T00:00:00.000Z' }]))
+
+    await listTimelineEvents('acme', 'web', 7, 'token')
+
+    expect(fetchSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      headers: expect.objectContaining({ Accept: 'application/vnd.github+json' }),
+    }))
   })
 })

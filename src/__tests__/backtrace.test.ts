@@ -327,4 +327,29 @@ describe('scanOpenPRStatuses', () => {
     expect(result.skippedAuthor).toBe(1)
     expect(mockListPRComments).not.toHaveBeenCalled()
   })
+
+  it('records org scope expansion failures and continues scanning other scopes', async () => {
+    const scopes: BacktraceScope[] = [
+      { org: 'broken-org' },
+      { owner: 'acme', repo: 'api' },
+    ]
+    mockListOrgRepos.mockRejectedValue(new Error('org unavailable'))
+    mockListOpenPRs.mockResolvedValue([makePR({ number: 1 })])
+    mockListPRComments.mockResolvedValue([])
+    mockListPRCommitsDetailed.mockResolvedValue([])
+    mockListCommitStatuses.mockResolvedValue([])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses.map(status => status.pr.number)).toEqual([1])
+    expect(result.failures).toEqual([
+      {
+        owner: 'broken-org',
+        stage: 'scope',
+        message: 'org unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(1)
+  })
+
 })

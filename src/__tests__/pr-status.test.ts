@@ -93,6 +93,11 @@ describe('foldPRStatus', () => {
       comment(
         [
           'The review text mentions `<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->` as an example.',
+          '> <!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+          '',
+          '```',
+          '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+          '```',
           '',
           '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->',
         ].join('\n'),

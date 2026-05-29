@@ -18,7 +18,7 @@ import { getLogDir } from '../lib/logger.js'
 import { buildMonitorScopeHash, buildScanCacheKey, readScanCache, writeScanCache } from '../lib/scan-cache.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 
-type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'UNKNOWN'
+type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 type StepType = 'review' | 'fix' | 'recheck'
 
 export interface ScanTokens {
@@ -91,7 +91,7 @@ interface LogEntry {
   reason?: string
 }
 
-interface PRLogSummary {
+export interface PRLogSummary {
   reviewVerdict: ReviewState | null
   recheckVerdict: ReviewState | null
   latestVerdict: ReviewState | null
@@ -105,7 +105,8 @@ interface PRLogSummary {
 }
 
 const DEFAULT_STALE_AFTER = '24h'
-const STATE_ORDER: ReviewState[] = ['NEEDS_WORK', 'BLOCK', 'APPROVE', 'PR', 'UNKNOWN']
+const STATE_ORDER: ReviewState[] = ['NEEDS_WORK', 'BLOCK', 'APPROVE', 'PR']
+const SCAN_SCOPE_CONCURRENCY = 2
 const SCAN_REPO_CONCURRENCY = 8
 const SCAN_PR_CONCURRENCY = 8
 
@@ -204,24 +205,24 @@ async function expandConfiguredRepos(
 
   for (const repo of config.repos) addRepo({ owner: repo.owner, name: repo.name })
 
-  const orgResults = await Promise.all(config.orgs.map(async (org) => {
+  const orgResults = await mapWithConcurrencyForScan(config.orgs, SCAN_SCOPE_CONCURRENCY, async (org) => {
     try {
       return await listOrgReposForScan(org, token)
     } catch (err) {
       skippedRepos.push({ repo: org, reason: conciseReason(err) })
       return [] as ScanRepo[]
     }
-  }))
+  })
   for (const repo of orgResults.flat()) addRepo(repo)
 
-  const userResults = await Promise.all(config.users.map(async (user) => {
+  const userResults = await mapWithConcurrencyForScan(config.users, SCAN_SCOPE_CONCURRENCY, async (user) => {
     try {
       return await listUserReposForScan(user, token, sameGitHubLoginForScan(user, githubLogin))
     } catch (err) {
       skippedRepos.push({ repo: user, reason: conciseReason(err) })
       return [] as ScanRepo[]
     }
-  }))
+  })
   for (const repo of userResults.flat()) addRepo(repo)
 
   return [...repoMap.values()].sort((a, b) => `${a.owner}/${a.name}`.localeCompare(`${b.owner}/${b.name}`))
@@ -237,15 +238,21 @@ async function buildScanRow(
 ): Promise<ScanRow> {
   const repoName = `${repo.owner}/${repo.name}`
   const comments = await listIssueCommentsForScan(repo.owner, repo.name, pr.number, token)
-  const latestAnnotation = findLatestAnnotation(comments)
+  const annotations = findScanAnnotations(comments)
+  const latestAnnotation = annotations.latestAnnotation
+  const latestVerdictAnnotation = annotations.latestVerdictAnnotation
   const logSummary = logIndex.get(`${repoName}#${pr.number}`) ?? emptyLogSummary()
 
-  const annotationVerdict = latestAnnotation?.verdict ?? null
-  const latestVerdict = chooseLatestVerdict(annotationVerdict, latestAnnotation?.commentCreatedAt ?? null, logSummary)
+  const annotationVerdict = latestVerdictAnnotation?.verdict ?? null
+  const latestVerdict = chooseLatestVerdict(
+    annotationVerdict,
+    latestVerdictAnnotation?.commentCreatedAt ?? null,
+    logSummary,
+  )
   const reviewState = latestVerdict ?? 'PR'
   const lastActiveAt = maxTimestamp([pr.updatedAt, latestAnnotation?.commentCreatedAt, logSummary.latestLogAt]) ?? pr.createdAt
   const isStale = now - new Date(lastActiveAt).getTime() >= staleAfterMs
-  const progressSummary = buildProgressSummary(latestAnnotation, logSummary)
+  const progressSummary = buildProgressSummary(latestVerdictAnnotation, logSummary)
 
   return {
     repo: repoName,
@@ -268,7 +275,7 @@ async function buildScanRow(
   }
 }
 
-function chooseLatestVerdict(
+export function chooseLatestVerdict(
   annotationVerdict: ReviewState | null,
   annotationAt: string | null,
   logSummary: PRLogSummary,
@@ -291,18 +298,24 @@ function selectNextAction(latestVerdict: ReviewState | null, logSummary: PRLogSu
   return null
 }
 
-function buildProgressSummary(annotation: ScanAnnotationMetadata | null, logSummary: PRLogSummary): string {
+export function buildProgressSummary(annotation: ScanAnnotationMetadata | null, logSummary: PRLogSummary): string {
   const parts = ['PR']
-  const reviewVerdict = logSummary.reviewVerdict ?? (annotation?.type !== 'recheck' ? annotation?.verdict ?? null : null)
+  const reviewVerdict = logSummary.reviewVerdict ?? annotation?.verdict ?? null
   if (reviewVerdict) parts.push(`CR(${reviewVerdict})`)
   if (logSummary.fixAppliedCount !== null) parts.push(`fix(${logSummary.fixAppliedCount})`)
-  const recheckVerdict = logSummary.recheckVerdict ?? (annotation?.type === 'recheck' ? annotation.verdict ?? null : null)
+  const recheckVerdict = logSummary.recheckVerdict
   if (recheckVerdict) parts.push(`recheck(${recheckVerdict})`)
   return parts.join(' -> ')
 }
 
-function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotationMetadata | null {
-  let latest: ScanAnnotationMetadata | null = null
+export interface ScanAnnotations {
+  latestAnnotation: ScanAnnotationMetadata | null
+  latestVerdictAnnotation: ScanAnnotationMetadata | null
+}
+
+export function findScanAnnotations(comments: ScanIssueComment[]): ScanAnnotations {
+  let latestAnnotation: ScanAnnotationMetadata | null = null
+  let latestVerdictAnnotation: ScanAnnotationMetadata | null = null
   const orderedComments = [...comments].sort(
     (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
   )
@@ -312,7 +325,7 @@ function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotationMetad
     if (!match) continue
 
     const attrs = parseAttrs(match[1])
-    latest = {
+    const annotation: ScanAnnotationMetadata = {
       commentId: comment.id,
       commentCreatedAt: comment.createdAt,
       raw: match[1],
@@ -322,8 +335,10 @@ function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotationMetad
       verdict: normalizeReviewState(attrs.verdict) ?? undefined,
       type: attrs.type,
     }
+    latestAnnotation = annotation
+    if (annotation.verdict) latestVerdictAnnotation = annotation
   }
-  return latest
+  return { latestAnnotation, latestVerdictAnnotation }
 }
 
 function parseAttrs(raw: string): Record<string, string> {
@@ -535,18 +550,40 @@ export async function mapWithConcurrencyForScan<T, R>(
 
   const results: R[] = new Array<R>(items.length)
   let nextIndex = 0
+  let settledCount = 0
+  let rejected = false
   const workerCount = Math.min(limit, items.length)
 
-  const runNext = async (): Promise<void> => {
-    const index = nextIndex
-    nextIndex += 1
-    if (index >= items.length) return
-    results[index] = await mapper(items[index])
-    await runNext()
-  }
+  return await new Promise<R[]>((resolve, reject) => {
+    const maybeResolve = (): void => {
+      if (settledCount === items.length) resolve(results)
+    }
 
-  const workers = Array.from({ length: workerCount }, () => runNext())
+    const startNext = (): void => {
+      if (rejected) return
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) {
+        maybeResolve()
+        return
+      }
 
-  await Promise.all(workers)
-  return results
+      Promise.resolve()
+        .then(() => mapper(items[index]))
+        .then(
+          (result) => {
+            results[index] = result
+            settledCount += 1
+            startNext()
+            maybeResolve()
+          },
+          (err: unknown) => {
+            rejected = true
+            reject(err)
+          },
+        )
+    }
+
+    Array.from({ length: workerCount }, () => startNext())
+  })
 }

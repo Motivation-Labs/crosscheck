@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listIssueCommentsForScan, listOpenPRsForScan } from '../github/client.js'
+import { listIssueCommentsForScan, listOpenPRsForScan, listUserReposForScan } from '../github/client.js'
 
-function jsonResponse(data: unknown): Response {
+function jsonResponse(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), {
-    status: 200,
+    status: init.status ?? 200,
+    statusText: init.statusText,
     headers: { 'Content-Type': 'application/json' },
   })
 }
@@ -43,5 +44,28 @@ describe('scan GitHub client helpers', () => {
     const url = String(fetchMock.mock.calls[0]?.[0])
     expect(url).toContain('sort=created')
     expect(url).toContain('direction=asc')
+  })
+
+  it('filters user repos by owner case-insensitively', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse([
+      { name: 'api', owner: { login: 'BeingZY' }, archived: false },
+      { name: 'fork', owner: { login: 'someone-else' }, archived: false },
+    ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const repos = await listUserReposForScan('beingzy', 'token', false)
+
+    expect(repos).toEqual([{ owner: 'BeingZY', name: 'api' }])
+  })
+
+  it('surfaces GitHub rate limit responses distinctly', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(
+      { message: 'API rate limit exceeded' },
+      { status: 403, statusText: 'Forbidden' },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(listIssueCommentsForScan('acme', 'api', 12, 'token'))
+      .rejects.toThrow('GitHub rate limit or secondary rate limit')
   })
 })

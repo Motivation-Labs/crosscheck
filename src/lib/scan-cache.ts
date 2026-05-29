@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 
@@ -69,6 +69,7 @@ export function writeScanCache<T>(key: string, data: T, options: ScanCacheOption
     data,
   }
   writeFileSync(path, JSON.stringify(envelope, null, 2) + '\n', { mode: 0o600 })
+  chmodSync(path, 0o600)
   return true
 }
 

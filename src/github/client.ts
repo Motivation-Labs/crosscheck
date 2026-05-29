@@ -378,7 +378,10 @@ async function githubJson<T>(url: string, token: string, label: string): Promise
       const data = await res.json() as { message?: string }
       message = data.message ?? message
     } catch { /* keep status text */ }
-    throw new Error(`${label} failed [${res.status}]: ${message}`)
+    const context = res.status === 403 || res.status === 429
+      ? 'GitHub rate limit or secondary rate limit'
+      : 'GitHub API request'
+    throw new Error(`${label} failed [${res.status}]: ${context}: ${message}`)
   }
   return await res.json() as T
 }
@@ -416,7 +419,9 @@ export async function listUserReposForScan(username: string, token: string, isSe
     )
     if (data.length === 0) break
     for (const repo of data) {
-      if (!repo.archived && repo.owner.login === username) results.push({ owner: repo.owner.login, name: repo.name })
+      if (!repo.archived && repo.owner.login.toLowerCase() === username.toLowerCase()) {
+        results.push({ owner: repo.owner.login, name: repo.name })
+      }
     }
     if (data.length < 100) break
     page++

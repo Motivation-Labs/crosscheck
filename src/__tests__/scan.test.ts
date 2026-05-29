@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildProgressSummary,
+  chooseLatestVerdict,
+  findScanAnnotations,
   filterScanRowsForOutput,
   mapWithConcurrencyForScan,
   sameGitHubLoginForScan,
+  type ScanAnnotationMetadata,
   type ScanRow,
 } from '../commands/scan.js'
 
@@ -56,6 +60,74 @@ describe('sameGitHubLoginForScan', () => {
     expect(sameGitHubLoginForScan('beingzy', 'BeingZY')).toBe(true)
     expect(sameGitHubLoginForScan('alice', 'bob')).toBe(false)
     expect(sameGitHubLoginForScan('alice', null)).toBe(false)
+  })
+})
+
+describe('scan annotation helpers', () => {
+  it('keeps latest annotation metadata separate from latest verdict annotation', () => {
+    const annotations = findScanAnnotations([
+      {
+        id: 1,
+        author: 'bot',
+        body: '<!-- crosscheck: origin=codex reviewer=claude verdict=NEEDS_WORK type=review -->',
+        createdAt: '2026-05-29T10:00:00Z',
+        updatedAt: '2026-05-29T10:00:00Z',
+      },
+      {
+        id: 2,
+        author: 'bot',
+        body: '<!-- crosscheck: type=fix_applied -->',
+        createdAt: '2026-05-29T11:00:00Z',
+        updatedAt: '2026-05-29T11:00:00Z',
+      },
+    ])
+
+    expect(annotations.latestAnnotation?.commentId).toBe(2)
+    expect(annotations.latestVerdictAnnotation?.commentId).toBe(1)
+    expect(annotations.latestVerdictAnnotation?.verdict).toBe('NEEDS_WORK')
+  })
+
+  it('uses the latest verdict annotation when logs are absent', () => {
+    const verdict = chooseLatestVerdict('NEEDS_WORK', '2026-05-29T10:00:00Z', {
+      reviewVerdict: null,
+      recheckVerdict: null,
+      latestVerdict: null,
+      latestVerdictAt: null,
+      latestStep: null,
+      latestLogAt: null,
+      fixAppliedCount: null,
+      fixCompletedAt: null,
+      skippedReasons: [],
+      tokens: { review: 0, fix: 0, recheck: 0, total: 0 },
+    })
+
+    expect(verdict).toBe('NEEDS_WORK')
+  })
+
+  it('does not infer recheck progress from annotation type', () => {
+    const annotation: ScanAnnotationMetadata = {
+      commentId: 1,
+      commentCreatedAt: '2026-05-29T10:00:00Z',
+      raw: 'origin=codex reviewer=claude verdict=APPROVE type=recheck',
+      attrs: { origin: 'codex', reviewer: 'claude', verdict: 'APPROVE', type: 'recheck' },
+      origin: 'codex',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      type: 'recheck',
+    }
+
+    expect(buildProgressSummary(annotation, {
+      reviewVerdict: null,
+      recheckVerdict: null,
+      latestVerdict: null,
+      latestVerdictAt: null,
+      latestStep: null,
+      latestLogAt: null,
+      fixAppliedCount: null,
+      fixCompletedAt: null,
+      skippedReasons: [],
+      tokens: { review: 0, fix: 0, recheck: 0, total: 0 },
+    })).toBe('PR -> CR(APPROVE)')
   })
 })
 

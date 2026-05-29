@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { buildScanCacheKey, readScanCache, writeScanCache } from '../lib/scan-cache.js'
@@ -52,5 +52,14 @@ describe('scan cache', () => {
     expect(wrote).toBe(false)
     expect(readFileSync(cachePath, 'utf8')).toBe(before)
     expect(readScanCache<{ rows: string[] }>(key, { cachePath, now: 3_000 })).toEqual({ rows: ['old'] })
+  })
+
+  it('tightens permissions when updating an existing cache file', () => {
+    writeFileSync(cachePath, '{}\n', { mode: 0o644 })
+    chmodSync(cachePath, 0o644)
+
+    writeScanCache(key, { rows: [1] }, { cachePath, now: 1_000 })
+
+    expect(statSync(cachePath).mode & 0o777).toBe(0o600)
   })
 })

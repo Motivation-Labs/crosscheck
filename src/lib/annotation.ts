@@ -1,3 +1,5 @@
+// Additive contract: this enum may grow in minor releases, but existing values
+// must not be removed or renamed without a breaking change.
 export type CrosscheckStepType = 'review' | 'recheck' | 'fix' | 'conflict-resolve'
 
 export interface CrosscheckAnnotationInput {
@@ -29,15 +31,15 @@ export function buildAnnotation(input: CrosscheckAnnotationInput): string {
 }
 
 export function parseAnnotation(body: string): CrosscheckAnnotationInput | null {
-  const matches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
-  const last = matches.at(-1)
-  if (!last) return null
+  const fields = parseAnnotationFields(body)
+  if (!fields) return null
 
-  const fields = parseFields(last[1])
   const origin = fields.get('origin')
   const reviewer = fields.get('reviewer')
   if (!origin || !reviewer) return null
 
+  // Defaults keep legacy annotations parseable:
+  // type=review, round=1, service=crosscheck, model=default.
   return {
     origin,
     reviewer,
@@ -47,6 +49,14 @@ export function parseAnnotation(body: string): CrosscheckAnnotationInput | null 
     verdict: fields.get('verdict') ?? 'UNKNOWN',
     service: fields.get('service') ?? DEFAULT_SERVICE,
   }
+}
+
+export function parseAnnotationFields(body: string): ReadonlyMap<string, string> | null {
+  const matches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
+  const last = matches.at(-1)
+  if (!last) return null
+
+  return parseFields(last[1])
 }
 
 export function buildCommitTrailers(input: CrosscheckCommitTrailerInput): string {

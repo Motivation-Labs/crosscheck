@@ -91,6 +91,12 @@ describe('isFreshReviewComment', () => {
     )).toBe(false)
   })
 
+  it('does not treat parser defaults alone as proof of a fresh review', () => {
+    expect(isFreshReviewComment(
+      'Status note without the review header.\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK -->',
+    )).toBe(false)
+  })
+
   it('returns false for an unrelated human comment with neither annotation nor header', () => {
     expect(isFreshReviewComment('LGTM, merging now.')).toBe(false)
   })

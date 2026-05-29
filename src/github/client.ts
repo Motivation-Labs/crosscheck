@@ -1,6 +1,6 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { buildAnnotation, parseAnnotation } from '../lib/annotation.js'
+import { buildAnnotation, parseAnnotation, parseAnnotationFields } from '../lib/annotation.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -266,17 +266,23 @@ export async function prHasCrossCheckComment(
 
 // True iff `body` is a fresh review comment that a recheck should link back to.
 // Classification cascade:
-//   1. Contract annotation parsed by annotation.ts → review iff type=review.
-//      Legacy review annotations without model/round/service default to review.
-//   2. Bare summary/notification markers (`fix_failed`, `fix_applied`,
+//   1. Contract annotation parsed by annotation.ts with explicit type=review
+//      → review. Other explicit types are not reviews.
+//   2. Legacy annotations without type= fall through to the header check so
+//      pre-type rechecks are still excluded by the "> Recheck of" prefix.
+//   3. Bare summary/notification markers (`fix_failed`, `fix_applied`,
 //      `conflict_resolved`, `no_diff_change`, future bare markers) are not reviews.
-//   3. No annotation → legacy pre-annotation comment. Identify reviews by the
+//   4. No annotation → legacy pre-annotation comment. Identify reviews by the
 //      canonical "### Code Review by" header, exclude rechecks by the
 //      "> Recheck of" prefix.
 export function isFreshReviewComment(body: string): boolean {
+  const fields = parseAnnotationFields(body)
   const parsed = parseAnnotation(body)
-  if (parsed) return parsed.type === 'review'
-  if (/<!-- crosscheck: ([^>]+) -->/.test(body)) return false
+  if (parsed && fields?.has('type')) return parsed.type === 'review'
+  if (fields && !parsed) return false
+  if (parsed && !fields?.has('type')) {
+    return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
+  }
   return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
 }
 

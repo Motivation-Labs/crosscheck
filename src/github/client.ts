@@ -199,6 +199,7 @@ export interface OpenPR {
   body: string | null
   createdAt: string
   updatedAt: string
+  url?: string
 }
 
 export async function listOpenPRs(
@@ -220,19 +221,20 @@ export async function listOpenPRs(
     const data = await res.json() as Array<{
       number: number
       title: string
-      user: { login: string }
+      user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
       created_at: string
       updated_at: string
+      html_url: string
     }>
     if (data.length === 0) break
     for (const pr of data) {
       results.push({
         number: pr.number,
         title: pr.title,
-        author: pr.user.login,
+        author: pr.user?.login ?? 'ghost',
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
@@ -240,6 +242,7 @@ export async function listOpenPRs(
         body: pr.body,
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
+        url: pr.html_url,
       })
     }
     if (data.length < 100) break
@@ -343,6 +346,171 @@ export async function listCommitStatuses(
     if (data.length === 0) break
     for (const status of data) {
       results.push({ context: status.context, state: status.state, updatedAt: status.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface GitHubCommentActivity {
+  body: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface GitHubCommitActivity {
+  sha: string
+  committedAt: string
+}
+
+export interface GitHubTimestampActivity {
+  state?: string
+  name?: string
+  conclusion?: string | null
+  status?: string | null
+  updatedAt: string
+}
+
+export async function listIssueComments(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) {
+      if (page === 1) throw new Error(`Failed to list issue comments [${res.status}]: ${res.statusText}`)
+      break
+    }
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRReviewComments(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) {
+      if (page === 1) throw new Error(`Failed to list PR review comments [${res.status}]: ${res.statusText}`)
+      break
+    }
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRCommitActivity(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommitActivity[]> {
+  const results: GitHubCommitActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) {
+      if (page === 1) throw new Error(`Failed to list PR commit activity [${res.status}]: ${res.statusText}`)
+      break
+    }
+    const data = await res.json() as Array<{
+      sha: string
+      commit: { author: { date: string | null } | null; committer: { date: string | null } | null }
+    }>
+    if (data.length === 0) break
+    for (const commit of data) {
+      const committedAt = commit.commit.committer?.date ?? commit.commit.author?.date
+      if (committedAt) results.push({ sha: commit.sha, committedAt })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listCheckRuns(
+  owner: string,
+  repo: string,
+  ref: string,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as {
+      check_runs: Array<{ name: string; status: string; conclusion: string | null; completed_at: string | null; started_at: string | null }>
+    }
+    if (data.check_runs.length === 0) break
+    for (const run of data.check_runs) {
+      const updatedAt = run.completed_at ?? run.started_at
+      if (updatedAt) results.push({ name: run.name, status: run.status, conclusion: run.conclusion, updatedAt })
+    }
+    if (data.check_runs.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listTimelineEvents(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/timeline?per_page=100&page=${page}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+        },
+      },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ event?: string; created_at?: string }>
+    if (data.length === 0) break
+    for (const event of data) {
+      if (event.created_at) results.push({ name: event.event, updatedAt: event.created_at })
     }
     if (data.length < 100) break
     page++

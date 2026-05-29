@@ -221,6 +221,52 @@ describe('buildScopesFromConfig', () => {
 })
 
 describe('scanOpenPRStatuses', () => {
+  it('records org expansion failures as scope failures', async () => {
+    const scopes: BacktraceScope[] = [{ org: 'acme' }]
+    mockListOrgRepos.mockRejectedValue(new Error('org unavailable'))
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses).toEqual([])
+    expect(result.failures).toEqual([
+      {
+        owner: 'acme',
+        stage: 'scope',
+        message: 'org unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(0)
+    expect(result.scannedPRs).toBe(0)
+    expect(mockListOpenPRs).not.toHaveBeenCalled()
+  })
+
+  it('records repo listing failures and continues scanning other repos', async () => {
+    const scopes: BacktraceScope[] = [
+      { owner: 'acme', repo: 'broken' },
+      { owner: 'acme', repo: 'api' },
+    ]
+    mockListOpenPRs
+      .mockRejectedValueOnce(new Error('repo unavailable'))
+      .mockResolvedValueOnce([makePR({ number: 2 })])
+    mockListPRComments.mockResolvedValue([])
+    mockListPRCommitsDetailed.mockResolvedValue([])
+    mockListCommitStatuses.mockResolvedValue([])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses.map(s => s.pr.number)).toEqual([2])
+    expect(result.failures).toEqual([
+      {
+        owner: 'acme',
+        repo: 'broken',
+        stage: 'repo',
+        message: 'repo unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(2)
+    expect(result.scannedPRs).toBe(1)
+  })
+
   it('returns folded PR statuses for open PRs in scope', async () => {
     const scopes: BacktraceScope[] = [{ owner: 'acme', repo: 'api' }]
     mockListOpenPRs.mockResolvedValue([makePR({ number: 1 })])

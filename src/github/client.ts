@@ -449,17 +449,15 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  const annotationTag = input.verdict
-    ? `\n\n${buildAnnotation({
-      origin: input.origin ?? 'human',
-      reviewer,
-      model,
-      type: stepType,
-      round,
-      verdict: input.verdict,
-      service: serviceName,
-    })}`
-    : ''
+  const annotationTag = `\n\n${buildAnnotation({
+    origin: input.origin ?? 'human',
+    reviewer,
+    model,
+    type: stepType,
+    round,
+    verdict: input.verdict ?? 'UNKNOWN',
+    service: serviceName,
+  })}`
 
   const replyPrefix = input.replyToCommentId
     ? `> Recheck of [original review](#issuecomment-${input.replyToCommentId})\n\n`

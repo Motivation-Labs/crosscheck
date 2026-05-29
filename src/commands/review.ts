@@ -86,6 +86,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
+    let origin = 'human'
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0

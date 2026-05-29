@@ -155,4 +155,13 @@ describe('computeTokenTotals', () => {
     expect(totals.byPRHeadSha['acme/api#42@abc123']).toEqual({ review: 1000, fix: 2500, recheck: 1500, total: 5000 })
     expect(totals.byPR['acme/web#7']).toEqual({ review: 500, fix: 0, recheck: 0, total: 500 })
   })
+
+  it('counts legacy review_complete logs with type=recheck as recheck tokens', () => {
+    const totals = computeTokenTotals([
+      { ts: '2026-01-01T01:00:00Z', level: 'info', event: 'review_complete', repo: 'acme/api', pr: 42, sha: 'abc123', type: 'recheck', tokens_used: 700 },
+    ])
+
+    expect(totals.byPR['acme/api#42']).toEqual({ review: 0, fix: 0, recheck: 700, total: 700 })
+    expect(totals.byPRHeadSha['acme/api#42@abc123']).toEqual({ review: 0, fix: 0, recheck: 700, total: 700 })
+  })
 })

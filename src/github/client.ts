@@ -169,7 +169,7 @@ export async function listOrgRepos(
       `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) break
+    if (!res.ok) throw new Error(`Failed to list org repos [${res.status}]: ${res.statusText}`)
     const data = await res.json() as Array<{ name: string; archived: boolean; pushed_at: string | null }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -208,7 +208,7 @@ export async function listOpenPRs(
       `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) break
+    if (!res.ok) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText}`)
     const data = await res.json() as Array<{
       number: number
       title: string

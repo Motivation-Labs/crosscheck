@@ -308,7 +308,7 @@ export function computeTokenTotals(logEvents: PRStatusLogEvent[]): TokenTotals {
 
     const kind = event.event === 'fix_complete'
       ? 'fix'
-      : event.event === 'review_complete' && event.step_type === 'recheck'
+      : event.event === 'review_complete' && (event.step_type === 'recheck' || event.type === 'recheck')
         ? 'recheck'
         : event.event === 'review_complete'
           ? 'review'

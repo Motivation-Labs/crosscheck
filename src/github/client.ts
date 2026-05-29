@@ -595,8 +595,22 @@ export async function getLastCrossCheckCommentId(
   prNumber: number,
   token: string,
 ): Promise<number | undefined> {
+  return (await getLastCrossCheckReviewComment(owner, repo, prNumber, token))?.id
+}
+
+export interface CrossCheckReviewComment {
+  id: number
+  body: string
+}
+
+export async function getLastCrossCheckReviewComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<CrossCheckReviewComment | undefined> {
   let page = 1
-  let lastId: number | undefined
+  let lastComment: CrossCheckReviewComment | undefined
   while (true) {
     const res = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
@@ -607,13 +621,13 @@ export async function getLastCrossCheckCommentId(
     if (data.length === 0) break
     for (const comment of data) {
       if (isFreshReviewComment(comment.body)) {
-        lastId = comment.id
+        lastComment = { id: comment.id, body: comment.body }
       }
     }
     if (data.length < 100) break
     page++
   }
-  return lastId
+  return lastComment
 }
 
 export async function getPRCommits(

@@ -13,6 +13,7 @@ function input(overrides: Partial<PRStatusInput> = {}): PRStatusInput {
     url: 'https://github.com/acme/web/pull/7',
     headSha: 'abc123',
     headRef: 'feature',
+    headRepo: 'acme/web',
     baseRef: 'main',
     prUpdatedAt: '2026-05-28T10:00:00.000Z',
     comments: [],
@@ -57,14 +58,14 @@ describe('derivePRStatus', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
-        createdAt: '2026-05-29T11:00:00.000Z',
-        updatedAt: '2026-05-29T11:00:00.000Z',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
     expect(status.reviewState).toBe('APPROVE')
-    expect(status.nextAction).toBeNull()
-    expect(status.freshness).toBe('not_stale')
+    expect(status.nextAction).toBe('merge')
+    expect(status.freshness).toBe('stale')
   })
 
   it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {
@@ -84,7 +85,7 @@ describe('derivePRStatus', () => {
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
     expect(status.reviewState).toBe('NEEDS_WORK')
-    expect(status.nextAction).toBe('run')
+    expect(status.nextAction).toBe('fix')
   })
 
   it('orders annotation verdicts by creation time, not later edits', () => {
@@ -159,7 +160,7 @@ describe('derivePRStatus', () => {
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
     expect(status.reviewState).toBe('NEEDS_WORK')
-    expect(status.nextAction).toBe('run')
+    expect(status.nextAction).toBe('fix')
     expect(status.freshness).toBe('stale')
   })
 

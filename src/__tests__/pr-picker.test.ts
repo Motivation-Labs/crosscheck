@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseSelection, UserInputError } from '../lib/pr-picker.js'
+import { actionGroupLabel, formatPickerLabel, parseSelection, sortPRsForPicker, UserInputError } from '../lib/pr-picker.js'
 import type { PRStatus } from '../lib/pr-status.js'
 
 function pr(number: number): PRStatus {
@@ -12,6 +12,7 @@ function pr(number: number): PRStatus {
     url: `https://github.com/acme/web/pull/${number}`,
     headSha: 'abc123',
     headRef: 'feature',
+    headRepo: 'acme/web',
     baseRef: 'main',
     freshness: 'stale',
     reviewState: 'PR',
@@ -42,5 +43,24 @@ describe('parseSelection', () => {
   it('rejects out-of-range selections', () => {
     expect(() => parseSelection('4', prs)).toThrow('Invalid selection')
     expect(() => parseSelection('4', prs)).toThrow(UserInputError)
+  })
+})
+
+describe('picker grouping', () => {
+  it('orders actionable PRs by next action group', () => {
+    const ordered = sortPRsForPicker([
+      { ...pr(4), nextAction: 'merge', reviewState: 'APPROVE' },
+      { ...pr(2), nextAction: 'fix', reviewState: 'NEEDS_WORK' },
+      { ...pr(3), nextAction: 'recheck', reviewState: 'RECHECK' },
+      { ...pr(1), nextAction: 'review', reviewState: 'PR' },
+    ])
+
+    expect(ordered.map(item => item.number)).toEqual([1, 2, 3, 4])
+    expect(ordered.map(actionGroupLabel)).toEqual(['CR', 'fix', 'recheck', 'merge'])
+  })
+
+  it('renders compact labels with action group and scanned head', () => {
+    expect(formatPickerLabel(pr(12))).toContain('CR')
+    expect(formatPickerLabel(pr(12))).toContain('acme/web#12@abc123')
   })
 })

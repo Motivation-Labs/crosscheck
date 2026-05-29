@@ -24,7 +24,7 @@ export type Freshness = 'stale' | 'not_stale'
 // FIX is reserved for future structured fix annotations; current scans infer
 // post-fix work as RECHECK from workflow logs.
 export type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
-export type NextAction = 'review' | 'run' | 'recheck' | null
+export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
 export interface CrosscheckAnnotation {
@@ -33,6 +33,7 @@ export interface CrosscheckAnnotation {
   reviewer?: string
   verdict?: CrosscheckVerdict
   type?: string
+  sha?: string
 }
 
 export interface PRActivityComment {
@@ -75,6 +76,7 @@ export interface PRStatusInput {
   url: string
   headSha: string
   headRef: string
+  headRepo?: string | null
   baseRef: string
   prUpdatedAt: string
   comments: PRActivityComment[]
@@ -102,6 +104,7 @@ export interface PRStatus {
   url: string
   headSha: string
   headRef: string
+  headRepo?: string | null
   baseRef: string
   freshness: Freshness
   reviewState: ReviewState
@@ -188,6 +191,7 @@ export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | 
     ...(attrs.has('reviewer') && { reviewer: attrs.get('reviewer') }),
     ...(verdict && { verdict }),
     ...(attrs.has('type') && { type: attrs.get('type') }),
+    ...(attrs.has('sha') && { sha: attrs.get('sha') }),
   }
 }
 
@@ -221,6 +225,7 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
     url: input.url,
     headSha: input.headSha,
     headRef: input.headRef,
+    ...(input.headRepo !== undefined && { headRepo: input.headRepo }),
     baseRef: input.baseRef,
     freshness,
     reviewState,
@@ -300,6 +305,7 @@ export async function scanOpenPRStatuses(
           url: pr.url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
           headSha: pr.headSha,
           headRef: pr.headRef,
+          headRepo: pr.headRepo,
           baseRef: pr.baseRef,
           prUpdatedAt: pr.updatedAt ?? pr.createdAt,
           comments,
@@ -423,7 +429,8 @@ function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWor
 function nextActionForState(state: ReviewState): NextAction {
   if (state === 'PR') return 'review'
   if (state === 'RECHECK') return 'recheck'
-  if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'run'
+  if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'fix'
+  if (state === 'APPROVE') return 'merge'
   return null
 }
 

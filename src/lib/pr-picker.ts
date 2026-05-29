@@ -1,6 +1,4 @@
-import { createInterface } from 'readline/promises'
-import { stdin as input, stdout as output } from 'process'
-import chalk from 'chalk'
+import { promptRepoPicker } from './repo-picker.js'
 import type { PRStatus } from './pr-status.js'
 
 export class UserInputError extends Error {
@@ -12,24 +10,40 @@ export class UserInputError extends Error {
 
 export async function pickPRs(prs: PRStatus[]): Promise<PRStatus[]> {
   if (prs.length === 0) return []
-  if (!process.stdin.isTTY) {
-    throw new UserInputError('kickass requires an interactive terminal to select PRs. Use --dry-run to inspect the queue.')
-  }
 
-  console.log()
-  prs.forEach((pr, index) => {
-    const next = pr.nextAction ? `next=${pr.nextAction}` : 'terminal'
-    console.log(`  [${index + 1}] #${pr.number} ${pr.owner}/${pr.repo} ${chalk.yellow(pr.reviewState)} ${chalk.dim(next)}  ${pr.title}`)
+  const ordered = sortPRsForPicker(prs)
+  const rows = ordered.map(formatPickerLabel)
+  const selected = await promptRepoPicker(rows, {
+    title: 'Select stale PRs to advance',
+    getDescription: (row) => {
+      const pr = ordered[rows.indexOf(row)]
+      return pr ? pickerDescription(pr) : ''
+    },
   })
-  console.log()
+  const byRow = new Map(rows.map((row, index) => [row, ordered[index]]))
+  return selected.flatMap(row => {
+    const pr = byRow.get(row)
+    return pr ? [pr] : []
+  })
+}
 
-  const rl = createInterface({ input, output })
-  try {
-    const answer = await rl.question('Select PRs to advance (comma list, "all", or blank to cancel): ')
-    return parseSelection(answer, prs)
-  } finally {
-    rl.close()
-  }
+export function sortPRsForPicker(prs: PRStatus[]): PRStatus[] {
+  return [...prs].sort((a, b) => {
+    const actionDelta = actionOrder(a) - actionOrder(b)
+    if (actionDelta !== 0) return actionDelta
+    return Date.parse(a.lastActiveAt) - Date.parse(b.lastActiveAt)
+  })
+}
+
+export function formatPickerLabel(pr: PRStatus): string {
+  return `${actionGroupLabel(pr).padEnd(7)} ${pr.owner}/${pr.repo}#${pr.number}@${pr.headSha.slice(0, 7)}  ${pr.title}`
+}
+
+export function actionGroupLabel(pr: PRStatus): 'CR' | 'fix' | 'recheck' | 'merge' {
+  if (pr.nextAction === 'fix') return 'fix'
+  if (pr.nextAction === 'recheck') return 'recheck'
+  if (pr.nextAction === 'merge') return 'merge'
+  return 'CR'
 }
 
 export function parseSelection(answer: string, prs: PRStatus[]): PRStatus[] {
@@ -47,4 +61,20 @@ export function parseSelection(answer: string, prs: PRStatus[]): PRStatus[] {
   }
 
   return [...selectedIndexes].map(index => prs[index])
+}
+
+function actionOrder(pr: PRStatus): number {
+  if (pr.nextAction === 'review') return 0
+  if (pr.nextAction === 'fix') return 1
+  if (pr.nextAction === 'recheck') return 2
+  if (pr.nextAction === 'merge') return 3
+  return 4
+}
+
+function pickerDescription(pr: PRStatus): string {
+  const ageMinutes = Math.floor(pr.ageMs / 60_000)
+  const age = ageMinutes >= 60
+    ? `${Math.floor(ageMinutes / 60)}h`
+    : `${ageMinutes}m`
+  return `${pr.reviewState}  last ${age}`
 }

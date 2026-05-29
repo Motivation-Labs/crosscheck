@@ -1,6 +1,8 @@
 import type { Octokit } from 'octokit'
 import type { PRMergeSummary } from '../lib/pr-status.js'
 
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
+
 export async function getPRMergeSummary(
   octokit: Octokit,
   owner: string,
@@ -22,6 +24,21 @@ export async function getPRMergeSummary(
     ...(mergeStateStatus && { mergeStateStatus }),
     protectedBase,
   }
+}
+
+export async function mergePullRequest(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  options: { method: MergeMethod },
+): Promise<void> {
+  await octokit.rest.pulls.merge({
+    owner,
+    repo,
+    pull_number: pullNumber,
+    merge_method: options.method,
+  })
 }
 
 async function getProtectedBase(

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listCheckRuns, listCommitStatuses, listIssueComments, listOpenPRs, listOrgRepos, listTimelineEvents, listUserRepos } from '../github/client.js'
+import { getLastCrossCheckReviewComment, listCheckRuns, listCommitStatuses, listIssueComments, listOpenPRs, listOrgRepos, listTimelineEvents, listUserRepos } from '../github/client.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -105,5 +105,18 @@ describe('scan GitHub client helpers', () => {
     expect(fetchSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       headers: expect.objectContaining({ Accept: 'application/vnd.github+json' }),
     }))
+  })
+
+  it('returns the latest fresh crosscheck review comment body and id', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse([
+      { id: 1, body: '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->' },
+      { id: 2, body: '<!-- crosscheck: fix_applied -->' },
+      { id: 3, body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->' },
+    ]))
+
+    await expect(getLastCrossCheckReviewComment('acme', 'web', 7, 'token')).resolves.toEqual({
+      id: 3,
+      body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+    })
   })
 })

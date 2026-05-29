@@ -1,6 +1,6 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { buildAnnotation, parseAnnotation, parseAnnotationFields } from '../lib/annotation.js'
+import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -424,6 +424,9 @@ export async function postReviewComment(
   verdict?: string | null,
   replyToCommentId?: number,
   isRecheck?: boolean,
+  model = 'default',
+  stepType?: CrosscheckStepType,
+  round = 1,
 ): Promise<number> {
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
@@ -440,14 +443,15 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
+  const resolvedType: CrosscheckStepType = stepType ?? (isRecheck ? 'recheck' : 'review')
   const annotationTag = `\n\n${buildAnnotation({
     origin,
     reviewer,
-    model: 'default',
-    type: isRecheck ? 'recheck' : 'review',
-    round: 1,
+    model,
+    type: resolvedType,
+    round,
     verdict: verdict ?? 'UNKNOWN',
-    service: 'crosscheck',
+    service: brand.service_name || 'crosscheck',
   })}`
 
   // Recheck: prepend a reference back to the original review so the thread is navigable

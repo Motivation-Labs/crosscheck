@@ -35,4 +35,27 @@ describe('postReviewComment', () => {
       ),
     }))
   })
+
+  it('emits type=recheck when isRecheck is true', async () => {
+    const { octokit, createComment } = makeOctokit()
+
+    await postReviewComment(octokit, 'owner', 'repo', 42, 'Recheck body', 'claude', {}, 'codex', 'APPROVE', 99, true)
+
+    expect(createComment).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('type=recheck'),
+    }))
+  })
+
+  it('threads model, stepType, and round into the annotation', async () => {
+    const { octokit, createComment } = makeOctokit()
+
+    await postReviewComment(
+      octokit, 'owner', 'repo', 42, 'Review', 'claude', {}, 'codex', 'NEEDS_WORK',
+      undefined, false, 'claude-opus-4-7', 'review', 3,
+    )
+
+    expect(createComment).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('model=claude-opus-4-7 type=review round=3'),
+    }))
+  })
 })

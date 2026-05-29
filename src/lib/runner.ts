@@ -14,6 +14,7 @@ import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
+import { buildCommitTrailers } from '../lib/annotation.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -436,8 +437,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
-        execSync(
-          `git commit -m "[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
+        execFileSync(
+          'git',
+          [
+            'commit',
+            '-m',
+            `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code`,
+            '-m',
+            buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'fix', service: 'crosscheck' }),
+          ],
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -470,8 +478,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         const fixBranch = `fix/cr-${prNumber}-review-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
         execSync('git add -A', { cwd: tmpDir })
-        execSync(
-          `git commit -m "[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code"`,
+        execFileSync(
+          'git',
+          [
+            'commit',
+            '-m',
+            `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code`,
+            '-m',
+            buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'fix', service: 'crosscheck' }),
+          ],
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -655,8 +670,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      execSync(
-        `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
+      execFileSync(
+        'git',
+        [
+          'commit',
+          '-m',
+          `[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code`,
+          '-m',
+          buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'conflict-resolve', service: 'crosscheck' }),
+        ],
         { cwd: tmpDir },
       )
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()

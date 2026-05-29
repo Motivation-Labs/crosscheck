@@ -8,10 +8,22 @@ describe('isFreshReviewComment', () => {
     )).toBe(true)
   })
 
+  it('returns true for a v2 review annotation with model, round, and service', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex model=gpt-5 type=review round=2 verdict=BLOCK service=crosscheck -->',
+    )).toBe(true)
+  })
+
   it('returns false for a recheck annotation', () => {
     expect(isFreshReviewComment(
       '> Recheck of [original review](#issuecomment-1)\n\n### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=recheck -->',
     )).toBe(false)
+  })
+
+  it('returns true for a verdict-less review annotation from a null-verdict run', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex type=review -->',
+    )).toBe(true)
   })
 
   it('returns false for a fix_failed annotation', () => {

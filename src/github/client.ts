@@ -1,5 +1,6 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { buildAnnotation, parseAnnotation } from '../lib/annotation.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -265,37 +266,17 @@ export async function prHasCrossCheckComment(
 
 // True iff `body` is a fresh review comment that a recheck should link back to.
 // Classification cascade:
-//   1. Annotation with `type=review`      → review.
-//   2. Annotation with any other `type=`  → not a review (recheck, etc.).
-//   3. Annotation without `type=` but carrying `reviewer=` → pre-type-era review
-//      (2026-05-18 annotated comments between commits 9a0c324 and 36c915d carry
-//      `origin/reviewer/verdict` without a `type=` field). Fall through to the
-//      header check so these are still found by getLastCrossCheckCommentId.
-//   4. Annotation without `type=` and without `reviewer=` → summary or
-//      notification marker (`fix_failed`, `fix_applied`, `conflict_resolved`,
-//      `no_diff_change`, future bare markers). Not a review.
-//   5. No annotation → legacy pre-annotation comment. Identify reviews by the
+//   1. Contract annotation parsed by annotation.ts → review iff type=review.
+//      Legacy review annotations without model/round/service default to review.
+//   2. Bare summary/notification markers (`fix_failed`, `fix_applied`,
+//      `conflict_resolved`, `no_diff_change`, future bare markers) are not reviews.
+//   3. No annotation → legacy pre-annotation comment. Identify reviews by the
 //      canonical "### Code Review by" header, exclude rechecks by the
 //      "> Recheck of" prefix.
 export function isFreshReviewComment(body: string): boolean {
-  // Parse the LAST annotation in the body, not the first. The canonical
-  // crosscheck annotation is appended as a footer by postReviewComment; any
-  // earlier `<!-- crosscheck: ... -->` occurrence is quoted example text in
-  // the review body (Codex's own reviews routinely reference marker names),
-  // and reading the first one misclassifies legitimate reviews.
-  const annotationMatches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
-  const lastAnnotation = annotationMatches.at(-1)
-  if (lastAnnotation) {
-    const attrs = lastAnnotation[1]
-    if (/\btype=review\b/.test(attrs)) return true
-    if (/\btype=/.test(attrs)) return false
-    // Untyped annotation: only the 2026-05-18 pre-type review/recheck shape
-    // carries `reviewer=`; summary/notification markers do not. Without it,
-    // this is a non-review annotation and must not match.
-    if (!/\breviewer=/.test(attrs)) return false
-    // Untyped + has reviewer= → pre-type review; verify with the legacy header
-    // check below (the recheck prefix excludes pre-type rechecks).
-  }
+  const parsed = parseAnnotation(body)
+  if (parsed) return parsed.type === 'review'
+  if (/<!-- crosscheck: ([^>]+) -->/.test(body)) return false
   return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
 }
 
@@ -453,15 +434,17 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  // Annotation tag for Phase 2 step 4 detection — matches the documented contract:
-  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> -->
-  // origin= is always present so scanners matching "crosscheck: origin=" reliably find it.
-  // type= is explicit from isRecheck (not inferred from backlink resolution).
-  // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
-  const annotationParts = [`origin=${origin}`, `reviewer=${reviewer}`]
-  if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
-  annotationParts.push(`type=${isRecheck ? 'recheck' : 'review'}`)
-  const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
+  const annotationTag = verdict
+    ? `\n\n${buildAnnotation({
+      origin,
+      reviewer,
+      model: 'default',
+      type: isRecheck ? 'recheck' : 'review',
+      round: 1,
+      verdict,
+      service: 'crosscheck',
+    })}`
+    : ''
 
   // Recheck: prepend a reference back to the original review so the thread is navigable
   const replyPrefix = replyToCommentId

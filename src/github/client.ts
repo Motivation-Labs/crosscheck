@@ -440,17 +440,15 @@ export async function postReviewComment(
   const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
-  const annotationTag = verdict
-    ? `\n\n${buildAnnotation({
-      origin,
-      reviewer,
-      model: 'default',
-      type: isRecheck ? 'recheck' : 'review',
-      round: 1,
-      verdict,
-      service: 'crosscheck',
-    })}`
-    : ''
+  const annotationTag = `\n\n${buildAnnotation({
+    origin,
+    reviewer,
+    model: 'default',
+    type: isRecheck ? 'recheck' : 'review',
+    round: 1,
+    verdict: verdict ?? 'UNKNOWN',
+    service: 'crosscheck',
+  })}`
 
   // Recheck: prepend a reference back to the original review so the thread is navigable
   const replyPrefix = replyToCommentId

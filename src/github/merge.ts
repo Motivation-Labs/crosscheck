@@ -13,9 +13,8 @@ export async function getPRMergeSummary(
     getProtectedBase(octokit, owner, repo, baseRef),
   ])
 
-  const pullRecord = pull as Record<string, unknown>
-  const mergeStateStatus = typeof pullRecord.mergeable_state === 'string'
-    ? pullRecord.mergeable_state
+  const mergeStateStatus = typeof pull.mergeable_state === 'string'
+    ? pull.mergeable_state
     : undefined
 
   return {

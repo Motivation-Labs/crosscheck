@@ -1,8 +1,11 @@
 import chalk from 'chalk'
+import { existsSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { execa } from 'execa'
 import { parseDuration } from '../lib/durations.js'
+import { logError } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { PRStatus } from '../lib/pr-status.js'
-import { runRun } from './run.js'
 import { handleScanError, loadScanResult } from './scan.js'
 
 export interface KickassOpts {
@@ -49,23 +52,51 @@ export async function runKickass(opts: KickassOpts = {}): Promise<void> {
 function printDryRun(queue: PRStatus[]): void {
   console.log('kickass dry-run')
   for (const pr of queue) {
-    const steps = stepsForPR(pr)
-    const stepArg = steps ? ` --steps ${steps}` : ''
-    console.log(`  crosscheck run ${pr.url}${stepArg} --dry-run  ${chalk.dim(`#${pr.number} ${pr.reviewState}`)}`)
+    console.log(`  crosscheck ${buildKickassRunArgs(pr, true).join(' ')}  ${chalk.dim(`#${pr.number} ${pr.reviewState}`)}`)
   }
 }
 
-function runSelected(prs: PRStatus[]): Promise<void> {
-  return prs.reduce<Promise<void>>(async (previous, pr) => {
-    await previous
-    const steps = stepsForPR(pr)
+async function runSelected(prs: PRStatus[]): Promise<void> {
+  const failures = await prs.reduce<Promise<PRStatus[]>>(async (previous, pr) => {
+    const failed = await previous
     console.log(chalk.cyan(`\n→ advancing #${pr.number} ${pr.owner}/${pr.repo} (${pr.reviewState})`))
-    await runRun(pr.url, { ...(steps && { steps }) })
-  }, Promise.resolve())
+    try {
+      await execa(process.execPath, [resolveCliEntry(), ...buildKickassRunArgs(pr, false)], { stdio: 'inherit' })
+      return failed
+    } catch (err: unknown) {
+      logError({ event: 'kickass_pr_failed', owner: pr.owner, repo: pr.repo, pr: pr.number }, err)
+      console.error(chalk.red(`✗ failed to advance #${pr.number} ${pr.owner}/${pr.repo}`))
+      return [...failed, pr]
+    }
+  }, Promise.resolve([]))
+
+  if (failures.length > 0) {
+    console.error(chalk.red(`kickass failed for ${failures.length} PR(s); remaining selected PRs were attempted.`))
+    process.exitCode = 2
+  }
+}
+
+export function buildKickassRunArgs(pr: PRStatus, dryRun: boolean): string[] {
+  const steps = stepsForPR(pr)
+  return [
+    'run',
+    pr.url,
+    ...(steps ? ['--steps', steps] : []),
+    ...(dryRun ? ['--dry-run'] : []),
+  ]
 }
 
 function stepsForPR(pr: PRStatus): string | undefined {
   if (pr.nextAction === 'review') return 'review'
   if (pr.nextAction === 'recheck') return 'recheck'
   return undefined
+}
+
+function resolveCliEntry(): string {
+  const cliFromArgv = process.argv[1]
+  if (cliFromArgv && cliFromArgv.endsWith('cli.js')) return cliFromArgv
+
+  const builtCli = fileURLToPath(new URL('../cli.js', import.meta.url))
+  if (existsSync(builtCli)) return builtCli
+  return fileURLToPath(new URL('../cli.ts', import.meta.url))
 }

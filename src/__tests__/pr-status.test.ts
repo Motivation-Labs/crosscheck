@@ -88,6 +88,26 @@ describe('derivePRStatus', () => {
     expect(status.nextAction).toBe('run')
   })
 
+  it('orders annotation verdicts by creation time, not later edits', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-29T11:30:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+          createdAt: '2026-05-28T11:00:00.000Z',
+          updatedAt: '2026-05-28T11:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
+  })
+
   it('moves a PR with fix activity after review to RECHECK', () => {
     const status = derivePRStatus(input({
       comments: [{

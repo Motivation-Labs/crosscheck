@@ -7,6 +7,25 @@ export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
 }
 
+async function readGithubErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = await res.json() as { message?: unknown }
+    if (typeof body.message === 'string' && body.message.trim().length > 0) return body.message
+  } catch {
+    // Fall back to status text when GitHub returns a non-JSON error body.
+  }
+  return res.statusText || `HTTP ${res.status}`
+}
+
+async function throwGithubRequestError(res: Response, context: string): Promise<never> {
+  const message = await readGithubErrorMessage(res)
+  throw new Error(`GitHub API request failed (${context}) [${res.status}]: ${message}`)
+}
+
+function repoPath(owner: string, repo: string): string {
+  return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+}
+
 export function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
   const expected = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
   try {
@@ -382,13 +401,11 @@ export async function listIssueComments(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list issue comments [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list issue comments for ${owner}/${repo}#${issueNumber}`)
     const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
     if (data.length === 0) break
     for (const comment of data) {
@@ -410,13 +427,11 @@ export async function listPRReviewComments(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list PR review comments [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR review comments for ${owner}/${repo}#${pullNumber}`)
     const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
     if (data.length === 0) break
     for (const comment of data) {
@@ -438,13 +453,11 @@ export async function listPRCommitActivity(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/commits?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/commits?per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list PR commit activity [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR commits for ${owner}/${repo}#${pullNumber}`)
     const data = await res.json() as Array<{
       sha: string
       commit: { author: { date: string | null } | null; committer: { date: string | null } | null }
@@ -470,10 +483,11 @@ export async function listCheckRuns(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list check runs for ${owner}/${repo}@${ref}`)
     const data = await res.json() as {
       check_runs: Array<{ name: string; status: string; conclusion: string | null; completed_at: string | null; started_at: string | null }>
     }
@@ -498,7 +512,7 @@ export async function listTimelineEvents(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/timeline?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/timeline?per_page=100&page=${page}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -506,7 +520,8 @@ export async function listTimelineEvents(
         },
       },
     )
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list timeline events for ${owner}/${repo}#${issueNumber}`)
     const data = await res.json() as Array<{ event?: string; created_at?: string }>
     if (data.length === 0) break
     for (const event of data) {

@@ -17,7 +17,7 @@ import {
 } from '../github/client.js'
 import { getPRMergeSummary } from '../github/merge.js'
 import { isAuthorAllowed } from './filter.js'
-import { getLogDir } from './logger.js'
+import { getLogDir, logError } from './logger.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -254,54 +254,61 @@ export async function scanOpenPRStatuses(
         return prs
           .filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
           .map(pr => ({ owner, repo, pr }))
-      } catch {
+      } catch (err: unknown) {
+        logError({ event: 'scan_repo_skipped', owner, repo }, err)
         return [] as Array<{ owner: string; repo: string; pr: OpenPR }>
       }
     }),
   )
 
-  const statuses = await Promise.all(
+  const statusResults = await Promise.all(
     perRepoPRs.flat().map(async ({ owner, repo, pr }) => {
-      const [
-        comments,
-        reviewComments,
-        commits,
-        commitStatuses,
-        checkRuns,
-        timelineEvents,
-        merge,
-      ] = await Promise.all([
-        listIssueComments(owner, repo, pr.number, token),
-        listPRReviewComments(owner, repo, pr.number, token),
-        listPRCommitActivity(owner, repo, pr.number, token),
-        listCommitStatuses(owner, repo, pr.headSha, token),
-        listCheckRuns(owner, repo, pr.headSha, token),
-        listTimelineEvents(owner, repo, pr.number, token),
-        getPRMergeSummary(octokit, owner, repo, pr.number, pr.baseRef),
-      ])
+      try {
+        const [
+          comments,
+          reviewComments,
+          commits,
+          commitStatuses,
+          checkRuns,
+          timelineEvents,
+          merge,
+        ] = await Promise.all([
+          listIssueComments(owner, repo, pr.number, token),
+          listPRReviewComments(owner, repo, pr.number, token),
+          listPRCommitActivity(owner, repo, pr.number, token),
+          listCommitStatuses(owner, repo, pr.headSha, token),
+          listCheckRuns(owner, repo, pr.headSha, token),
+          listTimelineEvents(owner, repo, pr.number, token),
+          getPRMergeSummary(octokit, owner, repo, pr.number, pr.baseRef),
+        ])
 
-      return derivePRStatus({
-        owner,
-        repo,
-        number: pr.number,
-        title: pr.title,
-        author: pr.author,
-        url: pr.url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
-        headSha: pr.headSha,
-        headRef: pr.headRef,
-        baseRef: pr.baseRef,
-        prUpdatedAt: pr.updatedAt ?? pr.createdAt,
-        comments,
-        reviewComments,
-        commits,
-        commitStatuses,
-        checkRuns,
-        timelineEvents,
-        logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
-        merge,
-      }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
+        return derivePRStatus({
+          owner,
+          repo,
+          number: pr.number,
+          title: pr.title,
+          author: pr.author,
+          url: pr.url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
+          headSha: pr.headSha,
+          headRef: pr.headRef,
+          baseRef: pr.baseRef,
+          prUpdatedAt: pr.updatedAt ?? pr.createdAt,
+          comments,
+          reviewComments,
+          commits,
+          commitStatuses,
+          checkRuns,
+          timelineEvents,
+          logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
+          merge,
+        }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
+      } catch (err: unknown) {
+        logError({ event: 'scan_pr_skipped', owner, repo, pr: pr.number }, err)
+        return null
+      }
     }),
   )
+  const statuses = statusResults.filter((status): status is PRStatus => status !== null)
 
   statuses.sort((a, b) => {
     if (a.freshness !== b.freshness) return a.freshness === 'stale' ? -1 : 1
@@ -433,7 +440,8 @@ async function buildRepoScopes(config: Config, token: string): Promise<Array<{ o
       try {
         const repos = await listUserRepos(user, token)
         return repos.map(({ owner, name }) => ({ owner, repo: name }) as Scope)
-      } catch {
+      } catch (err: unknown) {
+        logError({ event: 'scan_user_scope_skipped', user }, err)
         return [] as Scope[]
       }
     }),
@@ -452,7 +460,8 @@ async function buildRepoScopes(config: Config, token: string): Promise<Array<{ o
         try {
           const repos = await listOrgRepos(scope.org, token)
           return repos.map(repo => ({ owner: repo.owner, repo: repo.name }))
-        } catch {
+        } catch (err: unknown) {
+          logError({ event: 'scan_org_scope_skipped', org: scope.org }, err)
           return [] as Array<{ owner: string; repo: string }>
         }
       }

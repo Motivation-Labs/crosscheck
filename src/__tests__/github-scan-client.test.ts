@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listCheckRuns, listCommitStatuses, listIssueComments } from '../github/client.js'
+import { listCheckRuns, listCommitStatuses, listIssueComments, listOpenPRs, listOrgRepos, listUserRepos } from '../github/client.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -72,5 +72,27 @@ describe('scan GitHub client helpers', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404))
 
     await expect(listIssueComments('acme', 'web', 7, 'token')).resolves.toEqual([])
+  })
+
+  it('throws for non-404 open PR list failures', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ message: 'rate limited' }, 429))
+
+    await expect(listOpenPRs('acme', 'web', 'token'))
+      .rejects.toThrow('GitHub API request failed')
+  })
+
+  it('throws for non-404 repo scope list failures', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403))
+      .mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403))
+
+    await expect(listOrgRepos('acme', 'token')).rejects.toThrow('GitHub API request failed')
+    await expect(listUserRepos('alice', 'token')).rejects.toThrow('GitHub API request failed')
+  })
+
+  it('treats missing open PR lists as empty scope', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404))
+
+    await expect(listOpenPRs('acme', 'web', 'token')).resolves.toEqual([])
   })
 })

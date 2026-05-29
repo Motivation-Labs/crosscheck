@@ -13,6 +13,7 @@ export interface ReadScanCacheOptions {
   cacheDir?: string
   nowMs: number
   staleAfterMs: number
+  scopeHash?: string
 }
 
 function cachePath(cacheDir = DEFAULT_CACHE_DIR): string {
@@ -25,6 +26,7 @@ function isScanCachePayload(value: unknown): value is ScanCachePayload {
   const summary = record.summary
   return typeof record.scannedAt === 'string'
     && typeof record.staleAfterMs === 'number'
+    && (record.scopeHash === undefined || typeof record.scopeHash === 'string')
     && Array.isArray(record.prs)
     && typeof summary === 'object'
     && summary !== null
@@ -38,6 +40,7 @@ export function readScanCache(options: ReadScanCacheOptions): ScanCachePayload |
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
     if (!isScanCachePayload(parsed)) return null
     if (parsed.staleAfterMs !== options.staleAfterMs) return null
+    if (options.scopeHash && parsed.scopeHash !== options.scopeHash) return null
     const scannedAtMs = Date.parse(parsed.scannedAt)
     if (!Number.isFinite(scannedAtMs)) return null
     if (options.nowMs - scannedAtMs > CACHE_TTL_MS) return null

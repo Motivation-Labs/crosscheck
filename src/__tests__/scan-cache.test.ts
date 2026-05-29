@@ -20,6 +20,7 @@ describe('scan cache', () => {
   const payload: ScanCachePayload = {
     scannedAt: '2026-05-29T00:00:00.000Z',
     staleAfterMs: 60_000,
+    scopeHash: 'scope-a',
     summary: { total: 0, stale: 0, not_stale: 0, actionable: 0 },
     prs: [],
   }
@@ -32,10 +33,11 @@ describe('scan cache', () => {
       cacheDir: dir,
       nowMs: Date.parse('2026-05-29T00:00:30.000Z'),
       staleAfterMs: 60_000,
+      scopeHash: 'scope-a',
     })).toEqual(payload)
   })
 
-  it('ignores stale cache entries and stale-after mismatches', () => {
+  it('ignores stale cache entries, stale-after mismatches, and scope mismatches', () => {
     const dir = makeTempDir()
     writeScanCache(payload, dir)
 
@@ -48,6 +50,12 @@ describe('scan cache', () => {
       cacheDir: dir,
       nowMs: Date.parse('2026-05-29T00:00:30.000Z'),
       staleAfterMs: 120_000,
+    })).toBeNull()
+    expect(readScanCache({
+      cacheDir: dir,
+      nowMs: Date.parse('2026-05-29T00:00:30.000Z'),
+      staleAfterMs: 60_000,
+      scopeHash: 'scope-b',
     })).toBeNull()
   })
 

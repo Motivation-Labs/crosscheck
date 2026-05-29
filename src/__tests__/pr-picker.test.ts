@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseSelection } from '../lib/pr-picker.js'
+import { parseSelection, UserInputError } from '../lib/pr-picker.js'
 import type { PRStatus } from '../lib/pr-status.js'
 
 function pr(number: number): PRStatus {
@@ -41,5 +41,6 @@ describe('parseSelection', () => {
 
   it('rejects out-of-range selections', () => {
     expect(() => parseSelection('4', prs)).toThrow('Invalid selection')
+    expect(() => parseSelection('4', prs)).toThrow(UserInputError)
   })
 })

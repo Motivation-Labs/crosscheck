@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildKickassRunArgs } from '../commands/kickass.js'
+import { buildKickassRunArgs, resolveCliInvocation } from '../commands/kickass.js'
 import type { PRStatus } from '../lib/pr-status.js'
 
 function pr(nextAction: PRStatus['nextAction']): PRStatus {
@@ -49,5 +49,40 @@ describe('buildKickassRunArgs', () => {
       'run',
       'https://github.com/acme/web/pull/7',
     ])
+  })
+})
+
+describe('resolveCliInvocation', () => {
+  it('runs built JavaScript through node', () => {
+    expect(resolveCliInvocation({
+      argvEntry: '/repo/dist/cli.js',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/dist/cli.js',
+      urlToPath: url => url.pathname,
+    })).toEqual({
+      command: '/usr/local/bin/node',
+      args: ['/repo/dist/cli.js'],
+    })
+  })
+
+  it('runs TypeScript CLI entries through the local tsx binary', () => {
+    const invocation = resolveCliInvocation({
+      argvEntry: '/repo/src/cli.ts',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/src/cli.ts' || path.endsWith('/node_modules/.bin/tsx'),
+      urlToPath: url => url.pathname,
+    })
+
+    expect(invocation.command.endsWith('/node_modules/.bin/tsx')).toBe(true)
+    expect(invocation.args).toEqual(['/repo/src/cli.ts'])
+  })
+
+  it('throws when only a TypeScript CLI entry is available without tsx', () => {
+    expect(() => resolveCliInvocation({
+      argvEntry: '/repo/src/cli.ts',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/src/cli.ts',
+      urlToPath: url => url.pathname,
+    })).toThrow('Cannot run kickass actions from a TypeScript entrypoint')
   })
 })

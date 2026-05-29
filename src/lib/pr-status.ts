@@ -21,6 +21,8 @@ import { getLogDir, logError } from './logger.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
+// FIX is reserved for future structured fix annotations; current scans infer
+// post-fix work as RECHECK from workflow logs.
 export type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
 export type NextAction = 'review' | 'run' | 'recheck' | null
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
@@ -122,6 +124,7 @@ export interface ScanSummary {
 export interface ScanResult {
   scannedAt: string
   staleAfterMs: number
+  scopeHash?: string
   cached: boolean
   summary: ScanSummary
   prs: PRStatus[]

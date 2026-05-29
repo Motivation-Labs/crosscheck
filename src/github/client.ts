@@ -165,9 +165,10 @@ export async function listUserRepos(
   while (true) {
     const url = isSelf
       ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
-      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+      : `https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner`
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list user repos for ${username}`)
     const data = await res.json() as Array<{ name: string; owner: { login: string }; archived: boolean }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -187,13 +188,11 @@ export async function listOrgRepos(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      `https://api.github.com/orgs/${encodeURIComponent(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list org repos [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list org repos for ${org}`)
     const data = await res.json() as Array<{ name: string; archived: boolean; pushed_at: string | null }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -230,13 +229,11 @@ export async function listOpenPRs(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list open PRs for ${owner}/${repo}`)
     const data = await res.json() as Array<{
       number: number
       title: string

@@ -3,10 +3,17 @@ import { stdin as input, stdout as output } from 'process'
 import chalk from 'chalk'
 import type { PRStatus } from './pr-status.js'
 
+export class UserInputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UserInputError'
+  }
+}
+
 export async function pickPRs(prs: PRStatus[]): Promise<PRStatus[]> {
   if (prs.length === 0) return []
   if (!process.stdin.isTTY) {
-    throw new Error('kickass requires an interactive terminal to select PRs. Use --dry-run to inspect the queue.')
+    throw new UserInputError('kickass requires an interactive terminal to select PRs. Use --dry-run to inspect the queue.')
   }
 
   console.log()
@@ -34,7 +41,7 @@ export function parseSelection(answer: string, prs: PRStatus[]): PRStatus[] {
   for (const part of trimmed.split(',')) {
     const value = Number(part.trim())
     if (!Number.isInteger(value) || value < 1 || value > prs.length) {
-      throw new Error(`Invalid selection "${part.trim()}". Choose numbers from 1 to ${prs.length}, or "all".`)
+      throw new UserInputError(`Invalid selection "${part.trim()}". Choose numbers from 1 to ${prs.length}, or "all".`)
     }
     selectedIndexes.add(value - 1)
   }

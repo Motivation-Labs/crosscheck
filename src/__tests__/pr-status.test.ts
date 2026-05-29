@@ -68,6 +68,26 @@ describe('derivePRStatus', () => {
     expect(status.freshness).toBe('not_stale')
   })
 
+  it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: fix_applied -->',
+          createdAt: '2026-05-27T12:00:00.000Z',
+          updatedAt: '2026-05-27T12:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.nextAction).toBe('run')
+  })
+
   it('moves a PR with fix activity after review to RECHECK', () => {
     const status = derivePRStatus(input({
       comments: [{

@@ -184,8 +184,9 @@ export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | 
 }
 
 export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOptions): PRStatus {
-  const latestAnnotation = latestTimedAnnotation([...input.comments, ...input.reviewComments])
-  const latestVerdict = latestTimedVerdict(input, latestAnnotation)
+  const annotations = latestTimedAnnotations([...input.comments, ...input.reviewComments])
+  const latestAnnotation = annotations[0] ?? null
+  const latestVerdict = latestTimedVerdict(input, annotations)
   const latestFix = latestAppliedFixAfter(input.logEvents, latestVerdict?.timestamp)
   const lastActiveMs = maxTimestampMs([
     input.prUpdatedAt,
@@ -358,23 +359,22 @@ function isWorkflowLogEvent(value: unknown): value is PRWorkflowLogEvent {
 
 // Use createdAt for ordering annotation timestamps — updatedAt would flip verdict
 // ordering if an older comment is edited after a newer one is posted.
-function latestTimedAnnotation(comments: PRActivityComment[]): TimedAnnotation | null {
-  const timed = comments.flatMap(comment => {
+// Returns all annotations sorted descending by createdAt; bare markers without
+// a verdict are included so callers can skip them when searching for a verdict.
+function latestTimedAnnotations(comments: PRActivityComment[]): TimedAnnotation[] {
+  return comments.flatMap(comment => {
     const annotation = parseCrosscheckAnnotation(comment.body)
     if (!annotation) return []
     return [{ annotation, timestamp: comment.createdAt }]
-  })
-  return timed.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0] ?? null
+  }).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
 }
 
-function latestTimedVerdict(input: PRStatusInput, latestAnnotation: TimedAnnotation | null): TimedVerdict | null {
-  const annotationVerdicts = latestAnnotation?.annotation.verdict
-    ? [{
-        verdict: latestAnnotation.annotation.verdict,
-        timestamp: latestAnnotation.timestamp,
-        annotation: latestAnnotation.annotation,
-      }]
-    : []
+function latestTimedVerdict(input: PRStatusInput, annotations: TimedAnnotation[]): TimedVerdict | null {
+  const annotationVerdicts = annotations.flatMap(({ annotation, timestamp }) => (
+    annotation.verdict
+      ? [{ verdict: annotation.verdict, timestamp, annotation }]
+      : []
+  ))
 
   const logVerdicts = input.logEvents.flatMap(event => {
     if (event.event !== 'review_complete' && event.event !== 'workflow_complete') return []

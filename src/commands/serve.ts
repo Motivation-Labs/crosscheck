@@ -5,7 +5,7 @@ import { execSync } from 'child_process'
 import chalk from 'chalk'
 import { findAvailablePort } from '../lib/port.js'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
-import { checkRepoAccessible, createGithubClient } from '../github/client.js'
+import { checkRepoAccessible, createGithubClient, getCommitMessage } from '../github/client.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { scanUnreviewedPRs, buildScopesFromConfig } from '../lib/backtrace.js'
@@ -26,6 +26,9 @@ import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
+import { PersistentShaSet } from '../lib/sha-cache.js'
+import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
+import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -49,8 +52,10 @@ function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex')
 
 // Deduplication — keyed by owner/repo#pr@sha
 const inFlight = new Set<string>()
-// SHAs pushed by the address step — skip synchronize events from our own commits
-const crosscheckShas = new Set<string>()
+// SHAs pushed by the address step — persisted so restarts don't review our own commits
+const crosscheckShas = new PersistentShaSet()
+// Last-reviewed diff hash per PR — skip reviews when a new SHA has identical diff vs base
+const diffHashes = new PersistentDiffHashMap()
 // PRs reviewed at least once — synchronize events on these run as recheck rounds
 const reviewedPRKeys = new Set<string>()
 const prRoundCounts = new Map<string, number>()
@@ -85,6 +90,14 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   if (inFlight.has(key)) {
     fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
     return
+  }
+
+  if (event.action === 'synchronize') {
+    const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
+    if (message !== null && isCrosscheckCommitMessage(message)) {
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
+      return
+    }
   }
 
   if (crosscheckShas.has(pr.head.sha)) {
@@ -163,10 +176,10 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   const isRecheckRun = reviewedPRKeys.has(prKey)
   const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
 
-  board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
   let stopHeartbeat = () => {}
+  let boardAdded = false
 
   try {
     clonePRForReview({
@@ -174,6 +187,36 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       tmpDir, token, protocol: config.clone_protocol,
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: pr.base.ref }),
     })
+
+    let newDiffHash: string | null = null
+    try {
+      newDiffHash = computeDiffHash(tmpDir, pr.base.ref)
+    } catch { /* base unavailable — proceed with full review, skip cache update */ }
+
+    const prev = newDiffHash ? diffHashes.get(prKey) : undefined
+    if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== pr.head.sha) {
+      const prevShort = prev.sha.slice(0, 7)
+      const nowShort = pr.head.sha.slice(0, 7)
+      fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: pr.head.sha, prev_sha: prev.sha })
+      board.log(
+        `${chalk.dim(fmtTime())}  PR #${prNumber} ${event.action}  ${chalk.dim('no diff change since last review')}`,
+        `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
+      )
+      try {
+        await lockOctokit.rest.issues.createComment({
+          owner, repo: repoName, issue_number: prNumber,
+          body: `✓ No diff change since the last review (was \`${prevShort}\`, now \`${nowShort}\`). Skipping re-review.\n\n<!-- crosscheck: no_diff_change prev_sha=${prev.sha} sha=${pr.head.sha} -->`,
+        })
+        fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, kind: 'no_diff_change' })
+      } catch (err: unknown) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
+      }
+      await releaseRemoteLock(lockOctokit, owner, repoName, pr.head.sha, 'success')
+      return
+    }
+
+    board.addPR(key, prNumber, `${owner}/${repoName}`, pr.head.ref, round)
+    boardAdded = true
 
     const prLoc = computePRLoc(tmpDir, pr.base.ref)
     board.updatePR(key, { prLoc })
@@ -193,6 +236,13 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
 
     reviewedPRKeys.add(prKey)
     prRoundCounts.set(prKey, round)
+    if (newDiffHash) {
+      let reviewedHash: string | null = null
+      try {
+        reviewedHash = computeDiffHash(tmpDir, pr.base.ref)
+      } catch { /* base unavailable post-workflow — skip cache update */ }
+      if (reviewedHash) diffHashes.upsert(prKey, { sha: pr.head.sha, hash: reviewedHash })
+    }
     board.completePR(key, {
       elapsedMs: Date.now() - reviewStart,
       url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -203,7 +253,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   } catch (err: unknown) {
     stopHeartbeat()
     const message = err instanceof Error ? err.message : (err as { message?: string }).message ?? 'unknown error'
-    board.failPR(key, message)
+    if (boardAdded) board.failPR(key, message)
     logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
     await releaseRemoteLock(lockOctokit, owner, repoName, pr.head.sha, 'failure')
     if (config.mode === 'cross-vendor' && !getSmartSwitch().active && isSubscriptionLimitError(err)) {

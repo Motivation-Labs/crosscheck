@@ -4,6 +4,7 @@ import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
   createGithubClient,
+  getCommitMessage,
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
@@ -49,6 +50,7 @@ import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -423,6 +425,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (inFlight.has(key)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
         return
+      }
+
+      if (event.action === 'synchronize') {
+        const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
+        if (message !== null && isCrosscheckCommitMessage(message)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
+          return
+        }
       }
 
       // Skip synchronize events triggered by our own address commits.

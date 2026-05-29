@@ -242,11 +242,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
       console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
       releasePRLock(owner, repo, number, sha)
-      rmSync(tmpDir, { force: true, recursive: true })
+      if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
       process.exit(2)
     } finally {
       releasePRLock(owner, repo, number, sha)
-      rmSync(tmpDir, { force: true, recursive: true })
+      if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
   } finally {
     process.removeListener('SIGINT', onSignal)

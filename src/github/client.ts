@@ -279,11 +279,18 @@ export async function prHasCrossCheckComment(
 export function isFreshReviewComment(body: string): boolean {
   const fields = parseAnnotationFields(body)
   const parsed = parseAnnotation(body)
-  if (parsed && fields?.has('type')) return parsed.type === 'review'
-  if (fields && !parsed) return false
-  if (parsed && !fields?.has('type')) {
-    return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
+  if (parsed && fields?.has('type')) {
+    // Explicit type= field present — trust it directly.
+    return parsed.type === 'review'
   }
+  if (parsed && !fields?.has('type')) {
+    // Pre-type-era annotation: type was defaulted to 'review', not stated.
+    // Fall through to the header/prefix check so legacy rechecks are excluded.
+  } else if (fields && !parsed) {
+    // Has an annotation tag but no origin+reviewer — bare summary marker.
+    return false
+  }
+  // No annotation (or pre-type fallthrough): use header + recheck-prefix heuristic.
   return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
 }
 
@@ -482,40 +489,7 @@ export async function postReviewComment(
   stepType?: CrosscheckStepType,
   round = 1,
 ): Promise<number> {
-<<<<<<< HEAD
-  const isClaude = reviewer === 'claude'
-  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
-  const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
-  const headerLabel = hasCustomName ? `${vendorLabel} — ${brand.service_name}` : vendorLabel
-  const header = `### Code Review by ${headerLabel}\n\n`
 
-  const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
-  const attribution = brand.reviewer_attribution || defaultAttribution
-  const footer = `\n\n---\n${attribution}`
-
-  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
-  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
-
-  const resolvedType: CrosscheckStepType = stepType ?? (isRecheck ? 'recheck' : 'review')
-  const annotationTag = `\n\n${buildAnnotation({
-    origin,
-    reviewer,
-    model,
-    type: resolvedType,
-    round,
-    verdict: verdict ?? 'UNKNOWN',
-    service: brand.service_name || 'crosscheck',
-  })}`
-
-  // Recheck: prepend a reference back to the original review so the thread is navigable
-  const replyPrefix = replyToCommentId
-    ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
-    : ''
-
-=======
->>>>>>> d7a40e6 (feat: add model-aware review headers)
   const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,

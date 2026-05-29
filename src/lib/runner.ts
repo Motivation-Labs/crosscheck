@@ -13,6 +13,7 @@ import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
+import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
@@ -212,11 +213,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...(ctx.round !== undefined && { round: ctx.round }) })
+      const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
+      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
       onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+      // Per-step start timestamp. The shared ctx.reviewStart is set once at
+      // workflow start and never reset, so a recheck's duration_ms would
+      // otherwise include the prior review and fix wall time.
+      const stepStart = Date.now()
       let rawReview: string
       let tokensUsed: number | undefined
       if (reviewer === 'codex') {
@@ -227,13 +233,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       const { verdict, clean } = parseVerdict(rawReview)
       if (verdict === null) {
-        fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, output_length: rawReview.length })
+        fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
       const commentBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -308,6 +314,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
+      // Per-step start timestamp covers attempt + retry + retry-delay wall time
+      // (the user perceives the whole interval as "the fix step").
+      const fixStepStart = Date.now()
       let appliedCount = 0
       let fixTokensUsed: number | undefined
       let fixErr: unknown = undefined
@@ -379,7 +388,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         })
         ctx.crosscheckShas.add(newSha)
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
 
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
@@ -431,7 +440,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           } catch { /* label may not exist in this repo — skip */ }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -444,7 +453,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
         results[step.name] = { applied_count: appliedCount }
       }
 
@@ -510,6 +519,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
+      // Per-step start timestamp for conflict-resolve wall time.
+      const conflictResolveStepStart = Date.now()
       let appliedCount = 0
       let resolvedPaths: string[] = []
       let resolveTokensUsed: number | undefined
@@ -608,7 +619,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
       }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
-      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, duration_ms: Date.now() - conflictResolveStepStart })
 
       // Post a summary comment so the silent merge-commit push is visible on the
       // timeline as a comment card. Best-effort — a failure here must not fail the run.

@@ -36,13 +36,30 @@ describe('postReviewComment', () => {
     }))
   })
 
-  it('emits type=recheck when isRecheck is true', async () => {
+  it('emits type=recheck with the supplied workflow round', async () => {
     const { octokit, createComment } = makeOctokit()
 
-    await postReviewComment(octokit, 'owner', 'repo', 42, 'Recheck body', 'claude', {}, 'codex', 'APPROVE', 99, true)
+    await postReviewComment(
+      octokit,
+      'owner',
+      'repo',
+      42,
+      'Recheck body',
+      'claude',
+      {},
+      'codex',
+      'APPROVE',
+      99,
+      true,
+      undefined,
+      'recheck',
+      2,
+    )
 
     expect(createComment).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.stringContaining('type=recheck'),
+      body: expect.stringContaining(
+        '<!-- crosscheck: origin=codex reviewer=claude model=default type=recheck round=2 verdict=APPROVE service=crosscheck -->',
+      ),
     }))
   })
 

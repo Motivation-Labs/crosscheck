@@ -368,6 +368,66 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `src/commands/onboard.ts` — add `promptConflictResolve`, `detectConflictResolveEnabled`; update `OnboardDecisions`, `buildWorkflowYaml`, `applyOnboardConfig`.
   - **Tests Required:** `conflict-resolve: true` → workflow step count increases by 1 and first step type is `conflict-resolve`; re-run with `conflict-resolve: false` regenerates (step removed); `detectConflictResolveEnabled` returns correct values; `--yes` preserves existing setting.
 
+- [ ] **`ck run --smart` — resume workflow at the correct step based on PR state** — today `ck run <pr-url>` always restarts the configured workflow from step 1 (review). On a PR that already has a crosscheck review and a fix commit, this re-reviews work that was already addressed and posts a duplicate first-round comment. Smart mode inspects the PR's existing crosscheck artifacts (review comments + their verdicts, `[crosscheck]` fix commits, recheck comments, HEAD SHA vs last reviewed SHA) and resumes the workflow at the step that matches current state — so `ck run` becomes idempotent across re-invocations against the same PR. The first thing smart mode posts is a one-line "taking over" announcement naming the resume step; subsequent step-wise comments behave exactly like a normal run.
+  - **User:** Anyone who manually runs `ck run` on a PR that has already been partially processed by crosscheck (either by an earlier `ck run`, by `watch`/`serve`, or by a different operator on a different machine). Also resolves the operational pain of "I want to push crosscheck forward one step on this PR without re-running the whole pipeline".
+  - **Acceptance Criteria:**
+    - New flag `--smart` on `ck run` (additive, optional; default behavior unchanged). Long-form only — no short alias to keep the surface minimal. Combinable with `--reviewer`, `--steps`, `--config`, and `--dry-run`. When `--steps` is also provided, `--steps` wins (explicit beats inferred) and a `dim`-style note is logged.
+    - **Annotation contract additions (prerequisite for SHA-aware resume):** rules 2–5 below compare HEAD against the SHA each prior crosscheck artifact ran on. Today's annotation tag carries only `origin`, `reviewer`, `verdict`, `type` (see CLAUDE.md) — no SHA — and `fix_applied` / `conflict_resolved` annotations also omit SHA. Smart resume requires the following **additive** key on every annotation crosscheck posts; the existing keys keep their meaning. Per CLAUDE.md's annotation contract, this is a minor addition (new key, same tag prefix) and is backwards-compatible because the parser already tolerates unknown keys.
+      - `sha=<short_sha>` (7-char) added to: `review` / `recheck` comment annotations (the SHA the reviewer ran against — same value the existing `lastReviewSha` field needs), `fix_applied` (the SHA the fix commit landed at), `conflict_resolved` (the SHA the conflict-resolve commit landed at).
+      - Legacy comments missing `sha=` are treated as "no recorded SHA": rules 2–5 cannot match against them, so smart mode falls through to rule 1 (`no_prior_review`) and re-runs the workflow from the first configured step. This degrades safely — the user gets a fresh round instead of a wrong resume — and is documented in `--smart`'s help text.
+      - The emitters that need updating: the `fix_applied` / `conflict_resolved` annotation strings in `src/lib/comment-bodies.ts` (today they are the bare markers `<!-- crosscheck: fix_applied -->` / `<!-- crosscheck: conflict_resolved -->` at lines 34/68 — no key/value form yet), **and** the review/recheck annotation tag, which is built **inline in `postReviewComment` (`src/github/client.ts`)**, not in `comment-bodies.ts`. There is no shared annotation *parser* today — `src/github/client.ts` only has the boolean classifier `isFreshReviewComment`, which decides *whether* a body is a review but does not extract `verdict` / `type` / `sha`. So this is **not** "purely emitter-side": the implementation must (1) emit `sha=<value>` from both emitter sites and (2) add a structured parser (see Technical Notes) that returns the key/value fields including the new `sha`.
+    - **State detection (pure helper `detectResumeStep` in `src/lib/smart-run.ts`):**
+      Inputs: ordered list of issue comments on the PR (with their `<!-- crosscheck: ... -->` annotations parsed via the existing annotation contract, including the new `sha` field above), the PR's HEAD SHA, the configured workflow steps. Output: `{ resumeStep: WorkflowStep | null, reason: string, lastReviewSha: string | null, lastReviewVerdict: 'APPROVE' | 'NEEDS WORK' | 'BLOCK' | null }`.
+      Resolution rules — evaluated top-down, stop at first match. Note: "first configured step" means `filteredSteps[0]`, which may be `conflict-resolve`, `review`, or any other step depending on the workflow; rules below never hard-code `review` because the conflict-resolve feature (and any future pre-review step) makes that assumption wrong.
+      1. **No prior crosscheck review comment** → `resumeStep = first configured step`, reason `no_prior_review`. (Identical to default behavior; smart mode is a no-op here.)
+      2. **Last crosscheck review verdict was `APPROVE`** → branch on the reviewed SHA so an approved-then-updated PR has a deterministic decision:
+         - **HEAD SHA matches the SHA the review was posted against** → `resumeStep = null`, reason `already_approved_unchanged`. Skip entirely with a one-line **console-only** message ("already approved at <sha>, nothing to do"). **No announcement comment is posted on this path** — it exits before any real work, so posting would add duplicate timeline noise on every re-invocation. This keeps repeated `ck run --smart` against an unchanged approved PR fully idempotent (zero new comments). If a future need arises to leave a visible marker, it must be guarded by an existing-comment check so at most one such marker is ever posted.
+         - **HEAD SHA differs (new non-crosscheck commits landed after the approval)** → `resumeStep = first configured step`, reason `new_commits_after_approve`. Handled exactly like rule 5: re-run the full workflow from step 1 so any pre-review step (e.g. `conflict-resolve`) runs first and the new round reviews the updated code; no announcement comment (observationally identical to a fresh run). A legacy `APPROVE` with no recorded `sha=` cannot match either sub-case and falls through to rule 1 per the annotation-contract note above.
+      3. **Last crosscheck review verdict was `NEEDS WORK` or `BLOCK` AND no `<!-- crosscheck: fix_applied -->` comment exists for that review's SHA chain** → `resumeStep = fix step`, reason `review_pending_fix`.
+      4. **A `fix_applied` comment exists for the last review AND no recheck has run against HEAD** → branch on whether HEAD still points at the fix commit, so commits that land between the fix and this run are not skipped:
+         - **HEAD SHA matches the `fix_applied` annotation's `sha=`** (no new commits since the fix) → `resumeStep = recheck step`, reason `fix_pending_recheck`.
+         - **HEAD SHA differs from (or cannot be compared against) the `fix_applied` annotation's `sha=`** — i.e. a human or other actor pushed new commits after the fix landed but before `--smart` ran, or the legacy comment records no `sha=` → `resumeStep = first configured step`, reason `new_commits_after_fix`. Restarting from step 1 (rather than jumping straight to recheck) ensures the new commit gets a full review → fix pass instead of only a terminal recheck comment that can never trigger a follow-up fix, and lets any pre-review step (e.g. `conflict-resolve`) re-run against the updated code. Like rules 1 and 5, this resumes at the first step so no announcement comment is posted (observationally identical to a fresh run).
+      5. **Last crosscheck artifact is a recheck** → branch on the recheck's annotated SHA so an already-rechecked PR has a deterministic decision on re-invocation:
+         - **HEAD SHA matches the SHA the recheck ran against** (no new commits since the recheck — the common "I re-ran `--smart` on an unchanged, already-processed PR" case) → `resumeStep = null`, reason `already_rechecked_unchanged`. Skip entirely with a one-line **console-only** message ("already rechecked at <sha>, nothing to do"). **No announcement comment is posted on this path** — like rule 2's unchanged-approve sub-case, it exits before any real work, so repeated `ck run --smart` against an unchanged rechecked PR is fully idempotent (zero new comments). A legacy recheck with no recorded `sha=` cannot match this sub-case and falls through to rule 1 per the annotation-contract note above.
+         - **HEAD SHA differs (new non-crosscheck commits have landed since the recheck)** → `resumeStep = first configured step`, reason `new_commits_after_recheck`. The new round runs the full workflow from step 1 (so `conflict-resolve` re-runs if it's the first step, guaranteeing the new round-2 review sees conflict-free code); the existing annotation chain remains as history.
+      6. **Configured workflow has no matching step type for the inferred resume** (e.g. user runs `--smart` against a `review-only` workflow but state says "fix pending") → fall back to first configured step + warning printed: `--smart inferred '<step>' but workflow has no such step; restarting from <first-step-name>`.
+    - **Announcement comment:** Before the resumed step runs, smart mode posts exactly one issue comment with the standard annotation tag. Body shape:
+      ```
+      ### 🤖 Crosscheck (smart resume)
+      Resuming at **<step name>** — <human reason>.
+      <!-- crosscheck: smart_resume step=<step_name> reason=<reason_slug> from_sha=<short_sha> -->
+      ```
+      `<reason_slug>` matches the values in the resolution rules above (`review_pending_fix`, `fix_pending_recheck`, `new_commits_after_recheck`). When `resumeStep` is the very first step (rules 1 and 5), no announcement is posted — that case is observationally identical to a fresh run, so adding a comment would be noise.
+    - **Resume execution:** smart mode rewrites the `filteredSteps` array passed to `runWorkflow` to start at the resolved step (preserving subsequent steps). The runner then behaves exactly as today — same step-wise comments, same verdict posting, same `pushedShas` lock semantics. No changes to `runner.ts` are required if the slice is built before `runWorkflow` is called.
+    - **Idempotency guard:** if a no-op rule fires (rule 2 `already_approved_unchanged` or rule 5 `already_rechecked_unchanged` — i.e. any `resumeStep === null` decision), no `acquireRemoteLock` / `acquirePRLock` is taken — we exit before clone. This avoids surfacing a useless `pending` commit status for a no-op.
+    - **Dry-run interaction:** with `--smart --dry-run`, detection runs and the resume decision is printed, but no announcement comment is posted and no workflow step runs.
+    - **Logging:** new event `smart_resume_decided` emitted at info level with `{ pr, resume_step, reason, last_review_sha, last_review_verdict, head_sha }`.
+    - Out of scope for v1: smart mode for `watch`/`serve` (webhook-driven flows already key off the synchronize/opened action and already dedup on existing comments — smart mode is specifically a manual-resume feature for `ck run`).
+  - **Technical Notes:**
+    - New file: `src/lib/smart-run.ts` — exports `detectResumeStep(opts) → ResumeDecision` (pure, no I/O) and `buildResumeAnnouncementBody(decision, isFirstStep) → string` (pure; returns `''` when the resume step is the first configured step, so first-step resumes emit no comment). Keeps the detection logic unit-testable without mocking GitHub.
+    - **Neither `listPRComments` nor `src/lib/annotation.ts` exists today — both must be added.** The implementation must:
+      - **Add `listPRComments(owner, repo, prNumber, token)` to `src/github/client.ts`** by extracting the paginated comment-fetch loop currently inlined in `getLastCrossCheckCommentId` (`src/github/client.ts:306–331`, raw `fetch` against `/issues/{pr}/comments?per_page=100`, returning `Array<{ id, body }>` across pages). `getLastCrossCheckCommentId` should then call the new helper so the two share one pagination path. (Note: comment listing uses raw `fetch` + token, not octokit — `detectResumeStep`'s caller in `commands/run.ts` already has the token in scope.)
+      - **Add a structured annotation parser as new file `src/lib/annotation.ts`** — `parseAnnotation(body) → { origin, reviewer, verdict, type, sha, attrs } | null`, where `attrs` is a generic `Record<string, string>` holding **every** `key=value` pair found in the tag (so the parser is forward-compatible with any annotation kind). The named fields `origin` / `reviewer` / `verdict` / `type` / `sha` are convenience aliases populated from `attrs` when present; tags that carry other keys (e.g. the `smart_resume` announcement's `step` / `reason` / `from_sha`) round-trip losslessly through `attrs` rather than being discarded. This is what makes the documented `buildResumeAnnouncementBody` → `parseAnnotation` round-trip (see Tests Required) recover `step` / `reason` / `from_sha`. Today `src/github/client.ts` only has the boolean classifier `isFreshReviewComment`; it does not return the key/value fields the resolution rules compare against, so a real parser does not yet exist. Reuse `isFreshReviewComment`'s "parse the LAST `<!-- crosscheck: … -->` tag" rule (client.ts:286) so classification and parsing agree.
+      - The `fix_applied` / `conflict_resolved` markers in `src/lib/comment-bodies.ts` and the review/recheck tag in `postReviewComment` (`src/github/client.ts`) must emit the `sha=` key (per the annotation-contract section above) so the new parser has something to read.
+    - `commands/run.ts` change is minimal: after fetching PR data and resolving `filteredSteps`, branch on `opts.smart` → call `detectResumeStep` with comments + head SHA + steps → if `resumeStep === null` print the no-op message and return early; else slice `filteredSteps` to start at the resume step, **then post the announcement comment ONLY when the resume step is not the first configured step** (`resumeStep !== filteredSteps[0]`), then proceed into the existing clone + `runWorkflow` flow unchanged. The announcement is gated, not unconditional: per the acceptance criteria, rules 1, 5, and the new-commits sub-cases of rules 2 and 4 resume at the first configured step and must post **no** announcement so `ck run --smart` on a fresh or restart-from-step-1 PR is byte-identical to plain `ck run` (the no-prior-review case must add zero extra timeline comments). Equivalently: reuse `buildResumeAnnouncementBody`, which returns the body only for non-first-step resumes — `commands/run.ts` skips the post when it returns empty.
+    - The announcement comment is posted *before* `acquireRemoteLock` so observers see crosscheck's intent immediately; if lock acquisition then fails (another machine is mid-review), the announcement is left behind. This is acceptable — it documents that *a* smart run attempted to take over, even if it lost the race. Alternative (post after lock) is rejected: it would mean the comment never appears if the run is interrupted between lock and step execution, hiding intent.
+    - `--smart` does **not** override `--reviewer`. Both flags are independent. The resume step's `reviewer` field is pinned the same way as today (the `.map(...)` block at `commands/run.ts:98–100`).
+    - Depends on P3 annotations being present in posted comments — which is already shipped per the annotation contract in CLAUDE.md. If a legacy PR has crosscheck comments without annotation tags, smart mode treats them as "no prior crosscheck artifact" (rule 1 fires) and starts from review. Document this in the help text.
+  - **Tests Required:**
+    - `detectResumeStep` unit tests, one per rule (1–6), feeding synthetic comment arrays + SHAs + step lists.
+    - PR with one APPROVE review + no new commits → rule 2, `resumeStep = null`.
+    - PR with one NEEDS WORK review + no fix commit → rule 3, `resumeStep = fix`.
+    - PR with NEEDS WORK review + matching `fix_applied` annotation → rule 4, `resumeStep = recheck`.
+    - PR with recheck APPROVE + a later non-crosscheck commit (different SHA, no `[crosscheck]` prefix) → rule 5, `resumeStep` is the first configured step (round 2).
+    - PR whose workflow starts with `conflict-resolve` (then `review` → `fix`) and has no prior reviews → rule 1, `resumeStep = conflict-resolve` (not `review`). Same workflow with a recheck APPROVE followed by a later non-crosscheck commit → rule 5, `resumeStep = conflict-resolve`.
+    - PR with `--smart` but workflow is `review-only` and state says "fix pending" → rule 6, fallback to first configured step + warning logged with that step's name.
+    - **Annotation SHA round-trip:** review/recheck/fix_applied/conflict_resolved annotations posted by crosscheck now contain `sha=<7-char>`. The parser exposes it as a `sha` field on the parsed annotation; a snapshot test asserts every emitter in `comment-bodies.ts` includes it.
+    - **Legacy-annotation fallback:** synthetic comments without `sha=` (simulating PRs reviewed before this feature shipped) flow through `detectResumeStep` and resolve via rule 1 (`no_prior_review`) — never via rule 2/3/4/5 — because none of the SHA-dependent rules can match a missing field. Asserts smart mode is safe against historical comments.
+    - Integration: `ck run --smart <url>` with no prior reviews behaves byte-identically to `ck run <url>` (no announcement comment, no extra API calls beyond the comments-list fetch).
+    - Integration: `ck run --smart --dry-run` prints decision and does not post any comment.
+    - `--smart --steps fix` → `--steps` wins; smart detection is skipped; note logged.
+    - `buildResumeAnnouncementBody` produces a body that round-trips through `parseAnnotation` yielding `type = smart_resume` and `attrs.step` / `attrs.reason` / `attrs.from_sha` matching the decision (the generic `attrs` bag is what preserves these non-standard keys).
+
 - [x] **Onboard — workflow, mode, and pipeline steps** — extend `crosscheck onboard` with interactive steps for review mode (cross-vendor vs single-vendor) and workflow pipeline (review-only, review→fix, review→fix→re-check). Mode step is shown only when both AI CLIs are authenticated; pipeline step always shown.
   - **User:** Anyone running `crosscheck onboard` for the first time, or re-running after installing a second AI CLI.
   - **Acceptance Criteria:**
@@ -1260,88 +1320,191 @@ These four items fix the two-phase model described in Design Principles. Any new
     - **Already-APPROVE loop entry produces no redundant review:** the canonical `review → loop(fix, recheck)` workflow where the initial review returns APPROVE runs exactly one loop iteration in which both `fix` and `recheck` are skipped by their `when: last_verdict != 'APPROVE'` guards. Consistent with the existing `workflow_complete` semantics (section B — `steps_run` lists every dispatched step, skip reasons live in `step_skipped`), the assertion is **not** that `recheck` is absent from `steps_run`: `steps_run` still contains `fix` and `recheck` (the loop dispatched them). The test instead asserts that both carry a `step_skipped` entry with reason `when_condition`, that `last_verdict` stays `APPROVE`, and that **zero additional review comments are posted**. The `when` guard — not the event shape — is what proves no redundant review ran.
     - **Config-doc sync (guards the AGENTS.md config-schema contract):** every field added to the `post_review` schema (`fix_attempts_max`, `resolution_window_days`, `progress_state_dir`, `progress_state_stale_days`) is present in `crosscheck.config.example.yml` and in the **Configuration** section of `get-started.md`. A test asserts each schema key appears in both files so the docs can't drift from `schema.ts`.
 
-- [ ] **Tiered Feedback Loops — local usage analytics, instruction-effectiveness signals, and safe opt-in telemetry** — three-tier system that measures crosscheck's real-world impact, feeds those signals back into `optimize`, and—only with explicit consent—sends de-identified aggregate counts to inform future development. Privacy-first by design: sensitive data never leaves the machine; telemetry is opt-in (off by default).
-  - **User:** All crosscheck users benefit from better defaults driven by real usage. Contributors to the project benefit from aggregate signal. Power users benefit from local analytics surfaced in `diagnose`.
+- [ ] **Modular opt-in telemetry — categorical consent, idle-triggered upload, transparency banner** — collect de-identified aggregate counts about pipeline activity, vendor token consumption, and platform shape, and send them weekly to inform crosscheck's roadmap. The collection layer is a registry of **versioned categories**; each category is independently opt-in, individually documented, and added without forcing existing users to re-consent to everything. Local metrics capture is always-on (it powers `diagnose` and `optimize`); transmission is opt-in and never blocks crosscheck's main work. Idle-triggered upload prints a banner showing exactly what was sent — the user always sees the payload that left their machine.
+  - **User:** All crosscheck users get better defaults driven by real-world usage. Contributors get aggregate signal about which paths actually run. Power users get the same numbers on the same machine via `diagnose`.
   - **Acceptance Criteria:**
 
-    **Tier 1 — Local count statistics (always-on, local only):**
-    - After every review, append a metrics record to `~/.crosscheck/metrics/YYYY-MM.ndjson` containing: `{ ts, reviewer_pair, verdict, duration_ms, comments_count, pr_sha_prefix }`. `pr_sha_prefix` is the first 8 characters of the PR's head SHA — enough to detect follow-up commits later, not enough to identify the repo or author.
-    - `reviewer_pair` values: `claude_reviews_codex`, `codex_reviews_claude`, `claude_reviews_claude`, `codex_reviews_codex`.
-    - Follow-fix detection: when a new commit arrives on a PR that previously received a `NEEDS_WORK` or `BLOCK` verdict, log a `follow_fix` event linking the two reviews by `pr_sha_prefix`. This tracks whether AI review comments actually get addressed.
-    - `crosscheck diagnose` incorporates Tier 1 data: adds a **Usage** section reporting reviewer-pair distribution, average comments per review, verdict distribution over the period, and follow-fix rate.
-    - Metrics files are subject to the same `logs.retention_days` setting as event logs. Stored in `~/.crosscheck/metrics/`, never in the project directory.
-    - No code content, no PR title, no repo name, no file names, no author identities stored.
+    **A. Local metrics layer (always-on, local only, never transmitted):**
+    - Every event already emitted by `src/lib/logger.ts` continues to be appended to `~/.crosscheck/logs/YYYY-MM-DD.ndjson`. **These local logs deliberately contain identifying fields** — `owner`, `repo`, `pr`, `sha`, comment URLs — because `diagnose` and `optimize` need them to correlate events across a PR's lifetime. The local log stream is not sanitized and never leaves the machine.
+    - Telemetry is a *read-only consumer* of these logs through a **mandatory aggregation step** (`src/lib/telemetry/aggregate.ts`). The aggregation step is the sanitization checkpoint: it reads identifying fields when it needs to *count* things (e.g. distinct PR shas to compute `prs_received`) and emits only numeric counts, enums from a fixed vocabulary, or omits the field. No identifying value ever flows out of `aggregate` into the payload — that invariant is enforced by the schema test in section H, not by trust.
+    - `diagnose` reads the same logs to surface reviewer-pair distribution, verdict distribution, fix success rate, follow-fix rate (new commit lands on a PR that previously got NEEDS_WORK or BLOCK), and the instruction fingerprint in effect at review time. None of this requires telemetry to be enabled.
+    - `logs.retention_days` (default 7, max 30) governs local diagnostics. **Telemetry must not aggregate straight off the raw retention window.** With the default 7-day retention, `initLogger` prunes log files older than `retention_days` by mtime, so by the time the last completed ISO week is uploaded — which can be several days into the following week (Thursday/Sunday upload cadence plus idle-trigger lag) — the early days of that week have already been deleted. A naive design would therefore silently under-count weekly telemetry on a default install.
+    - To prevent this, aggregation is **snapshotted before pruning**: at logger init, *before* any file older than `retention_days` is deleted, the telemetry aggregator computes and persists the numeric counts for any now-complete ISO week to `~/.crosscheck/telemetry/weeks/<iso-week>.json`. These snapshots hold **counts only** — the same sanitized, identifying-field-free output produced by the live aggregator and enforced by the section H schema test — so this is not a shadow buffer of raw/identifying data; the raw identifying logs continue to obey `logs.retention_days` unchanged and are still pruned on schedule. Upload reads exclusively from these frozen weekly snapshots, never from logs that may have been partially pruned, guaranteeing every transmitted week reflects a full seven days of activity regardless of retention setting. Snapshots age out after a small fixed retention (e.g. the last 4 completed weeks) so the directory does not grow unbounded.
 
-    **Tier 2 — Instruction effectiveness tracking (always-on, local only):**
-    - When `optimize` applies a new `instructions.md`, snapshot the current instruction fingerprint (SHA-256 of the file) and log it with a timestamp to `~/.crosscheck/metrics/optimize-history.ndjson`.
-    - In subsequent metric records, include the active `instruction_fingerprint` so outcomes (verdict distribution, follow-fix rate) can be correlated with the instruction version in effect at review time.
-    - `crosscheck diagnose --since <date>` can compare verdict distribution before and after each `optimize` run, surfacing the delta: "After optimize on 2025-05-01: APPROVE rate +12%, BLOCK rate −5%."
-    - `crosscheck optimize` reads these deltas when selecting which instruction changes to keep vs. revert. If a fingerprint correlates with worse outcomes, `optimize` flags it as a candidate for rollback.
-    - Instruction text is never stored — only the SHA-256 fingerprint. The actual text lives in `instructions.md` under the user's control.
+    **B. Logger upgrades required to source the categories** — every event below must carry the listed fields before category aggregators can be wired up. These are additive and require no schema change to existing consumers.
+    - `review_complete` already has `reviewer`, `verdict`, `tokens_used`, `duration_ms` — **add** `step_type: 'review' | 'recheck'`, `step_name: string` (the workflow step name), and `instruction_fingerprint: string` (SHA-256 prefix of the `instructions.md` content active at review time). The first two split review vs recheck (today indistinguishable in the log); the third lets section A's correlation between verdicts and instruction versions actually be built.
+    - `fix_complete` already has `applied_count`, `sha`, `delivery`, `tokens_used` — **add** `vendor: 'claude' | 'codex'` and `duration_ms`. Without `vendor` here, tokens-by-vendor aggregation is impossible.
+    - `conflict_resolve_complete` already has `conflicts_resolved`, `sha`, `tokens_used` — **add** `vendor` and `duration_ms`.
+    - `fix_applied_comment_posted` / `conflict_resolved_comment_posted` / `fix_failed_comment_posted` — **already in place** (PR #149); no change.
+    - New event `optimize_applied` — emitted by `crosscheck optimize` after writing a new `instructions.md` with `{ fingerprint_before, fingerprint_after, source }`. Sources `diagnose` "before/after optimize" deltas in section A.
+    - New event `session_idle` — emitted by `watch`/`serve` when no PR has been active for `IDLE_THRESHOLD_MS` (default 60_000ms). Carries no per-PR data.
+    - New event `telemetry_sent` — emitted after a successful upload with `{ period, categories, payload_bytes, http_status }`. On failure: `telemetry_send_failed` with `{ category: 'auth' | 'network' | 'rate_limit' | 'server' | 'other', http_status?, message }`.
 
-    **Tier 3 — Privacy & consent design (non-negotiable constraints):**
-    - Telemetry is **opt-in**. `telemetry.enabled` defaults to `false` in config. No data is transmitted unless the user explicitly enables it.
-    - On first `watch`/`serve` run after install, display a one-time consent prompt:
-      ```
-        crosscheck can send anonymous usage counts to Motivation Labs to improve future versions.
-        No code, no repo names, no PR content, no usernames — only aggregate numbers.
-        Enable? [y/N]:
-      ```
-      Default answer is N. Response is persisted to `~/.crosscheck/config.yml` as `telemetry.enabled`. The prompt is never shown again. Users can change the setting at any time via `crosscheck telemetry [enable|disable|status]`.
-    - `crosscheck init` output includes a **Telemetry** row: current state (enabled/disabled) and a link to the privacy doc.
-    - Data categories that may **never** be collected or transmitted: code diffs, PR titles, PR descriptions, commit messages, file paths, repo names, GitHub usernames or org names, IP addresses, machine hostnames.
-    - A `PRIVACY.md` at the repo root documents exactly which fields are in a telemetry payload. This document is referenced in the consent prompt and `get-started.md`.
-
-    **Tier 4 — Safe telemetry payload (only when `telemetry.enabled: true`):**
-    - `install_id`: a UUID generated once at first install and stored in `~/.crosscheck/config.yml`. Never linked to a GitHub identity, email, or hostname. Rotatable via `crosscheck telemetry reset-id`.
-    - Transmission: weekly batch, sent at the start of the first `watch`/`serve` session of each UTC week. HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). No per-event streaming.
-    - Payload schema (all fields are counts or enums — no free text, no identifiers):
-      ```json
-      {
-        "install_id": "<uuid>",
-        "version": "0.2.0",
-        "platform": "darwin | linux | win32",
-        "period": "2025-W20",
-        "sessions": 12,
-        "prs_reviewed": 47,
-        "comments_posted": 134,
-        "reviews_by_pair": {
-          "claude_reviews_codex": 23,
-          "codex_reviews_claude": 18,
-          "claude_reviews_claude": 4,
-          "codex_reviews_codex": 2
-        },
-        "verdict_distribution": { "APPROVE": 30, "NEEDS_WORK": 15, "BLOCK": 2 },
-        "follow_fix_rate": 0.73,
-        "optimize_runs": 2
+    **C. Telemetry category registry (the modular core):**
+    - A telemetry **category** is a self-contained module under `src/lib/telemetry/categories/<id>.ts` exporting:
+      ```ts
+      export interface TelemetryCategory {
+        id: string                                  // stable kebab-case identifier
+        version: number                             // bump when the field shape changes semantically
+        summary: string                             // one-sentence user-facing description (shown in consent prompt)
+        fields: string[]                            // documented field list (auto-generates PRIVACY.md entry)
+        aggregate(records: LogRecord[], period: { from: Date; to: Date }): Record<string, unknown>
       }
       ```
-    - If the HTTP request fails (network error, server error), log locally and retry at the next weekly opportunity. Never block startup on telemetry.
-    - `crosscheck telemetry status` shows: enabled/disabled, install_id (first 8 chars), date of last transmission, and the full payload that would be sent.
-    - `crosscheck telemetry dry-run` prints the payload without sending it, regardless of `enabled` state. Useful for users who want to audit before enabling.
+    - `src/lib/telemetry/registry.ts` exports `ALL_CATEGORIES: TelemetryCategory[]`. Adding a new category = drop a file, append to the registry export, ship. No other change required; the consent prompt, payload assembly, CLI listing, and `PRIVACY.md` generator auto-discover.
+    - `version` is per-category. Bumping a category's version requires the user to see a one-time prompt for that category only, not a global re-opt-in.
+    - Aggregators MUST return only numeric counts, enums from a fixed vocabulary, or omit the field. Returning a string that came from PR/user/repo data is a privacy violation enforced at code review (and by the schema check in tests, see H below).
+
+    **D. v1 categories shipping with this feature:**
+    - **`pipeline`** (v1) — counts per period: `prs_received`, `prs_skipped` (with reasons enum: `in_progress_local`, `in_progress_remote`, `no_vendor`, `no_review_comment`, `fork_pr`, `commit_limit_reached`, `dry_run`, `legacy_auto_fix_disabled`, `other`), `reviews`, `rechecks`, `fixes_attempted`, `fixes_succeeded`, `fixes_failed`, `conflict_resolves_attempted`, `conflict_resolves_succeeded`, `sessions`, `idle_intervals`.
+    - **`verdicts`** (v1) — `{ review: { APPROVE, NEEDS_WORK, BLOCK }, recheck: { APPROVE, NEEDS_WORK, BLOCK } }`. Broken out by step type so the recheck-improves-verdict signal is observable.
+    - **`tokens`** (v1) — `{ by_vendor: { claude, codex }, by_step: { review, recheck, fix, conflict_resolve } }`. Both views over the same totals. Cents/USD never included — token counts only.
+    - **`durations`** (v1) — coarse histogram buckets (p50/p90/p99 in ms) for `review`, `recheck`, `fix`, `conflict_resolve` step durations. No per-PR latencies.
+    - **`platform`** (v1) — `{ os: 'darwin' | 'linux' | 'win32', node_major: int (e.g. 24), deployment_mode: 'personal' | 'team', daemon: 'watch' | 'serve', cross_vendor: boolean }`. `crosscheck_version` is NOT in this category — it lives in the envelope (see section F). `node_major` is the integer major version only (no minor, no patch, no `-prerelease` tags) so it fits the value-shape contract in section H. No hostname, IP, CPU model, RAM, or arch beyond the OS string.
+
+    **E. Consent model — categorical, additive, never auto-enable:**
+    - Master switch: `telemetry.enabled` (default `false`). When false, no transmission ever happens regardless of category state.
+    - Per-category state: `telemetry.categories.<id>` (default `false` for each).
+    - Per-category consent record: `telemetry.consented.<id>` = highest category version the user has **explicitly responded to** (accepted OR declined). Used to detect new versions on upgrade. **Undefined means the user has not yet given a response** — even if they were shown the prompt and let it time out.
+    - Prompt rate-limit: `telemetry.last_prompted_at` (ISO timestamp, per-install, not per-category) is set every time a prompt is shown. The next prompt is suppressed until `now - last_prompted_at >= telemetry.prompt_cooldown_ms` (default 24h). Without this, a 60-second idle threshold plus a 30-second timeout would re-show the same prompt every couple of minutes.
+    - **First-run flow** — when `crosscheck watch` or `crosscheck serve` starts and `consented` is empty, on the first idle moment that clears the cooldown (see F): show a single consent screen listing every registered category, its one-sentence summary, and the literal field list. The user picks: `all`, `none`, `<space-separated category ids>`, or types nothing for 30s.
+    - **Upgrade flow** — when a new category exists in the registry whose `id` has never been responded to (`consented[id] === undefined`), or whose `version` is higher than `consented[id]`, prompt for just that category on the next cooldown-cleared idle moment. Categories the user already accepted continue to ship at their consented versions. Categories the user already explicitly declined stay declined; they are never re-prompted at the same version.
+    - **Response paths, each with distinct persistence behavior.** Note that `none` means different things in the two flows because the prompts list different categories: a first-run prompt lists *every* registered category (so `none` is a true global decline), while an upgrade prompt lists *only the new-or-bumped categories* (so `none` is a scoped decline of those categories and must not touch already-accepted ones).
+
+      | Flow | Outcome | `telemetry.enabled` | `telemetry.categories[id]` | `telemetry.consented[id]` | Re-prompt at same version? |
+      |---|---|---|---|---|---|
+      | First-run | Explicit `none` (declines every registered category) | `false` (set explicitly) | `false` for every listed `id` | set to `category.version` for every listed `id` | No — only on `crosscheck telemetry reset` or a version bump |
+      | First-run | Explicit category list (e.g. `tokens platform`) | `true` | `true` for chosen, `false` for unchosen-but-listed | set to `category.version` for ALL listed (chosen AND declined) | No for these versions |
+      | Upgrade | Explicit `none` (declines only the new/bumped categories shown) | **left untouched** | `false` for every listed `id` (only the new/bumped ones) | set to `category.version` for every listed `id` | No — only on `crosscheck telemetry reset` or another version bump |
+      | Upgrade | Explicit category list (subset of the new/bumped) | left as-is if already `true`; set to `true` only if at least one chosen and master was previously `false` (rare — happens only when a user who declined first-run later opts into a single new category) | `true` for chosen, `false` for unchosen-but-listed | set to `category.version` for ALL listed | No for these versions |
+      | Either flow | 30-second timeout, no input on stdin | **left untouched** | **left untouched** | **left untouched for every listed `id`** | Yes — at the next idle moment that has cleared `prompt_cooldown_ms` |
+
+      Two critical rows:
+      - **Upgrade `none`** must not flip the master switch: doing so would convert a single decline of (say) a new `verdicts` category into an accidental global opt-out, disabling `pipeline` and `tokens` that the user has already accepted. This contradicts the additive consent model.
+      - **30-second timeout** (last row) must not advance `consented[id]` or flip the master switch. Treating timeout as "default `none`" would silently mark every category seen and the user would never be re-prompted after one missed prompt. An explicit `none` IS persisted — the user actively chose to decline.
+    - The consent prompt never blocks PR processing. It's printed at idle (see F); the dispatcher reads stdin for up to 30 seconds. On timeout, it logs `consent_prompt_timeout` and exits without persisting anything. `last_prompted_at` IS still set in all three rows, so the cooldown applies equally to declined, accepted, and timed-out prompts — a user who keeps walking away does not get pestered.
+
+    **F. Idle-triggered upload + transparency banner:**
+    - `watch`/`serve` track `lastActivityAt`, **updated only on user/PR work**: incoming webhook events, review start/complete, recheck start/complete, fix push, conflict-resolve push, comment post, and the `crosscheck/review` commit-status write that brackets a PR run. Background polling does NOT reset the timer — explicitly excluded: tunnel health checks (`waitForTunnelEnd` polls localhost.run every 60s), webhook listing/re-registration, signature verification of inbound payloads, and any other periodic task whose cadence could match or exceed `IDLE_THRESHOLD_MS`. Without this exclusion, the 60s tunnel poll would keep the session looking active forever and idle would never fire.
+    - A `session_idle` event fires when `Date.now() - lastActivityAt > IDLE_THRESHOLD_MS` (configurable; default 60s).
+    - **Sendable categories** at any idle moment = `{ c ∈ registry | telemetry.categories[c.id] === true AND telemetry.consented[c.id] >= c.version }`. The second clause is critical: when a category's version is bumped, the user's prior opt-in (`categories[c.id] === true`) is preserved but is no longer "current" until they re-consent. A bumped category is **excluded from the upload** until the consent prompt clears, even if every other category continues to ship. This stops a stale opt-in from auto-shipping a new shape.
+    - **Reporting period is always the last *completed* UTC ISO week**, never the current week. Define `targetPeriod(now)` as the ISO week containing `now - 7 days` whose Monday-to-Monday window falls entirely in the past (i.e. `period_to <= startOfCurrentWeek(now)`). Concretely: when `now` is somewhere in `2026-W22` (Mon 2026-05-25 → Mon 2026-06-01), `targetPeriod = 2026-W21` and the payload covers `[Mon 2026-05-18, Mon 2026-05-25)`. Aggregators MUST window logs to that closed range; events from the current week are deliberately excluded and will be picked up on the next week's upload.
+    - On each idle event, if (i) `telemetry.enabled === true`, (ii) `sendableCategories.length > 0`, and (iii) `targetPeriod(now) > telemetry.last_sent_period` (or `last_sent_period === null`), assemble and POST a payload covering `targetPeriod(now)`. Then set `telemetry.last_sent_period = targetPeriod(now)` and `telemetry.last_sent_at = now`. Otherwise: idle is a no-op for telemetry purposes (consent-prompt dispatch in section E still runs).
+    - Cadence ceiling: at most one upload per UTC ISO week per install **and only ever for past weeks**. The gate is `targetPeriod(now) > last_sent_period`, so a fresh install (`last_sent_period === null`) in the middle of `2026-W22` uploads the last *completed* week — `2026-W21` — on its first eligible idle, then is a no-op until `2026-W23` begins (when `targetPeriod` advances to `2026-W22`). Idle that fires after a period has already been sent, or before a newly-completed week exists, is a no-op. The current (still-open) week's data is never sent early, never sent twice, and never lost — it ships once it closes.
+    - Transmission: HTTPS POST to `https://telemetry.crosscheck.dev/v1/report` (TBD endpoint). 5-second timeout. No retry on the same idle event; if it fails, log `telemetry_send_failed` and try again at the next qualifying idle.
+    - **Wire shape — envelope + categories:** the POST body is JSON with a fixed envelope plus one key per sendable category. The envelope is the only place identifying-ish metadata lives, and every envelope key is part of the schema contract:
+      ```jsonc
+      {
+        // ─── envelope (always present, fixed shape, versioned independently) ───
+        "schema_version": 1,                        // envelope schema; bumped only on breaking wire changes
+        "install_id":     "a1b2c3d4-...-...",       // UUIDv4, locally generated, never identity-derived
+        "crosscheck_version": "0.10.4",
+        "period":         "2026-W21",               // UTC ISO week
+        "period_from":    "2026-05-18T00:00:00Z",   // Mon, inclusive
+        "period_to":      "2026-05-25T00:00:00Z",   // Mon of next week, exclusive
+        "sent_at":        "2026-05-28T03:15:42Z",
+        "categories":     ["pipeline", "tokens", "platform"],  // mirror of which keys below are present
+
+        // ─── one key per sendable category (each shape governed by its registry entry) ───
+        "pipeline": { "prs_received": 47, "reviews": 47, "rechecks": 12, "fixes_succeeded": 18, "fixes_failed": 7 },
+        "tokens":   { "by_vendor": { "claude": 412300, "codex": 98700 },
+                      "by_step":   { "review": 412000, "fix": 98000, "conflict_resolve": 1000 } },
+        "platform": { "os": "darwin", "node_major": 24, "deployment_mode": "personal",
+                      "daemon": "watch", "cross_vendor": true }
+      }
+      ```
+    - Envelope keys are reserved and may never collide with a category `id`. The registry MUST reject any category whose `id` shadows an envelope key (`schema_version`, `install_id`, `crosscheck_version`, `period`, `period_from`, `period_to`, `sent_at`, `categories`).
+    - **Banner format** — printed to the running terminal immediately after a successful upload, prefixed with `[telemetry]` so it's grep-able:
+      ```
+      [telemetry] uploaded 0.4 KB usage report at 2026-05-28 03:15:42 UTC
+                  install: a1b2c3d4  (rotate: `crosscheck telemetry reset-id`)
+                  version: 0.10.4    (in the envelope, not the platform category)
+                  period:  2026-W21  (Mon 2026-05-18 → Sun 2026-05-24)
+                  endpoint: https://telemetry.crosscheck.dev/v1/report
+                  categories sent: pipeline, tokens, platform
+                  payload:
+                    pipeline = { prs_received: 47, reviews: 47, rechecks: 12,
+                                 fixes_succeeded: 18, fixes_failed: 7 }
+                    tokens   = { by_vendor: { claude: 412300, codex: 98700 },
+                                 by_step:   { review: 412000, fix: 98000, conflict_resolve: 1000 } }
+                    platform = { os: darwin, node_major: 24, deployment_mode: personal,
+                                 daemon: watch, cross_vendor: true }
+                  to opt out: `crosscheck telemetry disable [<category>|all]`
+      ```
+    - Banner is printed even when `--quiet` is set — the user is owed transparency about what left their machine. The only flag that suppresses it is `--no-banner-telemetry` (deliberately verbose so accidental suppression is unlikely).
+
+    **G. CLI surface — `crosscheck telemetry <subcommand>`:**
+    - `crosscheck telemetry status` — table: master switch, per-category enabled/declined/never-prompted, install_id (first 8 chars), last upload timestamp + period, endpoint URL.
+    - `crosscheck telemetry enable [<category>|all]` — opts in. With no category, prints the current state and exits. `all` opts in to every registered category at its current version.
+    - `crosscheck telemetry disable [<category>|all]` — opts out. `all` also flips the master switch to `false` so a stray idle never sends.
+    - `crosscheck telemetry preview` — prints the payload that the next idle would actually send, regardless of `enabled` state. It reads the `targetPeriod(now)` snapshot — the last completed UTC ISO week, the same frozen count-only source section F uploads — and never builds a preview directly from current raw logs. If the snapshot is missing, preview reports the missing-snapshot state instead of inventing a partial payload. Identical format to the banner, plus `(dry-run — not sent)` suffix. Useful before opting in.
+    - `crosscheck telemetry reset-id` — generates a new `install_id`. Existing collected logs are unaffected; only future uploads carry the new id.
+    - `crosscheck telemetry reset` — clears all consent state (master switch back to `false`, all category state cleared, `last_sent_*` cleared). Forces re-prompt next idle.
+    - `crosscheck telemetry categories` — lists every registered category with id, version, summary, and field list (same source the consent prompt and `PRIVACY.md` use).
+
+    **H. Privacy invariants — non-negotiable, enforced in code review and tests:**
+
+    Scope note — these invariants apply to **what is transmitted** (the POST body in section F). Local logs at `~/.crosscheck/logs/` are PII-rich by design (see section A) because `diagnose`/`optimize` need them; nothing in section H prohibits writing identifying fields to local logs. The aggregation step in section A is the boundary.
+
+    - **Never transmitted, period**: code diffs, PR titles/descriptions/bodies, commit messages, file paths, branch names, repo names, GitHub user/org logins, email addresses, IP addresses, machine hostnames, CPU/GPU info beyond the OS string, install paths.
+    - **Payload schema is closed.** Top-level keys are exactly: every envelope key (`schema_version`, `install_id`, `crosscheck_version`, `period`, `period_from`, `period_to`, `sent_at`, `categories`) PLUS one key per id in `categories[]`. Any other top-level key fails the schema check.
+    - **Category contents are bounded.** Each category's value object may only contain keys listed in its registry `fields[]`. Recursively for nested objects (e.g. `tokens.by_vendor`), the allowed sub-keys are also enumerated in `fields[]` using dot notation (`by_vendor.claude`, `by_vendor.codex`, …).
+    - **Value-shape contract.** Every leaf value in a category payload is either a non-negative integer, a fixed-vocabulary enum string declared in the category source, a boolean, or `null`. Free-text strings or numbers outside `[0, Number.MAX_SAFE_INTEGER]` fail the schema check.
+    - The full field list is auto-generated into `PRIVACY.md` at the repo root from the registry: running `npm run privacy:doc` writes a Markdown table with every category, version, and field. CI fails if `PRIVACY.md` is out of date with the registry (same pattern as type generators).
+    - The consent prompt references `PRIVACY.md` by URL (`https://github.com/Motivation-Labs/crosscheck/blob/main/PRIVACY.md`).
+    - `install_id` is a UUIDv4 generated locally. It is never seeded from a GitHub identity, hostname, MAC, or any other system identifier. It is stored only in `~/.crosscheck/config.yml`. Rotation is a single CLI command.
+    - The endpoint MUST reject any payload that includes a field not listed in the version's schema. This is a server-side belt-and-suspenders on top of the client-side schema check (server design is out of scope for this PR but the contract is recorded here).
 
   - **Technical Notes:**
-    - New file: `src/lib/metrics.ts` — `appendMetric(record)`, `readMetrics(since?)`, `computeSummary(records)`. Module-level singleton; respects `logs.enabled` (if logs are disabled, metrics are too). NDJSON append, same pattern as `logger.ts`.
-    - New file: `src/lib/telemetry.ts` — `maybeSendTelemetry(config)`: checks enabled + weekly cadence (`~/.crosscheck/.telemetry-last-sent`), aggregates `metrics/` files, POSTs payload, updates sentinel. All errors are caught and logged locally; never throws to caller.
-    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry [enable|disable|status|dry-run|reset-id]`.
-    - Schema additions: `telemetry: { enabled: boolean (default false), install_id: string (auto-generated) }`.
-    - `watch.ts`/`serve.ts`: call `maybeSendTelemetry(config)` early in startup (after consent check on first run).
-    - `review.ts`: call `appendMetric(...)` after each review completes (success or failure verdict).
-    - `optimize.ts`: call `appendMetric({ event: 'optimize_run', fingerprint_before, fingerprint_after })` after applying changes.
-    - `diagnose.ts`: extend output with Tier 1 usage summary section and Tier 2 instruction-effectiveness delta table.
-    - `init.ts`: add Telemetry row to status table.
-    - New file: `PRIVACY.md` at repo root, included in npm package. Documents full payload schema, data retention, opt-out instructions, and contact for data deletion requests.
+    - New directory: `src/lib/telemetry/` — `category.ts` (interface), `registry.ts` (list of all categories), `categories/{pipeline,verdicts,tokens,durations,platform}.ts`, `aggregate.ts` (pure aggregation over an in-memory `LogRecord[]` for one closed period), `snapshot.ts` (runs before log pruning, reads raw logs for each newly completed week, writes sanitized count-only snapshots to `~/.crosscheck/telemetry/weeks/<iso-week>.json`, and prunes old snapshots), `payload.ts` (assembles the upload envelope exclusively from a snapshot plus current config/version metadata), `transmit.ts` (HTTPS POST + banner emit), `consent.ts` (first-run + upgrade prompts, persists state), `idle.ts` (the idle detector and dispatcher used by `watch`/`serve`).
+    - Schema additions to `src/config/schema.ts`:
+      ```ts
+      telemetry: z.object({
+        enabled: z.boolean().default(false),
+        install_id: z.string().default(''),                       // empty until first opt-in
+        categories: z.record(z.boolean()).default({}),            // <id> → bool
+        consented: z.record(z.number()).default({}),              // <id> → highest version EXPLICITLY responded to (accept or decline)
+        last_sent_at: z.string().nullable().default(null),        // ISO timestamp
+        last_sent_period: z.string().nullable().default(null),    // e.g. '2026-W21'
+        last_prompted_at: z.string().nullable().default(null),    // ISO; set every time a prompt is shown (including timeouts)
+        endpoint: z.string().default('https://telemetry.crosscheck.dev/v1/report'),
+        idle_threshold_ms: z.number().int().min(10_000).default(60_000),
+        prompt_cooldown_ms: z.number().int().min(60_000).default(86_400_000), // 24h between consent prompts
+      }).default({})
+      ```
+    - `src/lib/logger.ts`: extend `review_complete`, `fix_complete`, `conflict_resolve_complete` payloads as listed in section B. Add `session_idle` and `telemetry_sent` / `telemetry_send_failed` to the event vocabulary.
+    - `src/lib/runner.ts`: thread `step_type` and `step_name` into the existing `fileLog({ event: 'review_complete', ... })` calls. Add `vendor` to fix and conflict-resolve `fileLog` calls. Capture `duration_ms` around the step body.
+    - `src/commands/watch.ts` / `src/commands/serve.ts`: install the idle detector at startup. On each `session_idle` event, call `consent.maybePrompt()` first (which may block at most 30s for input), then `telemetry.maybeSend()` if the master switch and at least one category are enabled.
+    - New file: `src/commands/telemetry.ts` — `crosscheck telemetry <subcommand>` handlers. One small command per subcommand, all delegating to functions in `src/lib/telemetry/`.
+    - New file: `PRIVACY.md` at the repo root, generated by `scripts/gen-privacy-doc.ts` (run via `npm run privacy:doc`). CI step `npm run privacy:doc -- --check` fails the build if the file is out of date.
+    - `crosscheck status` shows the master switch and a one-line summary of which categories are enabled.
+    - `crosscheck init` adds a one-line note pointing at the consent flow without prompting up front — the user shouldn't be hit with a privacy decision during install.
   - **Tests Required:**
-    - `appendMetric` with `logs.enabled: false` writes nothing.
-    - Metrics records contain no sensitive fields (schema-level check on allowed keys).
-    - `maybeSendTelemetry` with `enabled: false` makes no HTTP request.
-    - `maybeSendTelemetry` within the same UTC week as last send makes no HTTP request.
-    - `maybeSendTelemetry` in a new week POSTs the correct aggregated payload.
-    - Consent prompt on first run persists response; not shown again on second run.
-    - `telemetry dry-run` prints payload structure matching schema; makes no HTTP request.
-    - `diagnose` with Tier 1 data shows reviewer-pair distribution and follow-fix rate.
-    - `diagnose` with two instruction fingerprints shows before/after verdict delta.
-    - Follow-fix event emitted when new commit arrives on a PR with prior `NEEDS_WORK`/`BLOCK` verdict.
+    - **Registry shape:** every category exports a unique kebab-case `id`, a positive integer `version`, a non-empty `summary`, a non-empty `fields[]`, and an `aggregate` function. A failing test if any category violates the contract.
+    - **Schema check on payload:** the assembled payload's top-level keys are exactly `{schema_version, install_id, crosscheck_version, period, period_from, period_to, sent_at, categories} ∪ <opted-in category ids>` — no more, no less. For each opted-in category, its value object's keys are a subset of that category's `fields[]` (with nested keys checked via dot-notation entries). A test asserts no extra keys, no missing envelope keys, no opted-in category missing its data block.
+    - **Category id reservation:** a test asserts the registry rejects a category whose `id` shadows an envelope key.
+    - **No PII in synthetic input:** seed `~/.crosscheck/logs/...ndjson` with synthetic records containing fake repo names (`secret-repo`), user logins (`alice@example.com`), and SHAs. Run snapshot creation and payload assembly across the full pipeline. Assert that none of those strings appear anywhere in the weekly snapshot file or assembled payload's JSON serialization — guards against an aggregator accidentally passing a raw field through.
+    - **Logger upgrades:** `review_complete` now carries `step_type` and `step_name`; `fix_complete` and `conflict_resolve_complete` carry `vendor` and `duration_ms`.
+    - **Consent state machine:**
+      - First-run explicit `none` response → `enabled: false`, every listed category gets `categories[id] = false` AND `consented[id] = c.version`. Prompt is not re-shown at the same versions.
+      - First-run explicit `tokens platform` response → `enabled: true`, those two categories `true`, others listed-but-unchosen `false`, `consented[id] = c.version` for every listed id (chosen AND unchosen).
+      - **Upgrade-flow `none` does not disable prior opt-ins**: with `enabled: true` and `categories: { pipeline: true, tokens: true }` (`consented` for both at current version), append a new `verdicts` v1 category and prompt. User responds `none`. Asserts: `enabled` stays `true`, `categories.pipeline` and `categories.tokens` stay `true`, `categories.verdicts = false`, `consented.verdicts = 1`. The next idle's POST still includes `pipeline` and `tokens`; `verdicts` is absent.
+      - **Upgrade-flow accept while master was off**: with `enabled: false` (from a prior first-run `none`) and a fresh `verdicts` category added later, user explicitly opts into `verdicts`. Asserts: `enabled` flips to `true`, `categories.verdicts = true`, `consented.verdicts = 1`. No other categories' state is touched.
+      - 30-second timeout (no stdin input within the window) → `consented[id]` is NOT advanced for any listed category, `enabled` and `categories` are unchanged. `last_prompted_at` IS updated. The same prompt fires again only after `prompt_cooldown_ms` has elapsed since `last_prompted_at`, NOT on every subsequent idle.
+      - New category appended to registry after the user has accepted a different one → the new id's `consented[id]` is `undefined`; existing accepted categories continue to ship; only the new category appears in the next prompt (after cooldown).
+      - Version bump on a previously-accepted category (`tokens.version` 1 → 2) → next cooldown-cleared idle prompts ONLY for `tokens`, other categories' opt-in state is preserved.
+    - **Prompt cooldown:** with `prompt_cooldown_ms=3_600_000` (1h) and `IDLE_THRESHOLD_MS=10_000`, two timeouts inside the cooldown window emit exactly one prompt and one `consent_prompt_timeout` log entry; the second idle does not re-prompt.
+    - **Idle dispatcher activity sources:** with `IDLE_THRESHOLD_MS=10_000`, a 12-second silence emits `session_idle` exactly once. A simulated `waitForTunnelEnd` 60s poll during a 70-second silence does NOT reset `lastActivityAt` and `session_idle` still fires. A simulated webhook event DOES reset `lastActivityAt`. With `telemetry.enabled: false`, idle never calls `maybeSend`.
+    - **Cadence ceiling:** two idle events in the same UTC week → one HTTP POST. Idle in a new week → one more POST. `last_sent_period` advances.
+    - **Weekly snapshot before pruning:** with `logs.retention_days = 7`, seed logs for every day of `2026-W21`, set the clock late in `2026-W22`, and run logger init. The test asserts `snapshot.ts` writes `~/.crosscheck/telemetry/weeks/2026-W21.json` before retention cleanup deletes any old daily log files, and that the snapshot contains the full seven-day aggregate, not only the files that remain after pruning.
+    - **Upload reads snapshots, not raw logs:** after a `2026-W21` snapshot exists, delete the raw W21 log files and trigger an eligible idle upload. The POST still includes the W21 counts from the snapshot. If the snapshot is missing, `maybeSend()` does not fall back to partially-pruned raw logs; it emits `telemetry_send_failed { category: 'other', message: 'missing telemetry snapshot' }` (or equivalent structured reason), leaves `last_sent_period` unchanged, and does not POST.
+    - **Last-completed-week selection:** with the clock fixed at `2026-05-28T03:15:42Z` (Thu of `2026-W22`), an idle event POSTs `period: 2026-W21` with `period_from = 2026-05-18T00:00:00Z` and `period_to = 2026-05-25T00:00:00Z`. Snapshot creation must exclude log records dated `2026-05-26T..Z` (Tue of W22) from the W21 snapshot — they belong to the W22 snapshot/upload that happens next week. After the POST, `last_sent_period = 2026-W21`. A second idle later that same day is a no-op (`targetPeriod` is still W21, already sent). Advancing the clock to `2026-06-01T03:00:00Z` (Mon of W23) makes `targetPeriod = 2026-W22`, and the next idle uploads the frozen `2026-W22` snapshot including the previously-excluded records.
+    - **Current-week records are never lost:** seed log records into the current week (W22), trigger an idle, assert the POST does not include any of those records and `last_sent_period` does not become `2026-W22`. Roll the clock into W23, run snapshot creation, and trigger idle: the POST now covers W22 from the snapshot and includes every previously-seeded record.
+    - **Version-consent gate:** opt-in with `consented[tokens] === 1` while the registry has `tokens.version === 1` → `tokens` is sendable. Bump the registry to `tokens.version === 2` without re-consenting → `tokens` is NOT in the next POST. Re-consent to v2 → `tokens` is back in the POST. Other categories at current-version consent continue to ship throughout. An assertion guards `(consented[id] < category.version) ⇒ id ∉ payload.categories`.
+    - **Banner content:** mock the transport. After a successful send, the banner stdout contains the exact endpoint URL, install_id prefix, period range, every opted-in category id, and the literal payload values. `--no-banner-telemetry` suppresses the banner but the POST still goes out.
+    - **Transmission failure paths:** network error → `telemetry_send_failed { category: 'network' }` event; 401 → `category: 'auth'`; 429 → `category: 'rate_limit'`; 5xx → `category: 'server'`. None of these throw to the caller.
+    - **`telemetry preview` is offline-safe:** runs with `enabled: false`, makes zero network calls, prints the same banner format with a `(dry-run — not sent)` suffix.
+    - **`PRIVACY.md` is current:** running the generator on the registry produces a file byte-equal to the committed `PRIVACY.md`. The `--check` mode used in CI returns non-zero when drift is detected.
 
 - [x] **Live review progress + verdict** — ora spinners per stage (clone → review → post), VERDICT line in AI prompt, parsed and stripped before posting; verdict badge prepended to GitHub comment; color-coded in terminal.
 - [x] **Fortune cookie welcome message** — random quote from `src/lib/fortune.ts` printed before watch/serve banner.

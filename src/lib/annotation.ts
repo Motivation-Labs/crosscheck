@@ -6,7 +6,7 @@ export interface CrosscheckAnnotationInput {
   origin: string
   reviewer: string
   verdict: string
-  type: CrosscheckStepType
+  type: CrosscheckStepType | string
   model: string
   round: number
   service: string
@@ -76,10 +76,9 @@ function parseFields(attrs: string): Map<string, string> {
   return fields
 }
 
-function parseType(value: string | undefined): CrosscheckStepType {
-  return value !== undefined && STEP_TYPES.has(value as CrosscheckStepType)
-    ? value as CrosscheckStepType
-    : DEFAULT_TYPE
+function parseType(value: string | undefined): CrosscheckStepType | string {
+  if (value === undefined) return DEFAULT_TYPE
+  return STEP_TYPES.has(value as CrosscheckStepType) ? (value as CrosscheckStepType) : value
 }
 
 function parseRound(value: string | undefined): number {

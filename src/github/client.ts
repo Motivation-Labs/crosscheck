@@ -238,7 +238,7 @@ export async function listOpenPRs(
     const data = await res.json() as Array<{
       number: number
       title: string
-      user: { login: string }
+      user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
@@ -250,7 +250,7 @@ export async function listOpenPRs(
       results.push({
         number: pr.number,
         title: pr.title,
-        author: pr.user.login,
+        author: pr.user?.login ?? 'unknown',
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,

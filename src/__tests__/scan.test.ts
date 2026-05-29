@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { filterScanRowsForOutput, type ScanRow } from '../commands/scan.js'
+import {
+  filterScanRowsForOutput,
+  mapWithConcurrencyForScan,
+  sameGitHubLoginForScan,
+  type ScanRow,
+} from '../commands/scan.js'
 
 function row(overrides: Partial<ScanRow>): ScanRow {
   return {
@@ -43,5 +48,31 @@ describe('filterScanRowsForOutput', () => {
     ]
 
     expect(filterScanRowsForOutput(rows, true).map(r => r.pr)).toEqual([1])
+  })
+})
+
+describe('sameGitHubLoginForScan', () => {
+  it('matches configured users case-insensitively', () => {
+    expect(sameGitHubLoginForScan('beingzy', 'BeingZY')).toBe(true)
+    expect(sameGitHubLoginForScan('alice', 'bob')).toBe(false)
+    expect(sameGitHubLoginForScan('alice', null)).toBe(false)
+  })
+})
+
+describe('mapWithConcurrencyForScan', () => {
+  it('caps concurrent work while preserving result order', async () => {
+    let active = 0
+    let peak = 0
+
+    const results = await mapWithConcurrencyForScan([1, 2, 3, 4, 5], 2, async (value) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise(resolve => setTimeout(resolve, 1))
+      active -= 1
+      return value * 2
+    })
+
+    expect(results).toEqual([2, 4, 6, 8, 10])
+    expect(peak).toBeLessThanOrEqual(2)
   })
 })

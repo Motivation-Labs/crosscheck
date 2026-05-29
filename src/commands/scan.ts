@@ -106,6 +106,8 @@ interface PRLogSummary {
 
 const DEFAULT_STALE_AFTER = '24h'
 const STATE_ORDER: ReviewState[] = ['NEEDS_WORK', 'BLOCK', 'APPROVE', 'PR', 'UNKNOWN']
+const SCAN_REPO_CONCURRENCY = 8
+const SCAN_PR_CONCURRENCY = 8
 
 export async function runScan(opts: ScanOptions): Promise<void> {
   try {
@@ -158,17 +160,21 @@ async function collectScanPayload(config: Config, staleAfterMs: number, githubLo
   const logIndex = readLogIndex()
   const now = Date.now()
 
-  const perRepoRows = await Promise.all(repos.map(async (repo) => {
+  const perRepoRows = await mapWithConcurrencyForScan(repos, SCAN_REPO_CONCURRENCY, async (repo) => {
     try {
       const prs = await listOpenPRsForScan(repo.owner, repo.name, token)
       const allowedPRs = prs.filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
-      const rows = await Promise.all(allowedPRs.map(pr => buildScanRow(repo, pr, token, logIndex, staleAfterMs, now)))
+      const rows = await mapWithConcurrencyForScan(
+        allowedPRs,
+        SCAN_PR_CONCURRENCY,
+        pr => buildScanRow(repo, pr, token, logIndex, staleAfterMs, now),
+      )
       return rows
     } catch (err) {
       skippedRepos.push({ repo: `${repo.owner}/${repo.name}`, reason: conciseReason(err) })
       return [] as ScanRow[]
     }
-  }))
+  })
 
   const rows = perRepoRows.flat().sort((a, b) => {
     if (a.isStale !== b.isStale) return a.isStale ? -1 : 1
@@ -210,7 +216,7 @@ async function expandConfiguredRepos(
 
   const userResults = await Promise.all(config.users.map(async (user) => {
     try {
-      return await listUserReposForScan(user, token, githubLogin === user)
+      return await listUserReposForScan(user, token, sameGitHubLoginForScan(user, githubLogin))
     } catch (err) {
       skippedRepos.push({ repo: user, reason: conciseReason(err) })
       return [] as ScanRepo[]
@@ -297,7 +303,10 @@ function buildProgressSummary(annotation: ScanAnnotationMetadata | null, logSumm
 
 function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotationMetadata | null {
   let latest: ScanAnnotationMetadata | null = null
-  for (const comment of comments) {
+  const orderedComments = [...comments].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  )
+  for (const comment of orderedComments) {
     const matches = [...comment.body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
     const match = matches.at(-1)
     if (!match) continue
@@ -437,7 +446,7 @@ function renderScan(payload: ScanPayload, opts: { cacheHit: boolean }): void {
   if (rows.length === 0) {
     console.log(chalk.dim('\n  No open PRs in scope.\n'))
   } else {
-    const now = Date.now()
+    const now = new Date(payload.generatedAt).getTime()
     renderFreshnessGroup('STALE', rows.filter(row => row.isStale), now)
     renderFreshnessGroup('NOT STALE', rows.filter(row => !row.isStale), now)
   }
@@ -510,4 +519,34 @@ function readPackageVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url))
   const pkg = JSON.parse(readFileSync(join(here, '../../package.json'), 'utf8')) as { version?: unknown }
   return typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+}
+
+export function sameGitHubLoginForScan(configUser: string, githubLogin: string | null): boolean {
+  return githubLogin !== null && configUser.toLowerCase() === githubLogin.toLowerCase()
+}
+
+export async function mapWithConcurrencyForScan<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return []
+  if (limit < 1) throw new Error('Scan concurrency limit must be at least 1.')
+
+  const results: R[] = new Array<R>(items.length)
+  let nextIndex = 0
+  const workerCount = Math.min(limit, items.length)
+
+  const runNext = async (): Promise<void> => {
+    const index = nextIndex
+    nextIndex += 1
+    if (index >= items.length) return
+    results[index] = await mapper(items[index])
+    await runNext()
+  }
+
+  const workers = Array.from({ length: workerCount }, () => runNext())
+
+  await Promise.all(workers)
+  return results
 }

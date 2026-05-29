@@ -193,6 +193,7 @@ export interface OpenPR {
   baseRef: string
   body: string | null
   createdAt: string
+  updatedAt: string
 }
 
 export async function listOpenPRs(
@@ -216,6 +217,7 @@ export async function listOpenPRs(
       base: { ref: string }
       body: string | null
       created_at: string
+      updated_at: string
     }>
     if (data.length === 0) break
     for (const pr of data) {
@@ -229,12 +231,106 @@ export async function listOpenPRs(
         baseRef: pr.base.ref,
         body: pr.body,
         createdAt: pr.created_at,
+        updatedAt: pr.updated_at,
       })
     }
     if (data.length < 100) break
     page++
   }
   return results
+}
+
+export interface PRComment {
+  id: number
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export async function listPRComments(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PRComment[]> {
+  const results: PRComment[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) throw new Error(`Failed to list PR comments [${res.status}]: ${res.statusText}`)
+    const data = await res.json() as Array<{ id: number; body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({
+        id: comment.id,
+        body: comment.body,
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface PRCommitDetail {
+  sha: string
+  committedAt: string
+}
+
+export async function listPRCommitsDetailed(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PRCommitDetail[]> {
+  const results: PRCommitDetail[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) throw new Error(`Failed to list PR commits [${res.status}]: ${res.statusText}`)
+    const data = await res.json() as Array<{ sha: string; commit: { committer: { date: string | null }; author: { date: string | null } } }>
+    if (data.length === 0) break
+    for (const commit of data) {
+      const committedAt = commit.commit.committer.date ?? commit.commit.author.date
+      if (committedAt) results.push({ sha: commit.sha, committedAt })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface CommitStatusDetail {
+  context: string
+  state: string
+  updatedAt: string
+}
+
+export async function listCommitStatuses(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<CommitStatusDetail[]> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/commits/${sha}/status`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) throw new Error(`Failed to list commit statuses [${res.status}]: ${res.statusText}`)
+  const data = await res.json() as { statuses: Array<{ context: string; state: string; updated_at: string }> }
+  return data.statuses.map(status => ({
+    context: status.context,
+    state: status.state,
+    updatedAt: status.updated_at,
+  }))
 }
 
 // Returns true if any comment on the PR contains '[crosscheck]' — meaning it

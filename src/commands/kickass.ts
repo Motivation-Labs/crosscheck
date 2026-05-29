@@ -132,7 +132,7 @@ function parseAnnotation(body: string): ParsedAnnotation | null {
 }
 
 function isForkPR(pr: Pick<KickassScannedPR, 'owner' | 'repo' | 'headRepo'>): boolean {
-  return pr.headRepo !== null && pr.headRepo !== `${pr.owner}/${pr.repo}`
+  return pr.headRepo === null || pr.headRepo !== `${pr.owner}/${pr.repo}`
 }
 
 function findLatestFreshReviewComment(pr: KickassScannedPR): FreshReviewComment | null {
@@ -191,6 +191,15 @@ function actionForPR(pr: KickassScannedPR, config: Config): Omit<KickassPlanItem
       fixer: pr.origin === 'claude' || pr.origin === 'codex' ? pr.origin : 'auto',
       delivery: config.post_review.auto_fix.delivery.mode,
       reviewComment,
+    }
+  }
+
+  if (latest.sha !== undefined && latest.sha !== pr.headSha) {
+    return {
+      action: 'review',
+      transition: 'PR -> CR',
+      reviewer: pr.reviewer ?? undefined,
+      explanation: `downgraded from ${latest.verdict ?? latest.type ?? 'prior state'}: latest crosscheck annotation is for old head SHA ${shortSha(latest.sha)}`,
     }
   }
 
@@ -385,7 +394,7 @@ export async function executeKickassPlan(
 }
 
 function defaultRun(item: KickassPlanItem, steps: string): Promise<void> {
-  const opts: RunOpts = { steps }
+  const opts: RunOpts = { steps, expectedHeadSha: item.scannedHeadSha }
   if ((item.action === 'fix' || item.action === 'recheck') && item.reviewComment) {
     opts.initialReviewComment = item.reviewComment
   }
@@ -399,6 +408,7 @@ async function defaultMerge(item: KickassPlanItem, token: string): Promise<void>
     repo: item.pr.repo,
     pullNumber: item.pr.number,
     method: item.mergeMethod === 'merge' || item.mergeMethod === 'rebase' ? item.mergeMethod : 'squash',
+    expectedHeadSha: item.scannedHeadSha,
   })
 }
 

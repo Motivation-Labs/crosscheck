@@ -101,6 +101,22 @@ describe('buildKickassPlan', () => {
     expect(item.transition).toBe('FIX -> Recheck')
     expect(item.reviewComment?.id).toBe(10)
   })
+
+  it('downgrades stale APPROVE annotations to review instead of merge', () => {
+    const staleApprove = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=old9999 -->',
+    ].join('\n')
+
+    const [item] = buildKickassPlan([
+      makeScannedPR({
+        comments: [{ id: 40, body: staleApprove, createdAt: '2026-05-01T01:00:00Z' }],
+      }),
+    ], config)
+
+    expect(item.action).toBe('review')
+    expect(item.transition).toBe('PR -> CR')
+    expect(item.explanation).toContain('old head SHA')
+  })
 })
 
 describe('executeKickassPlan', () => {
@@ -163,6 +179,42 @@ describe('executeKickassPlan', () => {
     expect(result.skipped).toEqual([
       { pr: 'acme/api#2', reason: 'fork_pr' },
       { pr: 'acme/api#3', reason: 'fork_pr' },
+    ])
+  })
+
+  it('skips direct fix and merge when the current head repo is unavailable', async () => {
+    const freshNeedsWork = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
+    ].join('\n')
+    const fixItem = buildKickassPlan([
+      makeScannedPR({
+        comments: [{ id: 20, body: freshNeedsWork, createdAt: '2026-05-01T01:00:00Z' }],
+      }),
+    ], config)[0]
+    const approve = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc1234 -->',
+    ].join('\n')
+    const mergeItem = buildKickassPlan([
+      makeScannedPR({
+        number: 124,
+        comments: [{ id: 30, body: approve, createdAt: '2026-05-01T02:00:00Z' }],
+      }),
+    ], config)[0]
+    const run = vi.fn(async () => {})
+    const merge = vi.fn(async () => {})
+
+    const result = await executeKickassPlan([fixItem, mergeItem], {
+      getCurrentHead: async item => ({ sha: item.scannedHeadSha, headRepo: null }),
+      run,
+      merge,
+    })
+
+    expect(result.executed).toBe(0)
+    expect(run).not.toHaveBeenCalled()
+    expect(merge).not.toHaveBeenCalled()
+    expect(result.skipped).toEqual([
+      { pr: 'acme/api#123', reason: 'fork_pr' },
+      { pr: 'acme/api#124', reason: 'fork_pr' },
     ])
   })
 })

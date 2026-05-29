@@ -7,6 +7,7 @@ export interface MergePullRequestInput {
   repo: string
   pullNumber: number
   method: MergeMethod
+  expectedHeadSha?: string
 }
 
 export async function mergePullRequest(
@@ -18,5 +19,6 @@ export async function mergePullRequest(
     repo: input.repo,
     pull_number: input.pullNumber,
     merge_method: input.method,
+    sha: input.expectedHeadSha,
   })
 }

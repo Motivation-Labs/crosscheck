@@ -285,10 +285,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const stepStart = Date.now()
       let rawReview: string
       let tokensUsed: number | undefined
+      let model = 'default'
       if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
       } else {
-        ;({ review: rawReview, tokensUsed } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -299,7 +300,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -325,8 +326,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck,
-          undefined, effectiveType, ctx.round ?? 1,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })

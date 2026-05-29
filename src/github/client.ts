@@ -1,6 +1,7 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
+import { modelDisplayName } from '../lib/review-models.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -412,6 +413,61 @@ export interface BrandOptions {
   reviewer_attribution?: string
 }
 
+export interface ReviewCommentBodyInput {
+  body: string
+  reviewer: string
+  brand?: BrandOptions
+  origin?: string
+  verdict?: string | null
+  replyToCommentId?: number
+  isRecheck?: boolean
+  model?: string
+  stepType?: CrosscheckStepType
+  round?: number
+}
+
+export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
+  const reviewer = input.reviewer
+  const brand = input.brand ?? {}
+  const model = input.model ?? 'default'
+  const round = input.round ?? 1
+  const stepType = input.stepType ?? (input.isRecheck ? 'recheck' : 'review')
+  const serviceName = brand.service_name || 'crosscheck'
+  const isClaude = reviewer === 'claude'
+  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
+  const modelDisplay = modelDisplayName(model)
+  const serviceSegment = serviceName !== 'crosscheck' ? ` · ${serviceName}` : ''
+  const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
+  const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
+
+  const defaultAttribution = isClaude
+    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
+    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+  const attribution = brand.reviewer_attribution || defaultAttribution
+  const footer = `\n\n---\n${attribution}`
+
+  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
+  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
+
+  const annotationTag = input.verdict
+    ? `\n\n${buildAnnotation({
+      origin: input.origin ?? 'human',
+      reviewer,
+      model,
+      type: stepType,
+      round,
+      verdict: input.verdict,
+      service: serviceName,
+    })}`
+    : ''
+
+  const replyPrefix = input.replyToCommentId
+    ? `> Recheck of [original review](#issuecomment-${input.replyToCommentId})\n\n`
+    : ''
+
+  return customHeader + replyPrefix + header + input.body + footer + customFooter + annotationTag
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,
@@ -428,6 +484,7 @@ export async function postReviewComment(
   stepType?: CrosscheckStepType,
   round = 1,
 ): Promise<number> {
+<<<<<<< HEAD
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
   const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
@@ -459,11 +516,31 @@ export async function postReviewComment(
     ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
     : ''
 
+=======
+>>>>>>> d7a40e6 (feat: add model-aware review headers)
   const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: customHeader + replyPrefix + header + body + footer + customFooter + annotationTag,
+    body: buildReviewCommentBody({
+      body,
+      reviewer,
+      brand,
+      origin,
+      verdict,
+      replyToCommentId,
+      isRecheck,
+      model,
+      stepType,
+      round,
+    }),
   })
   return comment.id
+}
+
+function stepVerb(stepType: CrosscheckStepType): string {
+  if (stepType === 'recheck') return 'Recheck'
+  if (stepType === 'fix') return 'Fixes'
+  if (stepType === 'conflict-resolve') return 'Conflict resolution'
+  return 'Code Review'
 }

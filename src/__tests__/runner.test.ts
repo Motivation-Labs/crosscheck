@@ -8,6 +8,7 @@ import {
   getEffectiveStepType,
   exceedsMaxRounds,
   countCrosscheckCommitsForPR,
+  buildWorkflowCompleteEvent,
 } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
@@ -161,5 +162,86 @@ describe('getEffectiveStepType', () => {
   it('preserves recheck regardless of isRecheckRun', () => {
     expect(getEffectiveStepType('recheck', true)).toBe('recheck')
     expect(getEffectiveStepType('recheck', false)).toBe('recheck')
+  })
+})
+
+describe('buildWorkflowCompleteEvent', () => {
+  const base = {
+    owner: 'o', repoName: 'r', prNumber: 1,
+    workflowId: 'wf-123',
+    workflowStart: 1000,
+    stepsRun: ['review', 'fix', 'recheck'],
+    results: {
+      review:  { verdict: 'NEEDS_WORK' as const, commentBody: 'x' },
+      fix:     { applied_count: 1 },
+      recheck: { verdict: 'APPROVE' as const, commentBody: 'y' },
+    },
+    workflowFailed: false,
+    now: 1500,
+  }
+
+  it('emits ended_reason=completed and level=info on a clean run', () => {
+    const ev = buildWorkflowCompleteEvent(base)
+    expect(ev.event).toBe('workflow_complete')
+    expect(ev.ended_reason).toBe('completed')
+    expect(ev.level).toBe('info')
+    expect(ev.workflow_id).toBe('wf-123')
+    expect(ev.repo).toBe('o/r')
+    expect(ev.pr).toBe(1)
+  })
+
+  it('emits ended_reason=error and level=warn when workflowFailed is true', () => {
+    const ev = buildWorkflowCompleteEvent({ ...base, workflowFailed: true })
+    expect(ev.ended_reason).toBe('error')
+    expect(ev.level).toBe('warn')
+  })
+
+  // The verdict picked is the LATEST step that produced one, scanning in
+  // reverse. This is how runWorkflow itself computes the return value, so
+  // a downstream join on workflow_id <-> verdict stays consistent.
+  it('picks last_verdict from the most recent step that produced a verdict', () => {
+    const ev = buildWorkflowCompleteEvent(base)
+    expect(ev.last_verdict).toBe('APPROVE')
+  })
+
+  it('picks last_step from the last entry in stepsRun', () => {
+    const ev = buildWorkflowCompleteEvent(base)
+    expect(ev.last_step).toBe('recheck')
+  })
+
+  // Edge case: a workflow that throws before any step ran (e.g., loadWorkflow
+  // failed). stepsRun is empty; lastStep is null, not undefined or crash.
+  it('returns last_step=null when stepsRun is empty', () => {
+    const ev = buildWorkflowCompleteEvent({ ...base, stepsRun: [], results: {} })
+    expect(ev.last_step).toBeNull()
+    expect(ev.last_verdict).toBeNull()
+    expect(ev.steps_run).toEqual([])
+  })
+
+  it('returns last_verdict=null when no step produced a verdict', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base, results: { fix: { applied_count: 0 } },
+    })
+    expect(ev.last_verdict).toBeNull()
+  })
+
+  it('computes total_duration_ms from injected now minus workflowStart', () => {
+    const ev = buildWorkflowCompleteEvent({ ...base, now: 4000, workflowStart: 1000 })
+    expect(ev.total_duration_ms).toBe(3000)
+  })
+
+  it('includes round when provided, omits it otherwise', () => {
+    const withRound = buildWorkflowCompleteEvent({ ...base, round: 2 })
+    expect(withRound.round).toBe(2)
+
+    const withoutRound = buildWorkflowCompleteEvent(base)
+    expect('round' in withoutRound).toBe(false)
+  })
+
+  it('preserves steps_run order so consumers can read the workflow shape', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base, stepsRun: ['custom-review', 'gate-check', 'apply-fixes', 'final-pass'],
+    })
+    expect(ev.steps_run).toEqual(['custom-review', 'gate-check', 'apply-fixes', 'final-pass'])
   })
 })

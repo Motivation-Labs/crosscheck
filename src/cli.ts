@@ -14,6 +14,7 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runKickass } from './commands/kickass.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -83,6 +84,14 @@ program
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
   .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
+
+program
+  .command('kickass')
+  .description('Pick stale PRs and advance each to its next crosscheck action')
+  .option('-c, --config <path>', 'config file path')
+  .option('--force', 'ignore the 60-second scan cache')
+  .option('--dry-run', 'stop after picker and preflight summary; perform no mutations')
+  .action((opts: { config?: string; force?: boolean; dryRun?: boolean }) => void runKickass(opts))
 
 program
   .command('status')

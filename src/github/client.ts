@@ -263,6 +263,37 @@ export async function prHasCrossCheckComment(
   return false
 }
 
+export interface PRComment {
+  id: number
+  body: string
+  createdAt: string
+}
+
+export async function listPRComments(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PRComment[]> {
+  const comments: PRComment[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) break
+    const data = await res.json() as Array<{ id: number; body: string; created_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      comments.push({ id: comment.id, body: comment.body, createdAt: comment.created_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return comments
+}
+
 // True iff `body` is a fresh review comment that a recheck should link back to.
 // Classification cascade:
 //   1. Annotation with `type=review`      → review.
@@ -437,6 +468,7 @@ export async function postReviewComment(
   verdict?: string | null,
   replyToCommentId?: number,
   isRecheck?: boolean,
+  sha?: string,
 ): Promise<number> {
   const isClaude = reviewer === 'claude'
   const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
@@ -454,13 +486,14 @@ export async function postReviewComment(
   const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
 
   // Annotation tag for Phase 2 step 4 detection — matches the documented contract:
-  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> -->
+  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> sha=<head> -->
   // origin= is always present so scanners matching "crosscheck: origin=" reliably find it.
   // type= is explicit from isRecheck (not inferred from backlink resolution).
   // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
   const annotationParts = [`origin=${origin}`, `reviewer=${reviewer}`]
   if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
   annotationParts.push(`type=${isRecheck ? 'recheck' : 'review'}`)
+  if (sha) annotationParts.push(`sha=${sha}`)
   const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
 
   // Recheck: prepend a reference back to the original review so the thread is navigable

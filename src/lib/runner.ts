@@ -180,6 +180,13 @@ export interface WorkflowContext {
   // fires mid-workflow — otherwise process.exit bypasses the runner's finally
   // and the pending status is leaked indefinitely on GitHub.
   pushedShas?: string[]
+  // Preloaded fresh review comment for a fix-only invocation. This preserves
+  // `crosscheck run --steps fix` as the mutating path while letting operators
+  // resume from an already-posted review.
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
 }
 
 export interface WorkflowResult {
@@ -318,13 +325,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         let priorReviewId: number | undefined
         if (isRecheck) {
           priorReviewId = Object.values(results).reverse().find(r => r.commentId !== undefined)?.commentId
+            ?? ctx.initialReviewComment?.id
           if (priorReviewId === undefined) {
             priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
           }
         }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, pr.head.sha,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -351,6 +359,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Find the most recent review result that has a comment body
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
+        ?? (ctx.initialReviewComment
+          ? { commentBody: ctx.initialReviewComment.body, commentId: ctx.initialReviewComment.id }
+          : undefined)
       if (!reviewResult?.commentBody) { skipFix('no_review_comment'); continue }
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.

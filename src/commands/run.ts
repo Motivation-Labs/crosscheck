@@ -20,6 +20,10 @@ export interface RunOpts {
   reviewer?: string
   steps?: string
   dryRun?: boolean
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -223,6 +227,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         pushedShas,
         dryRun: opts.dryRun,
         steps: filteredSteps,
+        initialReviewComment: opts.initialReviewComment,
       })
 
       activeSpinner.stop()

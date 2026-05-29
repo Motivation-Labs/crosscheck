@@ -393,12 +393,16 @@ export async function executeKickassPlan(
   return result
 }
 
-function defaultRun(item: KickassPlanItem, steps: string): Promise<void> {
-  const opts: RunOpts = { steps, expectedHeadSha: item.scannedHeadSha }
+export function buildKickassRunOpts(item: KickassPlanItem, steps: string, configPath?: string): RunOpts {
+  const opts: RunOpts = { config: configPath, steps, expectedHeadSha: item.scannedHeadSha }
   if ((item.action === 'fix' || item.action === 'recheck') && item.reviewComment) {
     opts.initialReviewComment = item.reviewComment
   }
-  return runRun(prUrl(item.pr), opts)
+  return opts
+}
+
+function defaultRun(item: KickassPlanItem, steps: string, configPath?: string): Promise<void> {
+  return runRun(prUrl(item.pr), buildKickassRunOpts(item, steps, configPath))
 }
 
 async function defaultMerge(item: KickassPlanItem, token: string): Promise<void> {
@@ -478,7 +482,7 @@ export async function runKickass(opts: KickassOpts = {}, deps: KickassDeps = {})
   try {
     return await executeKickassPlan(selected, {
       getCurrentHead: deps.getCurrentHead ?? defaultGetCurrentHead(token),
-      run: deps.run ?? defaultRun,
+      run: deps.run ?? ((item: KickassPlanItem, steps: string) => defaultRun(item, steps, opts.config)),
       merge: deps.merge ?? ((item: KickassPlanItem) => defaultMerge(item, token)),
     })
   } catch (err) {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ConfigSchema } from '../config/schema.js'
 import {
+  buildKickassRunOpts,
   buildKickassPlan,
   executeKickassPlan,
   runKickass,
@@ -116,6 +117,18 @@ describe('buildKickassPlan', () => {
     expect(item.action).toBe('review')
     expect(item.transition).toBe('PR -> CR')
     expect(item.explanation).toContain('old head SHA')
+  })
+})
+
+describe('buildKickassRunOpts', () => {
+  it('passes the kickass config path and expected head SHA through to run', () => {
+    const [item] = buildKickassPlan([makeScannedPR()], config)
+
+    expect(buildKickassRunOpts(item, 'review', './custom.yml')).toEqual({
+      config: './custom.yml',
+      steps: 'review',
+      expectedHeadSha: 'abc1234',
+    })
   })
 })
 

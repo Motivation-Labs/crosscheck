@@ -195,6 +195,24 @@ export interface OpenPR {
   createdAt: string
 }
 
+export interface ScanOpenPR extends OpenPR {
+  updatedAt: string
+  url: string
+}
+
+export interface ScanIssueComment {
+  id: number
+  author: string
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ScanRepo {
+  owner: string
+  name: string
+}
+
 export async function listOpenPRs(
   owner: string,
   repo: string,
@@ -229,6 +247,139 @@ export async function listOpenPRs(
         baseRef: pr.base.ref,
         body: pr.body,
         createdAt: pr.created_at,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+async function githubJson<T>(url: string, token: string, label: string): Promise<T> {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) {
+    let message = res.statusText
+    try {
+      const data = await res.json() as { message?: string }
+      message = data.message ?? message
+    } catch { /* keep status text */ }
+    throw new Error(`${label} failed [${res.status}]: ${message}`)
+  }
+  return await res.json() as T
+}
+
+export async function listOrgReposForScan(org: string, token: string): Promise<ScanRepo[]> {
+  const results: ScanRepo[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{ name: string; archived: boolean }>>(
+      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      token,
+      `List repos for org ${org}`,
+    )
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived) results.push({ owner: org, name: repo.name })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listUserReposForScan(username: string, token: string, isSelf: boolean): Promise<ScanRepo[]> {
+  const results: ScanRepo[] = []
+  let page = 1
+  while (true) {
+    const url = isSelf
+      ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
+      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+    const data = await githubJson<Array<{ name: string; owner: { login: string }; archived: boolean }>>(
+      url,
+      token,
+      `List repos for user ${username}`,
+    )
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived && repo.owner.login === username) results.push({ owner: repo.owner.login, name: repo.name })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listOpenPRsForScan(owner: string, repo: string, token: string): Promise<ScanOpenPR[]> {
+  const results: ScanOpenPR[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{
+      number: number
+      title: string
+      user: { login: string }
+      head: { sha: string; ref: string; repo: { full_name: string } | null }
+      base: { ref: string }
+      body: string | null
+      created_at: string
+      updated_at: string
+      html_url: string
+    }>>(
+      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      token,
+      `List open PRs for ${owner}/${repo}`,
+    )
+    if (data.length === 0) break
+    for (const pr of data) {
+      results.push({
+        number: pr.number,
+        title: pr.title,
+        author: pr.user.login,
+        headSha: pr.head.sha,
+        headRef: pr.head.ref,
+        headRepo: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref,
+        body: pr.body,
+        createdAt: pr.created_at,
+        updatedAt: pr.updated_at,
+        url: pr.html_url,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listIssueCommentsForScan(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<ScanIssueComment[]> {
+  const results: ScanIssueComment[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{
+      id: number
+      user: { login: string } | null
+      body: string | null
+      created_at: string
+      updated_at: string
+    }>>(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      token,
+      `List comments for ${owner}/${repo}#${issueNumber}`,
+    )
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({
+        id: comment.id,
+        author: comment.user?.login ?? 'unknown',
+        body: comment.body ?? '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
       })
     }
     if (data.length < 100) break

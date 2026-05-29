@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import * as detector from '../github/detector.js'
 import { detectOriginFromBody, detectOriginFromBranch, detectOriginFull, assignReviewer } from '../github/detector.js'
 import { ConfigSchema, type Config } from '../config/schema.js'
 
@@ -100,6 +101,10 @@ describe('detectOriginFull — author_routes behavior', () => {
 })
 
 describe('assignReviewer', () => {
+  it('is the sole exported reviewability decision helper', () => {
+    expect('shouldReview' in detector).toBe(false)
+  })
+
   it('cross-vendor: claude origin → codex reviewer', async () => {
     expect(await assignReviewer('claude', buildConfig())).toBe('codex')
   })

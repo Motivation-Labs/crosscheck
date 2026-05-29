@@ -40,8 +40,8 @@ function registerSignalCleanup() {
   process.on('SIGINT', handleLockSignal)
 }
 
-function lockPath(owner: string, repo: string, pr: number, sha: string): string {
-  return join(LOCK_DIR, `${owner}-${repo}-${pr}-${sha.slice(0, 8)}.lock`)
+function lockPath(owner: string, repo: string, pr: number): string {
+  return join(LOCK_DIR, `${owner}-${repo}-${pr}.lock`)
 }
 
 function isStale(path: string): boolean {
@@ -53,10 +53,10 @@ function isStale(path: string): boolean {
   }
 }
 
-export function acquirePRLock(owner: string, repo: string, pr: number, sha: string): boolean {
+export function acquirePRLock(owner: string, repo: string, pr: number, _sha?: string): boolean {
   mkdirSync(LOCK_DIR, { recursive: true })
   registerSignalCleanup()
-  const path = lockPath(owner, repo, pr, sha)
+  const path = lockPath(owner, repo, pr)
   try {
     const fd = openSync(path, 'wx')
     closeSync(fd)
@@ -77,8 +77,8 @@ export function acquirePRLock(owner: string, repo: string, pr: number, sha: stri
   }
 }
 
-export function releasePRLock(owner: string, repo: string, pr: number, sha: string): void {
-  const path = lockPath(owner, repo, pr, sha)
+export function releasePRLock(owner: string, repo: string, pr: number, _sha?: string): void {
+  const path = lockPath(owner, repo, pr)
   activeLocks.delete(path)
   try { rmSync(path) } catch { /* already gone */ }
 }

@@ -353,6 +353,21 @@ export async function getPRCommits(
   return results
 }
 
+export async function getCommitMessage(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<string | null> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return null
+  const data = await res.json() as { commit?: { message?: string } }
+  return data.commit?.message ?? null
+}
+
 export async function findOrgWebhook(org: string, url: string, token: string): Promise<number | null> {
   const res = await fetch(`https://api.github.com/orgs/${org}/hooks?per_page=100`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },

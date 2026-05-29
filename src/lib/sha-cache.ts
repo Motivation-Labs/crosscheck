@@ -1,24 +1,24 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { homedir } from 'os'
 
-const CACHE_DIR = join(homedir(), '.crosscheck')
-const CACHE_FILE = join(CACHE_DIR, 'pushed-shas.json')
-const MAX_SHAS = 500
+const DEFAULT_CACHE_FILE = join(homedir(), '.crosscheck', 'pushed-shas.json')
+const DEFAULT_MAX_SHAS = 500
 
-function loadShas(): string[] {
+function loadShas(file: string): string[] {
   try {
-    if (!existsSync(CACHE_FILE)) return []
-    return JSON.parse(readFileSync(CACHE_FILE, 'utf8')) as string[]
+    if (!existsSync(file)) return []
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return Array.isArray(parsed) ? parsed.filter((sha): sha is string => typeof sha === 'string') : []
   } catch {
     return []
   }
 }
 
-function saveShas(shas: string[]): void {
+function saveShas(file: string, shas: string[]): void {
   try {
-    mkdirSync(CACHE_DIR, { recursive: true })
-    writeFileSync(CACHE_FILE, JSON.stringify(shas), 'utf8')
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify(shas), 'utf8')
   } catch { /* best-effort */ }
 }
 
@@ -26,13 +26,21 @@ function saveShas(shas: string[]): void {
 // Loaded on construction so SHAs survive process restarts, preventing crosscheck
 // fix commits from triggering redundant re-reviews in a new session.
 export class PersistentShaSet extends Set<string> {
-  constructor() {
-    super(loadShas())
+  private readonly file: string
+  private readonly maxShas: number
+
+  constructor(file: string = DEFAULT_CACHE_FILE, maxShas: number = DEFAULT_MAX_SHAS) {
+    super()
+    this.file = file
+    this.maxShas = maxShas
+    for (const sha of loadShas(file).slice(-maxShas)) {
+      Set.prototype.add.call(this, sha)
+    }
   }
 
   add(sha: string): this {
     super.add(sha)
-    saveShas([...this].slice(-MAX_SHAS))
+    saveShas(this.file, [...this].slice(-this.maxShas))
     return this
   }
 }

@@ -40,6 +40,27 @@ describe('checkRemoteLock', () => {
     expect(await checkRemoteLock(octokit as never, 'o', 'r', 'sha')).toBe(false)
   })
 
+  it('uses the newest crosscheck status when multiple statuses exist for the context', async () => {
+    const now = new Date().toISOString()
+    const older = new Date(Date.now() - 60_000).toISOString()
+    const octokit = {
+      rest: {
+        repos: {
+          getCombinedStatusForRef: vi.fn().mockResolvedValue({
+            data: {
+              statuses: [
+                { context: 'crosscheck/review', state: 'pending', updated_at: older },
+                { context: 'crosscheck/review', state: 'success', updated_at: now },
+              ],
+            },
+          }),
+        },
+      },
+    }
+
+    expect(await checkRemoteLock(octokit as never, 'o', 'r', 'sha')).toBe(false)
+  })
+
   it('returns false when status is failure', async () => {
     const octokit = makeOctokit('failure', new Date().toISOString())
     expect(await checkRemoteLock(octokit as never, 'o', 'r', 'sha')).toBe(false)

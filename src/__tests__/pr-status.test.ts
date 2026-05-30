@@ -177,4 +177,33 @@ describe('derivePRStatus', () => {
     expect(status.lastActiveAt).toBe('2026-05-29T11:55:00.000Z')
     expect(status.freshness).toBe('not_stale')
   })
+
+  it('does not let no-op workflow bookkeeping hide stale actionable PRs', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [
+        {
+          ts: '2026-05-29T11:55:00.000Z',
+          event: 'step_skipped',
+          repo: 'acme/web',
+          pr: 7,
+          reason: 'when_condition',
+        },
+        {
+          ts: '2026-05-29T11:56:00.000Z',
+          event: 'comment_posted',
+          repo: 'acme/web',
+          pr: 7,
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.lastActiveAt).toBe('2026-05-28T10:00:00.000Z')
+    expect(status.freshness).toBe('stale')
+    expect(status.nextAction).toBe('fix')
+  })
 })

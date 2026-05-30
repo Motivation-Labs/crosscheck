@@ -156,16 +156,14 @@ interface TimedVerdict {
 
 const GITHUB_SCAN_CONCURRENCY = 8
 
-// These events intentionally count as activity even when a run has no code
-// changes. `kickass` is a retry queue: a just-attempted no-op should cool down
-// before the operator sees the same PR again.
+// Only state-changing workflow events should refresh staleness. No-op
+// bookkeeping like step_skipped/comment_posted can happen while a PR still
+// needs operator action, so those entries stay out of the activity signal.
 const WORKFLOW_ACTIVITY_EVENTS = new Set([
   'review_complete',
   'fix_complete',
   'conflict_resolve_complete',
   'workflow_complete',
-  'step_skipped',
-  'comment_posted',
 ])
 
 export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | null {

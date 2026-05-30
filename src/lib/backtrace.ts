@@ -1,12 +1,22 @@
 import type { Config } from '../config/schema.js'
 import { isAuthorAllowed } from './filter.js'
 import {
+  listCommitStatuses,
   listOpenPRs,
   listOrgRepos,
+  listPRComments,
+  listPRCommitsDetailed,
   listUserRepos,
   prHasCrossCheckComment,
   type OpenPR,
 } from '../github/client.js'
+import {
+  foldPRStatus,
+  isStale,
+  type PRStatus,
+  type PRStatusLogEvent,
+  type PRStatusPullRequest,
+} from './pr-status.js'
 
 export type BacktraceScope = { org: string } | { owner: string; repo: string }
 
@@ -19,6 +29,27 @@ export interface BacktraceResult {
   queued: BacktracePR[]
   alreadyReviewed: number
   skippedAuthor: number
+}
+
+export interface ScanFailure {
+  owner?: string
+  repo?: string
+  pr?: number
+  stage: 'scope' | 'repo' | 'pr'
+  message: string
+}
+
+export interface ScanOptions {
+  logEvents?: PRStatusLogEvent[]
+  staleAfter?: number
+}
+
+export interface ScanResult {
+  statuses: PRStatus[]
+  failures: ScanFailure[]
+  skippedAuthor: number
+  scannedRepos: number
+  scannedPRs: number
 }
 
 async function expandToRepos(
@@ -39,6 +70,36 @@ async function expandToRepos(
     })
   )
   return repos
+}
+
+async function expandToReposWithFailures(
+  scopes: BacktraceScope[],
+  token: string,
+): Promise<{ repos: Array<{ owner: string; repo: string }>; failures: ScanFailure[] }> {
+  const expanded = await Promise.all(
+    scopes.map(async (scope) => {
+      if ('org' in scope) {
+        try {
+          const orgRepos = await listOrgRepos(scope.org, token)
+          return {
+            repos: orgRepos.map(({ owner, name }) => ({ owner, repo: name })),
+            failures: [] as ScanFailure[],
+          }
+        } catch (err: unknown) {
+          return {
+            repos: [],
+            failures: [{ stage: 'scope' as const, owner: scope.org, message: err instanceof Error ? err.message : String(err) }],
+          }
+        }
+      }
+      return { repos: [{ owner: scope.owner, repo: scope.repo }], failures: [] as ScanFailure[] }
+    }),
+  )
+
+  return {
+    repos: expanded.flatMap(result => result.repos),
+    failures: expanded.flatMap(result => result.failures),
+  }
 }
 
 // Build backtrace scopes from config (used by serve mode; watch mode passes
@@ -110,4 +171,85 @@ export async function scanUnreviewedPRs(
   result.queued.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
 
   return result
+}
+
+export async function scanOpenPRStatuses(
+  scopes: BacktraceScope[],
+  config: Config,
+  token: string,
+  opts: ScanOptions = {},
+): Promise<ScanResult> {
+  if (scopes.length === 0) {
+    return { statuses: [], failures: [], skippedAuthor: 0, scannedRepos: 0, scannedPRs: 0 }
+  }
+
+  const expanded = await expandToReposWithFailures(scopes, token)
+
+  const perRepoResults = await Promise.all(
+    expanded.repos.map(async ({ owner, repo }) => {
+      try {
+        const prs = await listOpenPRs(owner, repo, token)
+        return { prs: prs.map<BacktracePR>(pr => ({ ...pr, owner, repo })), failures: [] as ScanFailure[] }
+      } catch (err: unknown) {
+        return {
+          prs: [],
+          failures: [{ owner, repo, stage: 'repo' as const, message: err instanceof Error ? err.message : String(err) }],
+        }
+      }
+    }),
+  )
+
+  const allPRs = perRepoResults.flatMap(result => result.prs)
+  let skippedAuthor = 0
+  const allowedPRs = allPRs.filter((pr) => {
+    if (isAuthorAllowed(config.routing.allowed_authors, pr.author)) return true
+    skippedAuthor++
+    return false
+  })
+
+  const perPRResults = await Promise.all(
+    allowedPRs.map(async (pr) => {
+      try {
+        const [comments, commits, commitStatuses] = await Promise.all([
+          listPRComments(pr.owner, pr.repo, pr.number, token),
+          listPRCommitsDetailed(pr.owner, pr.repo, pr.number, token),
+          listCommitStatuses(pr.owner, pr.repo, pr.headSha, token),
+        ])
+        const statusPR: PRStatusPullRequest = {
+          ...pr,
+          commits,
+          commitStatuses,
+        }
+        const status = foldPRStatus(statusPR, comments, opts.logEvents ?? [])
+        if (opts.staleAfter !== undefined) status.stale = isStale(status, opts.staleAfter)
+        return { status, failure: null }
+      } catch (err: unknown) {
+        return {
+          status: null,
+          failure: {
+            owner: pr.owner,
+            repo: pr.repo,
+            pr: pr.number,
+            stage: 'pr' as const,
+            message: err instanceof Error ? err.message : String(err),
+          },
+        }
+      }
+    }),
+  )
+
+  const statuses = perPRResults.flatMap(result => result.status ? [result.status] : [])
+  statuses.sort((a, b) => a.lastActive.getTime() - b.lastActive.getTime())
+
+  return {
+    statuses,
+    failures: [
+      ...expanded.failures,
+      ...perRepoResults.flatMap(result => result.failures),
+      ...perPRResults.flatMap(result => result.failure ? [result.failure] : []),
+    ],
+    skippedAuthor,
+    scannedRepos: expanded.repos.length,
+    scannedPRs: allPRs.length,
+  }
 }

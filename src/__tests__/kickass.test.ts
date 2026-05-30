@@ -4,6 +4,7 @@ import {
   buildKickassRunOpts,
   buildKickassPlan,
   executeKickassPlan,
+  formatExecutionSummary,
   runKickass,
   type KickassPlanItem,
   type KickassScannedPR,
@@ -63,6 +64,7 @@ describe('runKickass', () => {
     expect(run).not.toHaveBeenCalled()
     expect(merge).not.toHaveBeenCalled()
     expect(lines.join('\n')).toContain('PR -> CR')
+    expect(lines.join('\n')).toContain('Executed 0; skipped 1 (dry_run:1)')
   })
 })
 
@@ -118,6 +120,60 @@ describe('buildKickassPlan', () => {
     expect(item.reviewComment?.id).toBe(10)
   })
 
+  it('does not treat untyped annotations without reviewer as review comments', () => {
+    const markerLikeAnnotation = [
+      '<!-- crosscheck: verdict=NEEDS_WORK sha=abc1234 -->',
+    ].join('\n')
+
+    const [item] = buildKickassPlan([
+      makeScannedPR({
+        comments: [{ id: 10, body: markerLikeAnnotation, createdAt: '2026-05-01T01:00:00Z' }],
+      }),
+    ], config)
+
+    expect(item.action).toBe('review')
+    expect(item.explanation).toContain('no usable review comment')
+  })
+
+  it('routes fix_failed markers back to fix with the current review comment', () => {
+    const freshReview = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
+    ].join('\n')
+    const fixFailed = '<!-- crosscheck: fix_failed -->'
+
+    const [item] = buildKickassPlan([
+      makeScannedPR({
+        comments: [
+          { id: 10, body: freshReview, createdAt: '2026-05-01T01:00:00Z' },
+          { id: 11, body: fixFailed, createdAt: '2026-05-01T02:00:00Z' },
+        ],
+      }),
+    ], config)
+
+    expect(item.action).toBe('fix')
+    expect(item.transition).toBe('FIX_FAILED -> Fix')
+    expect(item.reviewComment?.id).toBe(10)
+  })
+
+  it('ignores no_diff_change markers and keeps the prior actionable state', () => {
+    const freshReview = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
+    ].join('\n')
+    const noDiffChange = '<!-- crosscheck: no_diff_change prev_sha=old9999 sha=abc1234 -->'
+
+    const [item] = buildKickassPlan([
+      makeScannedPR({
+        comments: [
+          { id: 10, body: freshReview, createdAt: '2026-05-01T01:00:00Z' },
+          { id: 11, body: noDiffChange, createdAt: '2026-05-01T02:00:00Z' },
+        ],
+      }),
+    ], config)
+
+    expect(item.action).toBe('fix')
+    expect(item.reviewComment?.id).toBe(10)
+  })
+
   it('downgrades stale APPROVE annotations to review instead of merge', () => {
     const staleApprove = [
       '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=old9999 -->',
@@ -132,6 +188,19 @@ describe('buildKickassPlan', () => {
     expect(item.action).toBe('review')
     expect(item.transition).toBe('PR -> CR')
     expect(item.explanation).toContain('old head SHA')
+  })
+})
+
+describe('formatExecutionSummary', () => {
+  it('summarizes executed and skipped counts', () => {
+    expect(formatExecutionSummary({
+      executed: 2,
+      skipped: [
+        { pr: 'acme/api#1', reason: 'fork_pr' },
+        { pr: 'acme/api#2', reason: 'fork_pr' },
+        { pr: 'acme/api#3', reason: 'stale_signature' },
+      ],
+    })).toBe('Executed 2; skipped 3 (fork_pr:2, stale_signature:1)')
   })
 })
 

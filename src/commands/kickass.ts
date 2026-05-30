@@ -1,4 +1,5 @@
 import chalk from 'chalk'
+import { createHash } from 'crypto'
 import { createGithubClient, listOpenPRs, listOrgRepos, listPRComments, type PRComment } from '../github/client.js'
 import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { mergePullRequest } from '../github/merge.js'
@@ -80,12 +81,14 @@ export interface KickassDeps {
 
 interface CacheEntry {
   writtenAt: number
+  key: string
   result: KickassScanResult
 }
 
 interface ParsedAnnotation {
   type?: string
   verdict?: 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
+  reviewer?: string
   sha?: string
 }
 
@@ -118,7 +121,7 @@ function parseAnnotation(body: string): ParsedAnnotation | null {
   const parsed: ParsedAnnotation = {}
   const attrs = last[1].trim().split(/\s+/)
   for (const attr of attrs) {
-    if (attr === 'fix_applied' || attr === 'conflict_resolved') {
+    if (!attr.includes('=')) {
       parsed.type = attr
       continue
     }
@@ -126,6 +129,7 @@ function parseAnnotation(body: string): ParsedAnnotation | null {
     if (!key || value === undefined) continue
     if (key === 'type') parsed.type = value
     if (key === 'verdict') parsed.verdict = normalizeVerdict(value)
+    if (key === 'reviewer') parsed.reviewer = value
     if (key === 'sha') parsed.sha = value
   }
   return parsed
@@ -140,7 +144,9 @@ function findLatestFreshReviewComment(pr: KickassScannedPR): FreshReviewComment 
   for (const comment of comments) {
     const annotation = parseAnnotation(comment.body)
     if (!annotation) continue
-    if (annotation.type !== 'review' && annotation.type !== undefined) continue
+    const isReview = annotation.type === 'review'
+      || (annotation.type === undefined && annotation.reviewer !== undefined && annotation.verdict !== undefined)
+    if (!isReview) continue
     if (annotation.sha !== pr.headSha) continue
     return { id: comment.id, body: comment.body }
   }
@@ -151,6 +157,7 @@ function latestCrosscheckState(pr: KickassScannedPR): ParsedAnnotation | null {
   const comments = [...pr.comments].reverse()
   for (const comment of comments) {
     const annotation = parseAnnotation(comment.body)
+    if (annotation?.type === 'no_diff_change') continue
     if (annotation) return annotation
   }
   return null
@@ -172,6 +179,25 @@ function actionForPR(pr: KickassScannedPR, config: Config): Omit<KickassPlanItem
       transition: latest.type === 'fix_applied' ? 'FIX -> Recheck' : 'RECHECK -> Recheck',
       reviewer: pr.reviewer ?? undefined,
       reviewComment: findLatestFreshReviewComment(pr) ?? undefined,
+    }
+  }
+
+  if (latest.type === 'fix_failed') {
+    const reviewComment = findLatestFreshReviewComment(pr)
+    if (!reviewComment) {
+      return {
+        action: 'review',
+        transition: 'PR -> CR',
+        reviewer: pr.reviewer ?? undefined,
+        explanation: 'downgraded from Fix: fix_failed marker has no usable review comment for current head SHA',
+      }
+    }
+    return {
+      action: 'fix',
+      transition: 'FIX_FAILED -> Fix',
+      fixer: pr.origin === 'claude' || pr.origin === 'codex' ? pr.origin : 'auto',
+      delivery: config.post_review.auto_fix.delivery.mode,
+      reviewComment,
     }
   }
 
@@ -277,6 +303,38 @@ export function formatPreflightSummary(items: KickassPlanItem[]): string {
   return lines.join('\n').trimEnd()
 }
 
+export function formatExecutionSummary(result: KickassExecutionResult): string {
+  const skipped = result.skipped.length
+  if (result.executed === 0 && skipped === 0) return chalk.dim('No mutations performed.')
+  const parts = [`Executed ${result.executed}`]
+  if (skipped > 0) {
+    const reasons = new Map<string, number>()
+    for (const item of result.skipped) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1)
+    const reasonSummary = [...reasons.entries()]
+      .map(([reason, count]) => `${reason}:${count}`)
+      .join(', ')
+    parts.push(`skipped ${skipped} (${reasonSummary})`)
+  } else {
+    parts.push('skipped 0')
+  }
+  return parts.join('; ')
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function cacheKeyForScan(config: Config, token: string): string {
+  return createHash('sha256')
+    .update(stableStringify({ config, tokenHash: createHash('sha256').update(token).digest('hex') }))
+    .digest('hex')
+}
+
 async function defaultConfirm(items: KickassPlanItem[]): Promise<boolean> {
   if (!process.stdin.isTTY || items.length === 0) return false
   process.stdout.write(`\nProceed with ${items.length} mutation${items.length === 1 ? '' : 's'}? [y/N] `)
@@ -307,7 +365,8 @@ async function expandScopes(scopes: BacktraceScope[], token: string): Promise<Ar
 
 export async function scanKickassPRs(config: Config, token: string, force: boolean): Promise<KickassScanResult> {
   const now = Date.now()
-  if (!force && scanCache && now - scanCache.writtenAt < SCAN_CACHE_MS) {
+  const cacheKey = cacheKeyForScan(config, token)
+  if (!force && scanCache && scanCache.key === cacheKey && now - scanCache.writtenAt < SCAN_CACHE_MS) {
     return scanCache.result
   }
 
@@ -360,7 +419,7 @@ export async function scanKickassPRs(config: Config, token: string, force: boole
   }))
 
   const result: KickassScanResult = { candidates: scanned.filter(pr => pr !== null) }
-  scanCache = { writtenAt: now, result }
+  scanCache = { writtenAt: now, key: cacheKey, result }
   return result
 }
 
@@ -467,10 +526,12 @@ export async function runKickass(opts: KickassOpts = {}, deps: KickassDeps = {})
 
   if (selected.length === 0) return { executed: 0, skipped: [] }
   if (opts.dryRun) {
-    return {
+    const result = {
       executed: 0,
       skipped: selected.map(item => ({ pr: prLabel(item.pr), reason: 'dry_run' })),
     }
+    log(formatExecutionSummary(result))
+    return result
   }
 
   const confirm = deps.confirm ?? defaultConfirm
@@ -480,11 +541,13 @@ export async function runKickass(opts: KickassOpts = {}, deps: KickassDeps = {})
   }
 
   try {
-    return await executeKickassPlan(selected, {
+    const result = await executeKickassPlan(selected, {
       getCurrentHead: deps.getCurrentHead ?? defaultGetCurrentHead(token),
       run: deps.run ?? ((item: KickassPlanItem, steps: string) => defaultRun(item, steps, opts.config)),
       merge: deps.merge ?? ((item: KickassPlanItem) => defaultMerge(item, token)),
     })
+    log(formatExecutionSummary(result))
+    return result
   } catch (err) {
     logError({ command: 'kickass', phase: 'execute' }, err)
     console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))

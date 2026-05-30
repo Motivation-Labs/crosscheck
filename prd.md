@@ -641,7 +641,7 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `renderPRSlot()` with `crTokens: 1200` and `phase: 'reviewed'` includes `(1.2K)` after the verdict badge.
     - `renderPRSlot()` with `crTokens: undefined` renders no suffix.
 
-- [ ] **`crosscheck scan` + `crosscheck kickass` — operator queue for stale PRs across monitored repos** — add a CLI control plane that scans every open PR in the configured monitor scope, summarizes where each PR is in the crosscheck workflow, separates stale from non-stale work, and lets an operator advance selected stale PRs to the next action.
+- [x] **`crosscheck scan` + `crosscheck kickass` — operator queue for stale PRs across monitored repos** — add a CLI control plane that scans every open PR in the configured monitor scope, summarizes where each PR is in the crosscheck workflow, separates stale from non-stale work, and lets an operator advance selected stale PRs to the next action.
   - **User:** A repo owner or team lead who wants one command to answer "which open PRs need crosscheck attention right now?" across `orgs`, `users`, and `repos`, then safely push those PRs forward without opening each GitHub tab manually.
   - **Public CLI API changes:**
     - `crosscheck scan [--tidy] [--force] [--stale-after <duration>] [--json]`

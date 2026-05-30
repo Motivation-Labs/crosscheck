@@ -12,7 +12,7 @@ describe('parseDurationMs', () => {
     expect(() => parseDurationMs('30')).toThrow(/Invalid duration/)
     expect(() => parseDurationMs('2w')).toThrow(/Invalid duration/)
     expect(() => parseDurationMs('abc')).toThrow(/Invalid duration/)
-    expect(() => parseDurationMs('0m')).toThrow(/Invalid duration/)
+    expect(() => parseDurationMs('0m')).toThrow(/positive, non-zero/)
   })
 })
 

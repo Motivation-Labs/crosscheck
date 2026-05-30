@@ -123,7 +123,8 @@ export async function runScan(opts: ScanOptions): Promise<void> {
       repos: config.repos,
       allowed_authors: config.routing.allowed_authors,
     })
-    const cacheKey = buildScanCacheKey({ configPath, monitorScopeHash, githubLogin, staleAfterMs, packageVersion })
+    const configHash = buildMonitorScopeHash(config)
+    const cacheKey = buildScanCacheKey({ configPath, monitorScopeHash, configHash, githubLogin, staleAfterMs, packageVersion })
     const cached = readScanCache<ScanPayload>(cacheKey, { force: opts.force })
 
     const payload = cached ?? await collectScanPayload(config, staleAfterMs, githubLogin)

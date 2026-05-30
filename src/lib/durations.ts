@@ -5,7 +5,7 @@ const DAY_MS = 24 * HOUR_MS
 export function parseDurationMs(value: string): number {
   const match = value.trim().match(/^([1-9]\d*)([mhd])$/)
   if (!match) {
-    throw new Error(`Invalid duration "${value}". Use formats like 30m, 2h, or 1d.`)
+    throw new Error(`Invalid duration "${value}". Use positive, non-zero formats like 30m, 2h, or 1d.`)
   }
 
   const amount = Number(match[1])

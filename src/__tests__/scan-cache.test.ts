@@ -20,6 +20,7 @@ describe('scan cache', () => {
   const key = buildScanCacheKey({
     configPath: '/repo/crosscheck.config.yml',
     monitorScopeHash: 'scope',
+    configHash: 'config',
     githubLogin: 'alice',
     staleAfterMs: 24 * 60 * 60 * 1000,
     packageVersion: '0.9.0',
@@ -61,5 +62,18 @@ describe('scan cache', () => {
     writeScanCache(key, { rows: [1] }, { cachePath, now: 1_000 })
 
     expect(statSync(cachePath).mode & 0o777).toBe(0o600)
+  })
+
+  it('includes full config content in the cache key', () => {
+    const changedConfigKey = buildScanCacheKey({
+      configPath: '/repo/crosscheck.config.yml',
+      monitorScopeHash: 'scope',
+      configHash: 'changed-config',
+      githubLogin: 'alice',
+      staleAfterMs: 24 * 60 * 60 * 1000,
+      packageVersion: '0.9.0',
+    })
+
+    expect(changedConfigKey).not.toBe(key)
   })
 })

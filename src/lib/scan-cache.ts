@@ -8,6 +8,7 @@ export const SCAN_CACHE_TTL_MS = 60 * 1000
 export interface ScanCacheKeyInput {
   configPath: string | null
   monitorScopeHash: string
+  configHash: string
   githubLogin: string | null
   staleAfterMs: number
   packageVersion: string
@@ -62,7 +63,7 @@ export function writeScanCache<T>(key: string, data: T, options: ScanCacheOption
   if (options.partialFailure === true) return false
 
   const path = options.cachePath ?? getScanCachePath()
-  mkdirSync(dirname(path), { recursive: true })
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const envelope: ScanCacheEnvelope<T> = {
     key,
     createdAt: new Date(options.now ?? Date.now()).toISOString(),
@@ -83,5 +84,8 @@ function stableStringify(value: unknown): string {
     const record = value as Record<string, unknown>
     return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
   }
+  if (typeof value === 'number' && !Number.isFinite(value)) return JSON.stringify(`__number:${String(value)}__`)
+  if (typeof value === 'undefined') return '"__undefined__"'
+  if (typeof value === 'symbol') return JSON.stringify(`__symbol:${value.description ?? ''}__`)
   return JSON.stringify(value)
 }

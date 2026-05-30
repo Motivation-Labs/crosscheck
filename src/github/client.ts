@@ -195,7 +195,7 @@ export interface OpenPR {
   createdAt: string
 }
 
-export interface ScanOpenPR extends OpenPR {
+export interface ScanOpenPR extends Omit<OpenPR, 'body'> {
   updatedAt: string
   url: string
 }
@@ -328,7 +328,6 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
       user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
-      body: string | null
       created_at: string
       updated_at: string
       html_url: string
@@ -347,7 +346,6 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
-        body: pr.body,
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
         url: pr.html_url,

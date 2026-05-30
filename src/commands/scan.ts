@@ -483,13 +483,14 @@ function maxTimestamp(values: Array<string | null | undefined>): string | null {
 
 function renderScan(payload: ScanPayload, opts: { cacheHit: boolean }): void {
   const rows = payload.rows
+  const now = Date.parse(payload.generatedAt)
   console.log(chalk.bold(`\ncrosscheck scan`) + chalk.dim(`  stale after ${formatDuration(payload.staleAfterMs)}${opts.cacheHit ? ' - cached' : ''}`))
 
   if (rows.length === 0) {
     console.log(chalk.dim('\n  No open PRs in scope.\n'))
   } else {
-    renderFreshnessGroup('STALE', rows.filter(row => row.isStale), Date.now())
-    renderFreshnessGroup('NOT STALE', rows.filter(row => !row.isStale), Date.now())
+    renderFreshnessGroup('STALE', rows.filter(row => row.isStale), now)
+    renderFreshnessGroup('NOT STALE', rows.filter(row => !row.isStale), now)
   }
 
   if (payload.skippedRepos.length > 0) {

@@ -93,6 +93,7 @@ describe('scan state helpers', () => {
       reviewer: 'claude',
       verdict: 'APPROVE',
       type: 'recheck',
+      isRecheck: true,
     }
 
     expect(buildProgressSummary(annotation, emptyLogSummary())).toBe('PR -> recheck(APPROVE)')

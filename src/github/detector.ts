@@ -98,13 +98,6 @@ export function detectPROrigin(prBody: string, config: Config, author?: string):
     ?? 'human'
 }
 
-export function shouldReview(origin: PROrigin, config: Config): boolean {
-  if (config.mode === 'single-vendor') return true
-  if (origin === 'claude' || origin === 'codex') return true
-  // human origin: reviewable when fallback_reviewer is configured
-  return config.routing.fallback_reviewer !== null
-}
-
 async function resolveFallback(config: Config): Promise<'claude' | 'codex' | null> {
   const fb = config.routing.fallback_reviewer
   if (fb === null) return null

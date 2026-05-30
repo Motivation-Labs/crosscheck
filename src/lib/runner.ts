@@ -1,4 +1,5 @@
 import { execSync, execFileSync } from 'child_process'
+import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import chalk from 'chalk'
@@ -10,8 +11,13 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
-import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
+import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
+import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
+import { buildCommitTrailers } from '../lib/annotation.js'
+import { resolveClaudeModel } from '../lib/review-models.js'
+import { buildStepIdentityFields } from '../lib/event-fields.js'
+import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 
@@ -59,6 +65,55 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
     } catch {
       return 0
     }
+  }
+}
+
+// Subset of WorkflowContext + accumulators the workflow_complete event needs.
+// Kept narrow so this can be tested without constructing a full WorkflowContext.
+export interface WorkflowCompleteInputs {
+  owner: string
+  repoName: string
+  prNumber: number
+  workflowId: string
+  workflowStart: number
+  stepsRun: string[]
+  results: Record<string, StepResult>
+  workflowFailed: boolean
+  round?: number
+  now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
+}
+
+// Reasons workflow can end. Today's runner emits only 'completed' and 'error';
+// 'progress_gate' arrives with the single-gate work (PR-C of the redesign) and
+// 'max_iterations' with the loop primitive (PR-D). 'manual_abort' is reserved
+// for SIGINT/SIGTERM-driven exits — the current signal handler bypasses the
+// finally so it's not wired up here yet.
+export type WorkflowEndedReason =
+  | 'completed'
+  | 'error'
+  | 'progress_gate'
+  | 'max_iterations'
+  | 'manual_abort'
+
+export function buildWorkflowCompleteEvent(
+  inputs: WorkflowCompleteInputs,
+): Record<string, unknown> {
+  const lastVerdict = Object.values(inputs.results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
+  const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
+  const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
+  const now = inputs.now ?? Date.now()
+  return {
+    level: inputs.workflowFailed ? 'warn' : 'info',
+    event: 'workflow_complete',
+    repo: `${inputs.owner}/${inputs.repoName}`,
+    pr: inputs.prNumber,
+    workflow_id: inputs.workflowId,
+    steps_run: inputs.stepsRun,
+    last_step: lastStep,
+    last_verdict: lastVerdict,
+    ended_reason: endedReason,
+    total_duration_ms: now - inputs.workflowStart,
+    ...(inputs.round !== undefined && { round: inputs.round }),
   }
 }
 
@@ -121,6 +176,19 @@ export interface WorkflowContext {
   // When smart-switch is active, route to this vendor if the step's configured
   // reviewer resolves to a disabled vendor rather than skipping the step.
   smartSwitchFallback?: 'claude' | 'codex'
+  // Caller-supplied array the runner appends to whenever it sets a remote
+  // pending status on a newly pushed sha (currently only from conflict-resolve).
+  // Lets the command-layer signal handler release those shas if SIGINT/SIGTERM
+  // fires mid-workflow — otherwise process.exit bypasses the runner's finally
+  // and the pending status is leaked indefinitely on GitHub.
+  pushedShas?: string[]
+  // Optional review comment selected by the caller. Used by operator flows that
+  // already scanned the PR and want fix-only runs to avoid reselecting a
+  // different comment after dispatch.
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
 }
 
 export interface WorkflowResult {
@@ -160,8 +228,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
   const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
+  // SHAs the workflow pushed AND set a `crosscheck/review` pending status on.
+  // Each one must be released in the finally below — otherwise the pending
+  // status would stay forever on GitHub (the 15-min staleness check is
+  // internal to crosscheck's lock detection and does not clear the status,
+  // which can block PRs in repos where `crosscheck/review` is required).
+  //
+  // Use the caller's array if provided so the command-layer signal handler
+  // can iterate the same list and release these shas if SIGINT/SIGTERM fires
+  // mid-workflow (process.exit there bypasses our finally below).
+  const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
+  let workflowFailed = false
 
+  // workflow_complete event accumulators. Each step the runner dispatches is
+  // recorded in stepsRun (including ones that get logged as step_skipped —
+  // the event records the workflow's declared shape, the per-step skip
+  // reasons live in their own step_skipped log entries).
+  const workflowId = randomUUID()
+  const workflowStart = Date.now()
+  const stepsRun: string[] = []
+
+  try {
   for (const step of steps) {
+    stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
     if (exceedsMaxRounds(effectiveType, step.type, step.max_rounds, ctx.round)) {
@@ -192,28 +281,34 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...(ctx.round !== undefined && { round: ctx.round }) })
+      const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
+      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
       onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+      // Per-step start timestamp. The shared ctx.reviewStart is set once at
+      // workflow start and never reset, so a recheck's duration_ms would
+      // otherwise include the prior review and fix wall time.
+      const stepStart = Date.now()
       let rawReview: string
       let tokensUsed: number | undefined
+      let model = 'default'
       if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
       } else {
-        ;({ review: rawReview, tokensUsed } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
       if (verdict === null) {
-        fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, output_length: rawReview.length })
+        fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
       const commentBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, verdict, duration_ms: Date.now() - ctx.reviewStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -239,7 +334,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -264,9 +359,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // Find the most recent review result that has a comment body
+      // Find the most recent review result that has a comment body. A fix-only
+      // invocation (used by kickass) has no in-memory review result, so seed it
+      // from the latest fresh crosscheck review comment on GitHub.
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
-      if (!reviewResult?.commentBody) { skipFix('no_review_comment'); continue }
+      let reviewCommentBody = reviewResult?.commentBody
+      let reviewCommentId = reviewResult?.commentId
+      if (!reviewCommentBody) {
+        reviewCommentBody = ctx.initialReviewComment?.body
+        reviewCommentId = ctx.initialReviewComment?.id
+      }
+      if (!reviewCommentBody) {
+        const latestReviewComment = await getLastCrossCheckReviewComment(owner, repoName, prNumber, token)
+        reviewCommentBody = latestReviewComment?.body
+        reviewCommentId = latestReviewComment?.id
+      }
+      if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
@@ -275,6 +383,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Codex fix not yet implemented — skip gracefully
       if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
+      const fixModel = resolveClaudeModel(config.quality)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
@@ -288,13 +397,16 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
+      // Per-step start timestamp covers attempt + retry + retry-delay wall time
+      // (the user perceives the whole interval as "the fix step").
+      const fixStepStart = Date.now()
       let appliedCount = 0
       let fixTokensUsed: number | undefined
       let fixErr: unknown = undefined
 
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config,
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
@@ -309,7 +421,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
         try {
           ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config,
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
           ))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
@@ -348,8 +460,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (deliveryMode === 'commit') {
         execSync('git add -A', { cwd: tmpDir })
-        execSync(
-          `git commit -m "[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code"`,
+        execFileSync(
+          'git',
+          [
+            'commit',
+            '-m',
+            `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code`,
+            '-m',
+            buildCommitTrailers({ reviewer: vendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+          ],
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -359,7 +478,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         })
         ctx.crosscheckShas.add(newSha)
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
+
+        // Post a summary comment so the silent commit push is visible on the timeline
+        // as a comment card. Best-effort — a failure here must not fail the run.
+        try {
+          const octokit = createGithubClient(token)
+          const body = buildFixAppliedCommentBody({
+            owner, repo: repoName, sha: newSha, appliedCount,
+            reviewCommentId,
+          })
+          await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+          fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'fix_applied_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+        }
+
         results[step.name] = { applied_count: appliedCount }
 
       } else if (deliveryMode === 'pull_request') {
@@ -367,8 +501,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         const fixBranch = `fix/cr-${prNumber}-review-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
         execSync('git add -A', { cwd: tmpDir })
-        execSync(
-          `git commit -m "[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code"`,
+        execFileSync(
+          'git',
+          [
+            'commit',
+            '-m',
+            `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code`,
+            '-m',
+            buildCommitTrailers({ reviewer: vendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+          ],
           { cwd: tmpDir },
         )
         const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -396,7 +537,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           } catch { /* label may not exist in this repo — skip */ }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -409,7 +550,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
         results[step.name] = { applied_count: appliedCount }
       }
 
@@ -462,6 +603,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
+      const conflictResolveModel = resolveClaudeModel(config.quality)
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }
@@ -475,13 +617,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       onPhaseChange(`${vendor} resolving conflicts...`, { phase: 'fixing' })
+      // Per-step start timestamp for conflict-resolve wall time.
+      const conflictResolveStepStart = Date.now()
       let appliedCount = 0
       let resolvedPaths: string[] = []
       let resolveTokensUsed: number | undefined
 
       try {
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '',
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
@@ -550,8 +694,15 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      execSync(
-        `git commit -m "[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code"`,
+      execFileSync(
+        'git',
+        [
+          'commit',
+          '-m',
+          `[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code`,
+          '-m',
+          buildCommitTrailers({ reviewer: vendor, model: conflictResolveModel, step: 'conflict-resolve', service: 'crosscheck' }),
+        ],
         { cwd: tmpDir },
       )
       const newSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
@@ -560,12 +711,77 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
       })
       ctx.crosscheckShas.add(newSha)
+      // Move the in-flight pending status to newSha so watchers on other
+      // machines (which don't share crosscheckShas) see the PR as locked when
+      // they receive the synchronize event and skip duplicate review.
+      // Track the sha so the finally below releases the pending status —
+      // without that release the status would stay pending forever on GitHub.
+      try {
+        const lockOctokit = createGithubClient(token)
+        await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+        pushedShasNeedingRelease.push(newSha)
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
+      }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
-      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, duration_ms: Date.now() - conflictResolveStepStart })
+
+      // Post a summary comment so the silent merge-commit push is visible on the
+      // timeline as a comment card. Best-effort — a failure here must not fail the run.
+      // Prefer the resolver's actual rewrite set; fall back to the originally-conflicted
+      // list if the resolver didn't surface paths.
+      try {
+        const octokit = createGithubClient(token)
+        const body = buildConflictResolvedCommentBody({
+          owner, repo: repoName, sha: newSha,
+          conflictCount: conflictedFiles.length,
+          files: resolvedPaths.length > 0 ? resolvedPaths : conflictedFiles,
+        })
+        await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
+        fileLog({ level: 'info', event: 'conflict_resolved_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })
+      } catch (err) {
+        fileLog({ level: 'warn', event: 'conflict_resolved_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
+      }
+
       results[step.name] = { applied_count: appliedCount }
     }
   }
 
   const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
   return { verdict: verdict ?? null }
+  } catch (err) {
+    workflowFailed = true
+    throw err
+  } finally {
+    if (pushedShasNeedingRelease.length > 0) {
+      const lockOctokit = createGithubClient(token)
+      const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
+      // Drain via shift() so each released sha is synchronously removed from
+      // the shared array. The command-layer SIGINT/SIGTERM handler iterates
+      // the same array — if a late signal arrives after this finally has
+      // already released a sha, the handler won't see it and won't overwrite
+      // the released status with 'failure'. Atomic shift gives clean per-sha
+      // ownership transfer even when both loops are draining concurrently.
+      while (pushedShasNeedingRelease.length > 0) {
+        const s = pushedShasNeedingRelease.shift()!
+        try {
+          await releaseRemoteLock(lockOctokit, owner, repoName, s, outcome)
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'pushed_sha_release_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: s, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+    }
+
+    // workflow_complete fires exactly once per runWorkflow invocation, in the
+    // finally so it lands on both happy-path returns AND on caught exceptions.
+    // Closes the "no_followup vs crash" log ambiguity called out in
+    // prd.md:1145 §B (the analysis of 411 review_complete events on
+    // 2026-05-28 found 17.2% of initial reviews with no follow-up event —
+    // indistinguishable from a session crash without this event).
+    fileLog(buildWorkflowCompleteEvent({
+      owner, repoName, prNumber,
+      workflowId, workflowStart, stepsRun, results, workflowFailed,
+      round: ctx.round,
+    }) as Parameters<typeof fileLog>[0])
+  }
 }

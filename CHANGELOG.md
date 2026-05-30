@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] — 2026-05-30
+
+### Changed
+
+- **Annotation contract v2** — review comments now embed structured metadata: `model=`, `type=`, `round=`, and `service=` fields alongside the existing `origin=`, `reviewer=`, and `verdict=`. New comments may append `sha=` with the PR head that was reviewed. Consumers parsing the `<!-- crosscheck: ... -->` tag must treat unknown field names as forward-compatible additions. The stable field prefix is `origin reviewer model type round verdict service`.
+- **`isFreshReviewComment` delegates to annotation parser** — classification now reads the footer `type=` field directly; unknown explicit types are treated as non-reviews rather than defaulting to review. Pre-`type=` era annotations fall back to the header/recheck-prefix heuristic for backward compatibility.
+- **Model-aware review headers** — `### Code Review by 🤖 Claude Code` now includes the resolved model in parentheses when a non-default model is used (e.g. `### Code Review by 🤖 Claude Code (Opus 4.7)`).
+- **Commit trailers** — fix and conflict-resolve commits now include `Crosscheck-Reviewer`, `Crosscheck-Model`, `Crosscheck-Step`, and `Crosscheck-Service` git trailers for provenance.
+
+### Fixed
+
+- **`origin` field in `crosscheck review` annotations** — the detected PR origin (`claude`/`codex`/`human`) is now correctly threaded into the posted annotation; previously `origin=human` was always emitted regardless of detection result.
+- **Haiku model ID** — restored the canonical dated alias `claude-haiku-4-5-20251001` for the `fast` quality tier.
+
+---
+
 ## [0.2.0] — 2026-05-08
 
 ### Added

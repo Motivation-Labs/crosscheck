@@ -1,8 +1,29 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
+import { modelDisplayName } from '../lib/review-models.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
+}
+
+async function readGithubErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = await res.json() as { message?: unknown }
+    if (typeof body.message === 'string' && body.message.trim().length > 0) return body.message
+  } catch {
+    // Fall back to status text when GitHub returns a non-JSON error body.
+  }
+  return res.statusText || `HTTP ${res.status}`
+}
+
+async function throwGithubRequestError(res: Response, context: string): Promise<never> {
+  const message = await readGithubErrorMessage(res)
+  throw new Error(`GitHub API request failed (${context}) [${res.status}]: ${message}`)
+}
+
+function repoPath(owner: string, repo: string): string {
+  return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
 }
 
 export function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
@@ -144,9 +165,10 @@ export async function listUserRepos(
   while (true) {
     const url = isSelf
       ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
-      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+      : `https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner`
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list user repos for ${username}`)
     const data = await res.json() as Array<{ name: string; owner: { login: string }; archived: boolean }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -166,10 +188,11 @@ export async function listOrgRepos(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      `https://api.github.com/orgs/${encodeURIComponent(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) throw new Error(`Failed to list org repos [${res.status}]: ${res.statusText} (GitHub API request failed)`)
     const data = await res.json() as Array<{ name: string; archived: boolean; pushed_at: string | null }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -193,6 +216,26 @@ export interface OpenPR {
   baseRef: string
   body: string | null
   createdAt: string
+  updatedAt: string
+  url?: string
+}
+
+export interface ScanOpenPR extends Omit<OpenPR, 'body'> {
+  updatedAt: string
+  url: string
+}
+
+export interface ScanIssueComment {
+  id: number
+  author: string
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ScanRepo {
+  owner: string
+  name: string
 }
 
 export async function listOpenPRs(
@@ -204,32 +247,439 @@ export async function listOpenPRs(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) {
+      const message = await readGithubErrorMessage(res)
+      throw new Error(`Failed to list open PRs for ${owner}/${repo} page ${page} [${res.status}]: ${message}`)
+    }
     const data = await res.json() as Array<{
       number: number
       title: string
-      user: { login: string }
+      user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
       created_at: string
+      updated_at: string
+      html_url: string
     }>
     if (data.length === 0) break
     for (const pr of data) {
       results.push({
         number: pr.number,
         title: pr.title,
-        author: pr.user.login,
+        author: pr.user?.login ?? 'ghost',
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
         baseRef: pr.base.ref,
         body: pr.body,
         createdAt: pr.created_at,
+        updatedAt: pr.updated_at,
+        url: pr.html_url,
       })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+async function githubJson<T>(url: string, token: string, label: string): Promise<T> {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) {
+    let message = res.statusText
+    try {
+      const data = await res.json() as { message?: string }
+      message = data.message ?? message
+    } catch { /* keep status text */ }
+    const context = res.status === 403 || res.status === 429
+      ? 'GitHub rate limit or secondary rate limit'
+      : 'GitHub API request'
+    throw new Error(`${label} failed [${res.status}]: ${context}: ${message}`)
+  }
+  return await res.json() as T
+}
+
+export async function listOrgReposForScan(org: string, token: string): Promise<ScanRepo[]> {
+  const results: ScanRepo[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{ name: string; archived: boolean }>>(
+      `https://api.github.com/orgs/${encodeURIComponent(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      token,
+      `List repos for org ${org}`,
+    )
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived) results.push({ owner: org, name: repo.name })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listUserReposForScan(username: string, token: string, isSelf: boolean): Promise<ScanRepo[]> {
+  const results: ScanRepo[] = []
+  let page = 1
+  while (true) {
+    const url = isSelf
+      ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
+      : `https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner`
+    const data = await githubJson<Array<{ name: string; owner: { login: string }; archived: boolean }>>(
+      url,
+      token,
+      `List repos for user ${username}`,
+    )
+    if (data.length === 0) break
+    for (const repo of data) {
+      if (!repo.archived && repo.owner.login.toLowerCase() === username.toLowerCase()) {
+        results.push({ owner: repo.owner.login, name: repo.name })
+      }
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listOpenPRsForScan(owner: string, repo: string, token: string): Promise<ScanOpenPR[]> {
+  const results: ScanOpenPR[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{
+      number: number
+      title: string
+      user: { login: string } | null
+      head: { sha: string; ref: string; repo: { full_name: string } | null }
+      base: { ref: string }
+      created_at: string
+      updated_at: string
+      html_url: string
+    }>>(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
+      token,
+      `List open PRs for ${owner}/${repo}`,
+    )
+    if (data.length === 0) break
+    for (const pr of data) {
+      results.push({
+        number: pr.number,
+        title: pr.title,
+        author: pr.user?.login ?? 'unknown',
+        headSha: pr.head.sha,
+        headRef: pr.head.ref,
+        headRepo: pr.head.repo?.full_name ?? null,
+        baseRef: pr.base.ref,
+        createdAt: pr.created_at,
+        updatedAt: pr.updated_at,
+        url: pr.html_url,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listIssueCommentsForScan(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<ScanIssueComment[]> {
+  const results: ScanIssueComment[] = []
+  let page = 1
+  while (true) {
+    const data = await githubJson<Array<{
+      id: number
+      user: { login: string } | null
+      body: string | null
+      created_at: string
+      updated_at: string
+    }>>(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}&sort=created&direction=asc`,
+      token,
+      `List comments for ${owner}/${repo}#${issueNumber}`,
+    )
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({
+        id: comment.id,
+        author: comment.user?.login ?? 'unknown',
+        body: comment.body ?? '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface PRComment {
+  id: number
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export async function listPRComments(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PRComment[]> {
+  const results: PRComment[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) throw new Error(`Failed to list PR comments [${res.status}]: ${res.statusText}`)
+    const data = await res.json() as Array<{ id: number; body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({
+        id: comment.id,
+        body: comment.body,
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+      })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface PRCommitDetail {
+  sha: string
+  committedAt: string
+}
+
+export async function listPRCommitsDetailed(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<PRCommitDetail[]> {
+  const results: PRCommitDetail[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) throw new Error(`Failed to list PR commits [${res.status}]: ${res.statusText}`)
+    const data = await res.json() as Array<{ sha: string; commit: { committer: { date: string | null }; author: { date: string | null } } }>
+    if (data.length === 0) break
+    for (const commit of data) {
+      const committedAt = commit.commit.committer.date ?? commit.commit.author.date
+      if (committedAt) results.push({ sha: commit.sha, committedAt })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface CommitStatusDetail {
+  context: string
+  state: string
+  updatedAt: string
+}
+
+export async function listCommitStatuses(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<CommitStatusDetail[]> {
+  const results: CommitStatusDetail[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${sha}/statuses?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (!res.ok) {
+      if (page === 1) throw new Error(`Failed to list commit statuses [${res.status}]: ${res.statusText}`)
+      break
+    }
+    const data = await res.json() as Array<{ context: string; state: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const status of data) {
+      results.push({ context: status.context, state: status.state, updatedAt: status.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export interface GitHubCommentActivity {
+  body: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface GitHubCommitActivity {
+  sha: string
+  committedAt: string
+}
+
+export interface GitHubTimestampActivity {
+  state?: string
+  name?: string
+  conclusion?: string | null
+  status?: string | null
+  updatedAt: string
+}
+
+export async function listIssueComments(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list issue comments for ${owner}/${repo}#${issueNumber}`)
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRReviewComments(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR review comments for ${owner}/${repo}#${pullNumber}`)
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRCommitActivity(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommitActivity[]> {
+  const results: GitHubCommitActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR commits for ${owner}/${repo}#${pullNumber}`)
+    const data = await res.json() as Array<{
+      sha: string
+      commit: { author: { date: string | null } | null; committer: { date: string | null } | null }
+    }>
+    if (data.length === 0) break
+    for (const commit of data) {
+      const committedAt = commit.commit.committer?.date ?? commit.commit.author?.date
+      if (committedAt) results.push({ sha: commit.sha, committedAt })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listCheckRuns(
+  owner: string,
+  repo: string,
+  ref: string,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list check runs for ${owner}/${repo}@${ref}`)
+    const data = await res.json() as {
+      check_runs: Array<{ name: string; status: string; conclusion: string | null; completed_at: string | null; started_at: string | null }>
+    }
+    if (data.check_runs.length === 0) break
+    for (const run of data.check_runs) {
+      const updatedAt = run.completed_at ?? run.started_at
+      if (updatedAt) results.push({ name: run.name, status: run.status, conclusion: run.conclusion, updatedAt })
+    }
+    if (data.check_runs.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listTimelineEvents(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/timeline?per_page=100&page=${page}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+        },
+      },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list timeline events for ${owner}/${repo}#${issueNumber}`)
+    const data = await res.json() as Array<{ event?: string; created_at?: string }>
+    if (data.length === 0) break
+    for (const event of data) {
+      if (event.created_at) results.push({ name: event.event, updatedAt: event.created_at })
     }
     if (data.length < 100) break
     page++
@@ -263,20 +713,61 @@ export async function prHasCrossCheckComment(
   return false
 }
 
-// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment (not recheck, not fix_failed).
+// True iff `body` is a fresh review comment that a recheck should link back to.
+// Classification cascade:
+//   1. Contract annotation parsed by annotation.ts with explicit type=review
+//      → review. Other explicit types are not reviews.
+//   2. Legacy annotations without type= fall through to the header check so
+//      pre-type rechecks are still excluded by the "> Recheck of" prefix.
+//   3. Bare summary/notification markers (`fix_failed`, `fix_applied`,
+//      `conflict_resolved`, `no_diff_change`, future bare markers) are not reviews.
+//   4. No annotation → legacy pre-annotation comment. Identify reviews by the
+//      canonical "### Code Review by" header, exclude rechecks by the
+//      "> Recheck of" prefix.
+export function isFreshReviewComment(body: string): boolean {
+  const fields = parseAnnotationFields(body)
+  const parsed = parseAnnotation(body)
+  if (parsed && fields?.has('type')) {
+    // Explicit type= field present — trust it directly.
+    return parsed.type === 'review'
+  }
+  if (parsed && !fields?.has('type')) {
+    // Pre-type-era annotation: type was defaulted to 'review', not stated.
+    // Fall through to the header/prefix check so legacy rechecks are excluded.
+  } else if (fields && !parsed) {
+    // Has an annotation tag but no origin+reviewer — bare summary marker.
+    return false
+  }
+  // No annotation (or pre-type fallthrough): use header + recheck-prefix heuristic.
+  return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
+}
+
+// Returns the GitHub comment ID of the most recent crosscheck REVIEW comment.
 // Used by recheck steps to link back to the original review that raised issues.
-// Matching rules (in priority order):
-//   1. New format: has <!-- crosscheck: type=review ... --> annotation
-//   2. Legacy format: has "### Code Review by" header but no recheck prefix (pre-annotation era)
-// Explicitly excluded: type=recheck annotations, fix_failed notifications.
+// Classification is delegated to `isFreshReviewComment` — annotation is the
+// source of truth, with a header-based fallback for pre-annotation comments.
 export async function getLastCrossCheckCommentId(
   owner: string,
   repo: string,
   prNumber: number,
   token: string,
 ): Promise<number | undefined> {
+  return (await getLastCrossCheckReviewComment(owner, repo, prNumber, token))?.id
+}
+
+export interface CrossCheckReviewComment {
+  id: number
+  body: string
+}
+
+export async function getLastCrossCheckReviewComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<CrossCheckReviewComment | undefined> {
   let page = 1
-  let lastId: number | undefined
+  let lastComment: CrossCheckReviewComment | undefined
   while (true) {
     const res = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
@@ -286,23 +777,14 @@ export async function getLastCrossCheckCommentId(
     const data = await res.json() as Array<{ id: number; body: string }>
     if (data.length === 0) break
     for (const comment of data) {
-      const body = comment.body
-      const annotationMatch = body.match(/<!-- crosscheck: ([^>]+) -->/)
-      if (annotationMatch) {
-        const attrs = annotationMatch[1]
-        // Skip fix_failed notifications and recheck-typed annotations
-        if (!attrs.includes('fix_failed') && !attrs.includes('type=recheck')) {
-          lastId = comment.id
-        }
-      } else if (body.includes('### Code Review by') && !body.startsWith('> Recheck of')) {
-        // Legacy: pre-annotation comment that is not a recheck
-        lastId = comment.id
+      if (isFreshReviewComment(comment.body)) {
+        lastComment = { id: comment.id, body: comment.body }
       }
     }
     if (data.length < 100) break
     page++
   }
-  return lastId
+  return lastComment
 }
 
 export async function getPRCommits(
@@ -326,6 +808,21 @@ export async function getPRCommits(
     page++
   }
   return results
+}
+
+export async function getCommitMessage(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<string | null> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return null
+  const data = await res.json() as { commit?: { message?: string } }
+  return data.commit?.message ?? null
 }
 
 export async function findOrgWebhook(org: string, url: string, token: string): Promise<number | null> {
@@ -400,6 +897,61 @@ export interface BrandOptions {
   reviewer_attribution?: string
 }
 
+export interface ReviewCommentBodyInput {
+  body: string
+  reviewer: string
+  brand?: BrandOptions
+  origin?: string
+  verdict?: string | null
+  replyToCommentId?: number
+  isRecheck?: boolean
+  model?: string
+  stepType?: CrosscheckStepType
+  round?: number
+  sha?: string
+}
+
+export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
+  const reviewer = input.reviewer
+  const brand = input.brand ?? {}
+  const model = input.model ?? 'default'
+  const round = input.round ?? 1
+  const stepType = input.stepType ?? (input.isRecheck ? 'recheck' : 'review')
+  const serviceName = brand.service_name || 'crosscheck'
+  const isClaude = reviewer === 'claude'
+  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
+  const modelDisplay = modelDisplayName(model)
+  const serviceSegment = serviceName !== 'crosscheck' ? ` · ${serviceName}` : ''
+  const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
+  const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
+
+  const defaultAttribution = isClaude
+    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
+    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+  const attribution = brand.reviewer_attribution || defaultAttribution
+  const footer = `\n\n---\n${attribution}`
+
+  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
+  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
+
+  const annotationTag = `\n\n${buildAnnotation({
+    origin: input.origin ?? 'human',
+    reviewer,
+    model,
+    type: stepType,
+    round,
+    verdict: input.verdict ?? 'UNKNOWN',
+    service: serviceName,
+    ...(input.sha && { sha: input.sha }),
+  })}`
+
+  const replyPrefix = input.replyToCommentId
+    ? `> Recheck of [original review](#issuecomment-${input.replyToCommentId})\n\n`
+    : ''
+
+  return customHeader + replyPrefix + header + input.body + footer + customFooter + annotationTag
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,
@@ -412,42 +964,36 @@ export async function postReviewComment(
   verdict?: string | null,
   replyToCommentId?: number,
   isRecheck?: boolean,
+  model = 'default',
+  stepType?: CrosscheckStepType,
+  round = 1,
+  sha?: string,
 ): Promise<number> {
-  const isClaude = reviewer === 'claude'
-  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
-  const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
-  const headerLabel = hasCustomName ? `${vendorLabel} — ${brand.service_name}` : vendorLabel
-  const header = `### Code Review by ${headerLabel}\n\n`
-
-  const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
-  const attribution = brand.reviewer_attribution || defaultAttribution
-  const footer = `\n\n---\n${attribution}`
-
-  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
-  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
-
-  // Annotation tag for Phase 2 step 4 detection — matches the documented contract:
-  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> -->
-  // origin= is always present so scanners matching "crosscheck: origin=" reliably find it.
-  // type= is explicit from isRecheck (not inferred from backlink resolution).
-  // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
-  const annotationParts = [`origin=${origin}`, `reviewer=${reviewer}`]
-  if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
-  annotationParts.push(`type=${isRecheck ? 'recheck' : 'review'}`)
-  const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
-
-  // Recheck: prepend a reference back to the original review so the thread is navigable
-  const replyPrefix = replyToCommentId
-    ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
-    : ''
 
   const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: customHeader + replyPrefix + header + body + footer + customFooter + annotationTag,
+    body: buildReviewCommentBody({
+      body,
+      reviewer,
+      brand,
+      origin,
+      verdict,
+      replyToCommentId,
+      isRecheck,
+      model,
+      stepType,
+      round,
+      sha,
+    }),
   })
   return comment.id
+}
+
+function stepVerb(stepType: CrosscheckStepType): string {
+  if (stepType === 'recheck') return 'Recheck'
+  if (stepType === 'fix') return 'Fixes'
+  if (stepType === 'conflict-resolve') return 'Conflict resolution'
+  return 'Code Review'
 }

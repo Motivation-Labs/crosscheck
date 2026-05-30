@@ -10,6 +10,10 @@ Review for correctness, security, and maintainability. Flag issues that would ca
 bugs in production, expose sensitive data, or make the code significantly harder to
 maintain. Nits and style preferences should be NEEDS WORK, not BLOCK.
 
+For ordinary PR reviews, do not limit the review to a prior comment thread. Recheck-only
+scope belongs in the specific recheck prompt; this default file should still flag newly
+introduced correctness, security, privacy, or maintainability issues.
+
 ## Verdict format
 On the very last line of your response, write exactly one of:
 

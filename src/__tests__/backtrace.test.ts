@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { scanUnreviewedPRs, buildScopesFromConfig, type BacktraceScope } from '../lib/backtrace.js'
+import { scanUnreviewedPRs, scanOpenPRStatuses, buildScopesFromConfig, type BacktraceScope } from '../lib/backtrace.js'
 import { ConfigSchema } from '../config/schema.js'
 
 vi.mock('../github/client.js', () => ({
@@ -7,15 +7,29 @@ vi.mock('../github/client.js', () => ({
   listOrgRepos: vi.fn(),
   listUserRepos: vi.fn(),
   prHasCrossCheckComment: vi.fn(),
+  listPRComments: vi.fn(),
+  listPRCommitsDetailed: vi.fn(),
+  listCommitStatuses: vi.fn(),
 }))
 
-const { listOpenPRs, listOrgRepos, listUserRepos, prHasCrossCheckComment } =
+const {
+  listOpenPRs,
+  listOrgRepos,
+  listUserRepos,
+  prHasCrossCheckComment,
+  listPRComments,
+  listPRCommitsDetailed,
+  listCommitStatuses,
+} =
   await import('../github/client.js')
 
 const mockListOpenPRs = vi.mocked(listOpenPRs)
 const mockListOrgRepos = vi.mocked(listOrgRepos)
 const mockListUserRepos = vi.mocked(listUserRepos)
 const mockPrHasCrossCheckComment = vi.mocked(prHasCrossCheckComment)
+const mockListPRComments = vi.mocked(listPRComments)
+const mockListPRCommitsDetailed = vi.mocked(listPRCommitsDetailed)
+const mockListCommitStatuses = vi.mocked(listCommitStatuses)
 
 const defaultConfig = ConfigSchema.parse({})
 
@@ -23,6 +37,7 @@ function makePR(overrides: Partial<{
   number: number
   author: string
   createdAt: string
+  updatedAt: string
 }> = {}) {
   return {
     number: overrides.number ?? 1,
@@ -34,6 +49,7 @@ function makePR(overrides: Partial<{
     baseRef: 'main',
     body: null,
     createdAt: overrides.createdAt ?? '2025-01-01T00:00:00Z',
+    updatedAt: overrides.updatedAt ?? overrides.createdAt ?? '2025-01-01T00:00:00Z',
   }
 }
 
@@ -202,4 +218,138 @@ describe('buildScopesFromConfig', () => {
     expect(scopes).toContainEqual({ org: 'acme' })
     expect(scopes).not.toContainEqual(expect.objectContaining({ owner: 'alice' }))
   })
+})
+
+describe('scanOpenPRStatuses', () => {
+  it('records org expansion failures as scope failures', async () => {
+    const scopes: BacktraceScope[] = [{ org: 'acme' }]
+    mockListOrgRepos.mockRejectedValue(new Error('org unavailable'))
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses).toEqual([])
+    expect(result.failures).toEqual([
+      {
+        owner: 'acme',
+        stage: 'scope',
+        message: 'org unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(0)
+    expect(result.scannedPRs).toBe(0)
+    expect(mockListOpenPRs).not.toHaveBeenCalled()
+  })
+
+  it('records repo listing failures and continues scanning other repos', async () => {
+    const scopes: BacktraceScope[] = [
+      { owner: 'acme', repo: 'broken' },
+      { owner: 'acme', repo: 'api' },
+    ]
+    mockListOpenPRs
+      .mockRejectedValueOnce(new Error('repo unavailable'))
+      .mockResolvedValueOnce([makePR({ number: 2 })])
+    mockListPRComments.mockResolvedValue([])
+    mockListPRCommitsDetailed.mockResolvedValue([])
+    mockListCommitStatuses.mockResolvedValue([])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses.map(s => s.pr.number)).toEqual([2])
+    expect(result.failures).toEqual([
+      {
+        owner: 'acme',
+        repo: 'broken',
+        stage: 'repo',
+        message: 'repo unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(2)
+    expect(result.scannedPRs).toBe(1)
+  })
+
+  it('returns folded PR statuses for open PRs in scope', async () => {
+    const scopes: BacktraceScope[] = [{ owner: 'acme', repo: 'api' }]
+    mockListOpenPRs.mockResolvedValue([makePR({ number: 1 })])
+    mockListPRComments.mockResolvedValue([
+      {
+        id: 11,
+        body: '### Code Review by ⚡ Codex\n\nok\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        createdAt: '2026-01-01T01:00:00Z',
+        updatedAt: '2026-01-01T01:00:00Z',
+      },
+    ])
+    mockListPRCommitsDetailed.mockResolvedValue([{ sha: 'abc123', committedAt: '2026-01-01T00:30:00Z' }])
+    mockListCommitStatuses.mockResolvedValue([{ context: 'crosscheck/review', state: 'success', updatedAt: '2026-01-01T01:05:00Z' }])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses).toHaveLength(1)
+    expect(result.statuses[0].state).toBe('APPROVE')
+    expect(result.statuses[0].lastActive.toISOString()).toBe('2026-01-01T01:05:00.000Z')
+    expect(result.failures).toEqual([])
+    expect(mockListPRComments).toHaveBeenCalledWith('acme', 'api', 1, 'token')
+  })
+
+  it('records partial failures and continues scanning other PRs', async () => {
+    const scopes: BacktraceScope[] = [{ owner: 'acme', repo: 'api' }]
+    mockListOpenPRs.mockResolvedValue([
+      makePR({ number: 1 }),
+      makePR({ number: 2 }),
+    ])
+    mockListPRComments
+      .mockRejectedValueOnce(new Error('comments unavailable'))
+      .mockResolvedValueOnce([])
+    mockListPRCommitsDetailed.mockResolvedValue([])
+    mockListCommitStatuses.mockResolvedValue([])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses.map(s => s.pr.number)).toEqual([2])
+    expect(result.failures).toEqual([
+      {
+        owner: 'acme',
+        repo: 'api',
+        pr: 1,
+        stage: 'pr',
+        message: 'comments unavailable',
+      },
+    ])
+  })
+
+  it('honors allowed_authors before fetching per-PR details', async () => {
+    const config = ConfigSchema.parse({ routing: { allowed_authors: ['bob'] } })
+    const scopes: BacktraceScope[] = [{ owner: 'acme', repo: 'api' }]
+    mockListOpenPRs.mockResolvedValue([makePR({ number: 1, author: 'alice' })])
+
+    const result = await scanOpenPRStatuses(scopes, config, 'token')
+
+    expect(result.statuses).toEqual([])
+    expect(result.skippedAuthor).toBe(1)
+    expect(mockListPRComments).not.toHaveBeenCalled()
+  })
+
+  it('records org scope expansion failures and continues scanning other scopes', async () => {
+    const scopes: BacktraceScope[] = [
+      { org: 'broken-org' },
+      { owner: 'acme', repo: 'api' },
+    ]
+    mockListOrgRepos.mockRejectedValue(new Error('org unavailable'))
+    mockListOpenPRs.mockResolvedValue([makePR({ number: 1 })])
+    mockListPRComments.mockResolvedValue([])
+    mockListPRCommitsDetailed.mockResolvedValue([])
+    mockListCommitStatuses.mockResolvedValue([])
+
+    const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
+
+    expect(result.statuses.map(status => status.pr.number)).toEqual([1])
+    expect(result.failures).toEqual([
+      {
+        owner: 'broken-org',
+        stage: 'scope',
+        message: 'org unavailable',
+      },
+    ])
+    expect(result.scannedRepos).toBe(1)
+  })
+
 })

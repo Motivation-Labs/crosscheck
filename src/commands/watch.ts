@@ -4,6 +4,7 @@ import chalk from 'chalk'
 import { createWebhookServer, type PREvent } from '../github/webhook.js'
 import {
   createGithubClient,
+  getCommitMessage,
   registerOrgWebhook,
   deleteOrgWebhook,
   registerRepoWebhook,
@@ -45,8 +46,11 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { PersistentShaSet } from '../lib/sha-cache.js'
+import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
+import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
+import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -211,6 +215,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   const inFlight = new Set<string>()
   // SHAs pushed by the fix step — persisted to disk so restarts don't re-review our own commits
   const crosscheckShas = new PersistentShaSet()
+  // Last-reviewed diff hash per PR — skip reviews when a new SHA has identical diff vs base
+  // (force-push, amend, no-op rebase). Persisted so restarts don't re-review unchanged content.
+  const diffHashes = new PersistentDiffHashMap()
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
@@ -294,10 +301,10 @@ export async function runWatch(opts: WatchOpts = {}) {
       const isRecheckRun = reviewedPRKeys.has(prKey)
       const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
 
-      board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
       const reviewStart = Date.now()
       const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
       let stopHeartbeat = () => {}
+      let boardAdded = false
 
       try {
         clonePRForReview({
@@ -305,6 +312,41 @@ export async function runWatch(opts: WatchOpts = {}) {
           tmpDir, token, protocol: config.clone_protocol,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
         })
+
+        // Diff-aware skip: a new HEAD SHA with the same patch vs base as the last
+        // successfully-reviewed SHA (force-push, amend, no-op rebase) doesn't need
+        // a fresh review. Post a one-line acknowledgement so the PR author sees we noticed.
+        // When the base ref fetch failed earlier, the diff vs base is not measurable;
+        // skip the dedup check entirely and don't update the cache after this review.
+        let newDiffHash: string | null = null
+        try {
+          newDiffHash = computeDiffHash(tmpDir, params.baseRef)
+        } catch { /* base unavailable — proceed with full review, skip cache update */ }
+
+        const prev = newDiffHash ? diffHashes.get(prKey) : undefined
+        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha) {
+          const prevShort = prev.sha.slice(0, 7)
+          const nowShort = params.headSha.slice(0, 7)
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
+          bLog(
+            `${chalk.dim(fmtTime())}  PR #${prNumber} ${params.action}  ${chalk.dim('no diff change since last review')}`,
+            `${' '.repeat(FMT_TIME_WIDTH + 2)}prev=${chalk.dim(prevShort)} → ${chalk.dim(nowShort)}  ${chalk.dim('(skipped)')}`,
+          )
+          try {
+            await lockOctokit.rest.issues.createComment({
+              owner, repo: repoName, issue_number: prNumber,
+              body: `✓ No diff change since the last review (was \`${prevShort}\`, now \`${nowShort}\`). Skipping re-review.\n\n<!-- crosscheck: no_diff_change prev_sha=${prev.sha} sha=${params.headSha} -->`,
+            })
+            fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, kind: 'no_diff_change' })
+          } catch (err: unknown) {
+            logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'no_diff_comment' }, err)
+          }
+          await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+          return
+        }
+
+        board.addPR(key, prNumber, `${owner}/${repoName}`, params.headRef, round)
+        boardAdded = true
 
         const prLoc = computePRLoc(tmpDir, params.baseRef)
         board.updatePR(key, { prLoc })
@@ -325,6 +367,18 @@ export async function runWatch(opts: WatchOpts = {}) {
         void verdict
         reviewedPRKeys.add(prKey)
         prRoundCounts.set(prKey, round)
+        // Recompute the diff hash AFTER runWorkflow — workflow steps such as
+        // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
+        // so the pre-workflow hash may not represent the content that was actually
+        // reviewed. Caching the stale hash would cause a later force-push back to
+        // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
+        if (newDiffHash) {
+          let reviewedHash: string | null = null
+          try {
+            reviewedHash = computeDiffHash(tmpDir, params.baseRef)
+          } catch { /* base unavailable post-workflow — skip cache update */ }
+          if (reviewedHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: reviewedHash })
+        }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
           url: `github.com/${owner}/${repoName}/pull/${prNumber}`,
@@ -337,7 +391,7 @@ export async function runWatch(opts: WatchOpts = {}) {
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)
-        board.failPR(key, message)
+        if (boardAdded) board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
         // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
@@ -371,6 +425,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       if (inFlight.has(key)) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'duplicate' })
         return
+      }
+
+      if (event.action === 'synchronize') {
+        const message = await getCommitMessage(owner, repoName, pr.head.sha, token).catch(() => null)
+        if (message !== null && isCrosscheckCommitMessage(message)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'crosscheck_commit', sha: pr.head.sha })
+          return
+        }
       }
 
       // Skip synchronize events triggered by our own address commits.
@@ -440,10 +502,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   // ── Scope building ────────────────────────────────────────────────────────
   // Determine scopes once — these don't change between tunnel reconnects.
   // orgs, users, and repos are additive: all configured sources contribute scopes.
-  type Scope = { org: string } | { owner: string; repo: string }
-  const scopes: Scope[] = []
+  const rawScopes: Scope[] = []
 
-  for (const org of config.orgs) scopes.push({ org })
+  for (const org of config.orgs) rawScopes.push({ org })
 
   const userRepoResults: Array<{ user: string; count: number } | { user: string; error: string }> = []
   if (config.users.length > 0) {
@@ -453,7 +514,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     for (const user of config.users) {
       try {
         const repos = await listUserRepos(user, token, user === selfLogin)
-        for (const { owner, name } of repos) scopes.push({ owner, repo: name })
+        for (const { owner, name } of repos) rawScopes.push({ owner, repo: name })
         userRepoResults.push({ user, count: repos.length })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -471,10 +532,21 @@ export async function runWatch(opts: WatchOpts = {}) {
   )
   for (const { owner, name, ok } of repoChecks) {
     if (ok) {
-      scopes.push({ owner, repo: name })
+      rawScopes.push({ owner, repo: name })
     } else {
       console.log(chalk.yellow(`  ✗ repo not accessible: ${owner}/${name} — skipped`))
       fileLog({ level: 'warn', event: 'repo_inaccessible', repo: `${owner}/${name}` })
+    }
+  }
+
+  // Collapse repo scopes already covered by an org scope. Registering both produces
+  // duplicate webhook deliveries from GitHub (one per registered hook), which our
+  // in-flight dedup absorbs but still clutters logs and burns signature-verification cycles.
+  const { scopes, dropped: droppedRepos, fallbackRepos } = dedupScopes(rawScopes)
+  for (const [org, repos] of droppedRepos) {
+    for (const repo of repos) {
+      const fallback = fallbackRepos.get(org)?.find(s => s.repo === repo)
+      fileLog({ level: 'info', event: 'scope_deduped', org, owner: fallback?.owner ?? org, repo, reason: 'covered_by_org_scope' })
     }
   }
 
@@ -493,6 +565,27 @@ export async function runWatch(opts: WatchOpts = {}) {
   type RegisteredHook =
     | { type: 'org'; org: string; hookId: number }
     | { type: 'repo'; owner: string; repo: string; hookId: number }
+
+  function webhookFailureReason(msg: string, isOrg: boolean): string {
+    const isCreds = /bad credentials|\[401\]/i.test(msg)
+    const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
+      || (isOrg && /\[404\]/i.test(msg))
+    return isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
+  }
+
+  function addWebhookFailure(
+    failures: Map<string, { labels: string[]; msg: string }>,
+    reason: string,
+    label: string,
+    msg: string,
+  ): void {
+    const bucket = failures.get(reason)
+    if (bucket) {
+      bucket.labels.push(label)
+    } else {
+      failures.set(reason, { labels: [label], msg })
+    }
+  }
 
   // Mutable tunnel session state — replaced on each reconnect
   let currentTunnelProc: ChildProcess | null = null
@@ -583,6 +676,17 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log(`     ${chalk.dim('fall through to')} ${chalk.cyan(`fallback_reviewer: ${config.routing.fallback_reviewer ?? 'skip'}`)} ${chalk.dim('instead.')}`)
   }
 
+  // Warn when repo scopes were dropped because their owner is also an org scope —
+  // both being registered causes duplicate webhook deliveries from GitHub.
+  if (droppedRepos.size > 0) {
+    console.log()
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('redundant repo scopes — org webhook already covers these:')}`)
+    for (const [org, repos] of droppedRepos) {
+      console.log(`     ${chalk.dim(`${org}/{${repos.join(', ')}}`)}`)
+    }
+    console.log(`     ${chalk.dim('Remove these entries from')} ${chalk.cyan('config.repos')} ${chalk.dim('to silence this warning.')}`)
+  }
+
   console.log()
 
   // Board starts after the banner — all output below is live-updated
@@ -625,7 +729,10 @@ export async function runWatch(opts: WatchOpts = {}) {
     // Register webhooks pointing at the smee channel URL (idempotent — skip if already set).
     // The smee channel URL never changes, so this survives restarts without creating duplicates.
     let smeeOk = 0, smeeFail = 0
+    let smeeTotal = scopes.length
     const smeeFailuresByReason = new Map<string, { labels: string[]; msg: string }>()
+    const succeededOrgs = new Set<string>()
+
     for (const scope of scopes) {
       const label = 'org' in scope ? scope.org : `${scope.owner}/${scope.repo}`
       try {
@@ -633,6 +740,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         if ('org' in scope) {
           existing = await findOrgWebhook(scope.org, channelUrl, token)
           if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+          succeededOrgs.add(scope.org)
         } else {
           existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
           if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
@@ -641,14 +749,43 @@ export async function runWatch(opts: WatchOpts = {}) {
         fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        const isCreds = /bad credentials|\[401\]/i.test(msg)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(msg)
-          || ('org' in scope && /\[404\]/i.test(msg))
-        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${msg}`
+        const fallbackOrg = 'org' in scope ? scope.org : null
         smeeFail++
-        const bucket = smeeFailuresByReason.get(reason)
-        if (bucket) { bucket.labels.push(label) } else { smeeFailuresByReason.set(reason, { labels: [label], msg }) }
+        addWebhookFailure(smeeFailuresByReason, webhookFailureReason(msg, fallbackOrg !== null), label, msg)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: msg })
+
+        const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
+        smeeTotal += fallback.length
+        await Promise.all(fallback.map(async ({ owner, repo }) => {
+          const repoLabel = `${owner}/${repo}`
+          try {
+            const existing = await findRepoWebhook(owner, repo, channelUrl, token)
+            if (!existing) await registerRepoWebhook(owner, repo, channelUrl, webhookSecret, token)
+            smeeOk++
+            fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: repoLabel, url: channelUrl, fallback_for_org: fallbackOrg })
+          } catch (fallbackErr: unknown) {
+            const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+            smeeFail++
+            addWebhookFailure(smeeFailuresByReason, webhookFailureReason(fallbackMsg, false), repoLabel, fallbackMsg)
+            fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackMsg, fallback_for_org: fallbackOrg })
+          }
+        }))
+      }
+    }
+
+    // Cleanup: org hook succeeded → delete any stale repo-level hooks for repos now covered by the org hook.
+    // Without this, a repo hook registered before the org scope was added would keep firing,
+    // re-introducing the duplicate-delivery problem the scope dedup is meant to fix.
+    for (const [org, repos] of droppedRepos) {
+      if (!succeededOrgs.has(org)) continue
+      for (const repo of repos) {
+        try {
+          const staleId = await findRepoWebhook(org, repo, channelUrl, token)
+          if (staleId) {
+            await deleteRepoWebhook(org, repo, staleId, token)
+            fileLog({ level: 'info', event: 'webhook_deleted', scope: `${org}/${repo}`, reason: 'covered_by_org_hook' })
+          }
+        } catch { /* best-effort */ }
       }
     }
 
@@ -668,7 +805,6 @@ export async function runWatch(opts: WatchOpts = {}) {
       }
       cLog(`  ${chalk.dim(sample)}`)
     }
-    const smeeTotal = scopes.length
     cLog(`${smeeFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${smeeOk}/${smeeTotal}${smeeFail > 0 ? ` (${smeeFail} failed)` : ''}`)
 
     let smeeRetryDelay = 5_000
@@ -738,6 +874,7 @@ export async function runWatch(opts: WatchOpts = {}) {
     const webhookUrl = `${tunnelUrl}${webhookPath}`
     currentRegistered = []
     let hookOk = 0, hookFail = 0
+    let hookTotal = scopes.length
     const failuresByReason = new Map<string, { labels: string[]; msg: string }>()
 
     await Promise.all(scopes.map(async (scope) => {
@@ -786,18 +923,46 @@ export async function runWatch(opts: WatchOpts = {}) {
         hookOk++
         fileLog({ level: 'info', event: 'webhook_registered', scope: label, url: webhookUrl })
       } else {
+        const fallbackOrg = 'org' in scope ? scope.org : null
         hookFail++
-        const isCreds = /bad credentials|\[401\]/i.test(lastErr)
-        const isScope = /admin:org|write:org|forbidden|\[403\]|must have admin|resource not accessible/i.test(lastErr)
-          || ('org' in scope && /\[404\]/i.test(lastErr))
-        const reason = isCreds ? 'creds' : isScope ? 'scope' : `other:${lastErr}`
-        const bucket = failuresByReason.get(reason)
-        if (bucket) {
-          bucket.labels.push(label)
-        } else {
-          failuresByReason.set(reason, { labels: [label], msg: lastErr })
-        }
+        addWebhookFailure(failuresByReason, webhookFailureReason(lastErr, fallbackOrg !== null), label, lastErr)
         fileLog({ level: 'warn', event: 'webhook_error', scope: label, message: lastErr })
+
+        const fallback = fallbackOrg ? fallbackRepos.get(fallbackOrg) ?? [] : []
+        hookTotal += fallback.length
+        await Promise.all(fallback.map(async ({ owner, repo }) => {
+          const repoLabel = `${owner}/${repo}`
+          let fallbackHookId: number | null = null
+          let fallbackLastErr = ''
+          try {
+            fallbackHookId = await findRepoWebhook(owner, repo, webhookUrl, token)
+          } catch { /* ignore — proceed to register */ }
+          if (fallbackHookId === null) {
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (attempt > 0) {
+                const delay = 2 ** attempt * 1000
+                fileLog({ level: 'warn', event: 'webhook_register_retry', scope: repoLabel, attempt, message: fallbackLastErr, fallback_for_org: fallbackOrg })
+                await new Promise(r => setTimeout(r, delay))
+              }
+              try {
+                fallbackHookId = await registerRepoWebhook(owner, repo, webhookUrl, webhookSecret, token)
+                break
+              } catch (fallbackErr: unknown) {
+                fallbackLastErr = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+              }
+            }
+          }
+
+          if (fallbackHookId !== null) {
+            currentRegistered.push({ type: 'repo', owner, repo, hookId: fallbackHookId })
+            hookOk++
+            fileLog({ level: 'info', event: 'webhook_registered', scope: repoLabel, url: webhookUrl, fallback_for_org: fallbackOrg })
+          } else {
+            hookFail++
+            addWebhookFailure(failuresByReason, webhookFailureReason(fallbackLastErr, false), repoLabel, fallbackLastErr)
+            fileLog({ level: 'warn', event: 'webhook_error', scope: repoLabel, message: fallbackLastErr, fallback_for_org: fallbackOrg })
+          }
+        }))
       }
     }))
 
@@ -820,7 +985,6 @@ export async function runWatch(opts: WatchOpts = {}) {
     }
 
     // Single aggregated connectivity line instead of one per repo
-    const hookTotal = scopes.length
     cLog(`${hookFail === 0 ? chalk.green('✓') : chalk.yellow('⚠')} webhooks registered: ${hookOk}/${hookTotal}${hookFail > 0 ? ` (${hookFail} failed)` : ''}`)
     fileLog({ level: 'info', event: 'webhooks_registered', count: hookOk, total: hookTotal, failed: hookFail, url: webhookUrl })
 

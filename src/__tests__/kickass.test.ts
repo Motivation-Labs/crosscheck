@@ -103,6 +103,21 @@ describe('buildKickassPlan', () => {
     expect(item.reviewComment?.id).toBe(10)
   })
 
+  it('routes NEEDS_WORK to fix when review comment has no type attribute (old annotation format)', () => {
+    const oldFormatReview = [
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK sha=abc1234 -->',
+    ].join('\n')
+
+    const [item] = buildKickassPlan([
+      makeScannedPR({
+        comments: [{ id: 10, body: oldFormatReview, createdAt: '2026-05-01T01:00:00Z' }],
+      }),
+    ], config)
+
+    expect(item.action).toBe('fix')
+    expect(item.reviewComment?.id).toBe(10)
+  })
+
   it('downgrades stale APPROVE annotations to review instead of merge', () => {
     const staleApprove = [
       '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=old9999 -->',

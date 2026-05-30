@@ -140,7 +140,7 @@ function findLatestFreshReviewComment(pr: KickassScannedPR): FreshReviewComment 
   for (const comment of comments) {
     const annotation = parseAnnotation(comment.body)
     if (!annotation) continue
-    if (annotation.type !== 'review') continue
+    if (annotation.type !== 'review' && annotation.type !== undefined) continue
     if (annotation.sha !== pr.headSha) continue
     return { id: comment.id, body: comment.body }
   }

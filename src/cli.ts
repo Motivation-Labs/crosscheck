@@ -14,6 +14,7 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runScan } from './commands/scan.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as { version: string }
@@ -89,6 +90,16 @@ program
   .description('Show auth state, config summary, and CLI versions')
   .option('-c, --config <path>', 'config file path')
   .action((opts: { config?: string }) => void runStatus(opts.config))
+
+program
+  .command('scan')
+  .description('Scan open PRs and show review freshness, state, and next action')
+  .option('-c, --config <path>', 'config file path')
+  .option('--stale-after <duration>', 'mark PRs stale after inactivity, e.g. 30m, 2h, 1d')
+  .option('--tidy', 'only print stale rows with a next action')
+  .option('--json', 'output full scan data as JSON')
+  .option('--force', 'bypass the 60 second scan cache')
+  .action((opts: { config?: string; staleAfter?: string; tidy?: boolean; json?: boolean; force?: boolean }) => void runScan(opts))
 
 program
   .command('diagnose')

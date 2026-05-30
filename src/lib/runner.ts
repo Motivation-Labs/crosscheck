@@ -182,6 +182,13 @@ export interface WorkflowContext {
   // fires mid-workflow — otherwise process.exit bypasses the runner's finally
   // and the pending status is leaked indefinitely on GitHub.
   pushedShas?: string[]
+  // Optional review comment selected by the caller. Used by operator flows that
+  // already scanned the PR and want fix-only runs to avoid reselecting a
+  // different comment after dispatch.
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
 }
 
 export interface WorkflowResult {
@@ -327,7 +334,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -358,6 +365,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
       let reviewCommentBody = reviewResult?.commentBody
       let reviewCommentId = reviewResult?.commentId
+      if (!reviewCommentBody) {
+        reviewCommentBody = ctx.initialReviewComment?.body
+        reviewCommentId = ctx.initialReviewComment?.id
+      }
       if (!reviewCommentBody) {
         const latestReviewComment = await getLastCrossCheckReviewComment(owner, repoName, prNumber, token)
         reviewCommentBody = latestReviewComment?.body

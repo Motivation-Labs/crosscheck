@@ -31,13 +31,14 @@ export async function mergePullRequest(
   owner: string,
   repo: string,
   pullNumber: number,
-  options: { method: MergeMethod },
+  options: { method: MergeMethod; expectedHeadSha?: string },
 ): Promise<void> {
   await octokit.rest.pulls.merge({
     owner,
     repo,
     pull_number: pullNumber,
     merge_method: options.method,
+    ...(options.expectedHeadSha && { sha: options.expectedHeadSha }),
   })
 }
 

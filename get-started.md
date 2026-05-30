@@ -478,6 +478,7 @@ crosscheck run https://github.com/owner/repo/pull/123
 crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
 crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
 crosscheck run https://github.com/owner/repo/pull/123 --dry-run
+crosscheck run https://github.com/owner/repo/pull/123 --expected-head-sha abc1234
 ```
 
 The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
@@ -487,7 +488,45 @@ The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root
 | `-r, --reviewer codex\|claude` | Force a specific reviewer; skip auto-detection |
 | `--steps <list>` | Run only the listed step types, comma-separated: `review`, `fix`, `recheck` |
 | `--dry-run` | Run the review but do not post a comment or apply fixes |
+| `--expected-head-sha <sha>` | Skip if the PR head changed since the command was queued |
 | `-c, --config <path>` | Use a specific config file |
+
+---
+
+### `crosscheck scan`
+
+Scans monitored open PRs and shows which crosscheck workflow state each PR is in.
+
+```bash
+crosscheck scan
+crosscheck scan --tidy
+crosscheck scan --force --stale-after 2h
+crosscheck scan --json
+```
+
+| Flag | Description |
+|---|---|
+| `--tidy` | Show only stale PRs that need attention |
+| `--force` | Bypass the short-lived scan cache |
+| `--stale-after <duration>` | Treat PRs as stale after a duration like `30m`, `2h`, or `1d` |
+| `--json` | Emit raw scan data for scripts |
+
+---
+
+### `crosscheck kickass`
+
+Selects stale PRs from the operator queue and advances each one with the safest next action: review, fix, recheck, or merge. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
+
+```bash
+crosscheck kickass --dry-run
+crosscheck kickass --force --stale-after 2h
+```
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Print the selected actions without mutating PRs |
+| `--force` | Bypass the short-lived scan cache |
+| `--stale-after <duration>` | Only queue PRs stale for at least this duration |
 
 ---
 

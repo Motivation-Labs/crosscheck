@@ -44,6 +44,37 @@ describe('crosscheck annotation contract', () => {
     ])
   })
 
+  it('appends optional head sha after stable v2 fields', () => {
+    const annotation = buildAnnotation({
+      origin: 'claude',
+      reviewer: 'codex',
+      model: 'gpt-5',
+      type: 'review',
+      round: 3,
+      verdict: 'BLOCK',
+      service: 'crosscheck',
+      sha: 'abc1234',
+    })
+
+    expect(annotation).toBe(
+      '<!-- crosscheck: origin=claude reviewer=codex model=gpt-5 type=review round=3 verdict=BLOCK service=crosscheck sha=abc1234 -->',
+    )
+    expect(parseAnnotation(annotation)).toEqual({
+      origin: 'claude',
+      reviewer: 'codex',
+      model: 'gpt-5',
+      type: 'review',
+      round: 3,
+      verdict: 'BLOCK',
+      service: 'crosscheck',
+      sha: 'abc1234',
+    })
+  })
+
+  it('preserves bare marker handling when sha-like fields are absent', () => {
+    expect(parseAnnotation('<!-- crosscheck: fix_applied -->')).toBeNull()
+  })
+
   it('parses legacy annotations with documented defaults', () => {
     expect(parseAnnotation(
       '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',

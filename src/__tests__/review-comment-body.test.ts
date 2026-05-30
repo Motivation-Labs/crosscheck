@@ -12,10 +12,11 @@ describe('buildReviewCommentBody', () => {
       model: 'claude-opus-4-7',
       stepType: 'review',
       round: 2,
+      sha: 'abc1234',
     })
 
     expect(body).toContain('### Code Review by 🤖 Claude Code · Opus 4.7 · Acme')
-    expect(body).toContain('model=claude-opus-4-7 type=review round=2 verdict=APPROVE service=Acme')
+    expect(body).toContain('model=claude-opus-4-7 type=review round=2 verdict=APPROVE service=Acme sha=abc1234')
   })
 
   it('omits model and service segments for default Codex subscription auth', () => {

@@ -20,6 +20,11 @@ export interface RunOpts {
   reviewer?: string
   steps?: string
   dryRun?: boolean
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
+  expectedHeadSha?: string
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -52,6 +57,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   const spinner = ora(`Fetching PR #${number}...`).start()
   const octokit = createGithubClient(token)
   const { data: prData } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+  if (opts.expectedHeadSha !== undefined && prData.head.sha !== opts.expectedHeadSha) {
+    spinner.warn(`PR #${number} head changed since selection — skipping stale_signature`)
+    fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'stale_signature', expected_sha: opts.expectedHeadSha, actual_sha: prData.head.sha })
+    return
+  }
   spinner.succeed(`PR #${number}: ${prData.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: prData.head.sha })
 
@@ -223,6 +233,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         pushedShas,
         dryRun: opts.dryRun,
         steps: filteredSteps,
+        initialReviewComment: opts.initialReviewComment,
       })
 
       activeSpinner.stop()

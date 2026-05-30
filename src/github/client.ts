@@ -905,6 +905,7 @@ export interface ReviewCommentBodyInput {
   model?: string
   stepType?: CrosscheckStepType
   round?: number
+  sha?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -938,6 +939,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     round,
     verdict: input.verdict ?? 'UNKNOWN',
     service: serviceName,
+    ...(input.sha && { sha: input.sha }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -962,6 +964,7 @@ export async function postReviewComment(
   model = 'default',
   stepType?: CrosscheckStepType,
   round = 1,
+  sha?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -979,6 +982,7 @@ export async function postReviewComment(
       model,
       stepType,
       round,
+      sha,
     }),
   })
   return comment.id

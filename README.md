@@ -109,7 +109,7 @@ crosscheck run <pr-url> --dry-run                # review without posting or fix
 
 Scans every open PR in the configured monitor scope and reports where each one is in the crosscheck workflow. Results are cached for 60 seconds.
 
-States: `PR` (needs review) · `APPROVE` · `NEEDS_WORK` · `BLOCK` · `FIX` (fix applied, needs recheck) · `RECHECK`
+States: `PR` (needs review) · `APPROVE` · `NEEDS_WORK` · `BLOCK` · `RECHECK` (fix applied, needs recheck)
 
 ```bash
 crosscheck scan                          # all open PRs, grouped stale/not-stale
@@ -148,9 +148,9 @@ quality:
 
 | Tier | Claude model | Codex model | Latency |
 |---|---|---|---|
-| `fast` | Haiku | o4-mini low | ~10s |
-| `balanced` | Sonnet (default) | o4-mini med | ~30s |
-| `thorough` | Sonnet max | o3 high | ~60s |
+| `fast` | Haiku | default | ~10s |
+| `balanced` | Sonnet (default) | default | ~30s |
+| `thorough` | Opus | default | ~60s |
 
 ### Pipeline (`workflow.yml`)
 

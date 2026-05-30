@@ -75,4 +75,17 @@ describe('postReviewComment', () => {
       body: expect.stringContaining('model=claude-opus-4-7 type=review round=3'),
     }))
   })
+
+  it('threads the selected head sha into the annotation when provided', async () => {
+    const { octokit, createComment } = makeOctokit()
+
+    await postReviewComment(
+      octokit, 'owner', 'repo', 42, 'Review', 'codex', {}, 'claude', 'BLOCK',
+      undefined, false, 'gpt-5', 'review', 1, 'abc1234',
+    )
+
+    expect(createComment).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('service=crosscheck sha=abc1234'),
+    }))
+  })
 })

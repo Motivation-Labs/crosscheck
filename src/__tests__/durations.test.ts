@@ -1,27 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import { formatElapsed, parseDurationMs } from '../lib/durations.js'
+import { formatDuration, parseDuration } from '../lib/durations.js'
 
-describe('parseDurationMs', () => {
-  it('parses supported minute, hour, and day durations', () => {
-    expect(parseDurationMs('30m')).toBe(30 * 60 * 1000)
-    expect(parseDurationMs('2h')).toBe(2 * 60 * 60 * 1000)
-    expect(parseDurationMs('1d')).toBe(24 * 60 * 60 * 1000)
+describe('parseDuration', () => {
+  it('parses minutes, hours, and days', () => {
+    expect(parseDuration('30m')).toBe(30 * 60 * 1000)
+    expect(parseDuration('2h')).toBe(2 * 60 * 60 * 1000)
+    expect(parseDuration('1d')).toBe(24 * 60 * 60 * 1000)
   })
 
-  it('rejects invalid duration strings', () => {
-    expect(() => parseDurationMs('30')).toThrow(/Invalid duration/)
-    expect(() => parseDurationMs('2w')).toThrow(/Invalid duration/)
-    expect(() => parseDurationMs('abc')).toThrow(/Invalid duration/)
-    expect(() => parseDurationMs('0m')).toThrow(/positive, non-zero/)
+  it('accepts surrounding whitespace', () => {
+    expect(parseDuration('  4h  ')).toBe(4 * 60 * 60 * 1000)
+  })
+
+  it('rejects invalid durations', () => {
+    expect(() => parseDuration('')).toThrow('Invalid duration')
+    expect(() => parseDuration('10')).toThrow('Invalid duration')
+    expect(() => parseDuration('1w')).toThrow('Invalid duration')
+    expect(() => parseDuration('0m')).toThrow('Invalid duration')
   })
 })
 
-describe('formatElapsed', () => {
-  const now = Date.parse('2026-05-29T12:00:00Z')
-
-  it('formats elapsed times consistently', () => {
-    expect(formatElapsed('2026-05-29T11:40:00Z', now)).toBe('20m ago')
-    expect(formatElapsed('2026-05-28T09:00:00Z', now)).toBe('27h ago')
-    expect(formatElapsed('2026-05-26T12:00:00Z', now)).toBe('3d ago')
+describe('formatDuration', () => {
+  it('formats common whole units', () => {
+    expect(formatDuration(30 * 60 * 1000)).toBe('30m')
+    expect(formatDuration(2 * 60 * 60 * 1000)).toBe('2h')
+    expect(formatDuration(24 * 60 * 60 * 1000)).toBe('1d')
   })
 })

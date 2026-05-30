@@ -10,6 +10,7 @@ export interface CrosscheckAnnotationInput {
   model: string
   round: number
   service: string
+  sha?: string
 }
 
 export interface CrosscheckCommitTrailerInput {
@@ -27,7 +28,8 @@ const DEFAULT_SERVICE = 'crosscheck'
 const STEP_TYPES = new Set<CrosscheckStepType>(['review', 'recheck', 'fix', 'conflict-resolve'])
 
 export function buildAnnotation(input: CrosscheckAnnotationInput): string {
-  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)} -->`
+  const sha = input.sha ? ` sha=${fieldValue(input.sha)}` : ''
+  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)}${sha} -->`
 }
 
 export function parseAnnotation(body: string): CrosscheckAnnotationInput | null {
@@ -48,6 +50,7 @@ export function parseAnnotation(body: string): CrosscheckAnnotationInput | null 
     round: parseRound(fields.get('round')),
     verdict: fields.get('verdict') ?? 'UNKNOWN',
     service: fields.get('service') ?? DEFAULT_SERVICE,
+    ...(fields.has('sha') && { sha: fields.get('sha') }),
   }
 }
 

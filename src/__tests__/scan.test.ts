@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyLogEntry,
   buildProgressSummary,
   chooseLatestVerdict,
-  findScanAnnotations,
+  emptyLogSummary,
   filterScanRowsForOutput,
-  mapWithConcurrencyForScan,
-  sameGitHubLoginForScan,
+  findLatestAnnotation,
+  selectNextAction,
   type ScanAnnotationMetadata,
   type ScanRow,
 } from '../commands/scan.js'
@@ -55,96 +56,89 @@ describe('filterScanRowsForOutput', () => {
   })
 })
 
-describe('sameGitHubLoginForScan', () => {
-  it('matches configured users case-insensitively', () => {
-    expect(sameGitHubLoginForScan('beingzy', 'BeingZY')).toBe(true)
-    expect(sameGitHubLoginForScan('alice', 'bob')).toBe(false)
-    expect(sameGitHubLoginForScan('alice', null)).toBe(false)
-  })
-})
+describe('scan state helpers', () => {
+  it('uses conflict resolve counts in progress summaries', () => {
+    const summary = emptyLogSummary()
 
-describe('scan annotation helpers', () => {
-  it('keeps latest annotation metadata separate from latest verdict annotation', () => {
-    const annotations = findScanAnnotations([
+    applyLogEntry(summary, {
+      ts: '2026-05-30T08:00:00Z',
+      event: 'conflict_resolve_complete',
+      conflicts_resolved: 3,
+      tokens_used: 1200,
+    })
+
+    expect(summary.fixAppliedCount).toBe(3)
+    expect(summary.tokens.fix).toBe(1200)
+    expect(buildProgressSummary(null, summary)).toBe('PR -> fix(3)')
+  })
+
+  it('does not invent fix(0) for conflict resolve logs without a count', () => {
+    const summary = emptyLogSummary()
+
+    applyLogEntry(summary, {
+      ts: '2026-05-30T08:00:00Z',
+      event: 'conflict_resolve_complete',
+    })
+
+    expect(summary.fixAppliedCount).toBeNull()
+    expect(buildProgressSummary(null, summary)).toBe('PR')
+  })
+
+  it('keeps recheck annotations labeled as rechecks in progress summaries', () => {
+    const annotation: ScanAnnotationMetadata = {
+      commentId: 1,
+      commentCreatedAt: '2026-05-30T08:00:00Z',
+      raw: 'origin=codex reviewer=claude verdict=APPROVE type=recheck',
+      origin: 'codex',
+      reviewer: 'claude',
+      verdict: 'APPROVE',
+      type: 'recheck',
+      isRecheck: true,
+    }
+
+    expect(buildProgressSummary(annotation, emptyLogSummary())).toBe('PR -> recheck(APPROVE)')
+  })
+
+  it('chooses the newer verdict source', () => {
+    const summary = emptyLogSummary()
+    summary.latestVerdict = 'BLOCK'
+    summary.latestVerdictAt = '2026-05-30T08:00:00Z'
+
+    expect(chooseLatestVerdict('NEEDS_WORK', '2026-05-30T09:00:00Z', summary)).toBe('NEEDS_WORK')
+    expect(chooseLatestVerdict('APPROVE', '2026-05-30T07:00:00Z', summary)).toBe('BLOCK')
+  })
+
+  it('selects the expected next action for each review state', () => {
+    const summary = emptyLogSummary()
+
+    expect(selectNextAction(null, summary)).toBe('next CR')
+    expect(selectNextAction('APPROVE', summary)).toBe('next merge')
+    expect(selectNextAction('NEEDS_WORK', summary)).toBe('next fix')
+
+    summary.latestStep = 'fix'
+    expect(selectNextAction('BLOCK', summary)).toBe('next recheck')
+  })
+
+  it('tracks latest annotation separately from latest verdict annotation', () => {
+    const annotations = findLatestAnnotation([
       {
         id: 1,
         author: 'bot',
         body: '<!-- crosscheck: origin=codex reviewer=claude verdict=NEEDS_WORK type=review -->',
-        createdAt: '2026-05-29T10:00:00Z',
-        updatedAt: '2026-05-29T10:00:00Z',
+        createdAt: '2026-05-30T08:00:00Z',
+        updatedAt: '2026-05-30T08:00:00Z',
       },
       {
         id: 2,
         author: 'bot',
-        body: '<!-- crosscheck: type=fix_applied -->',
-        createdAt: '2026-05-29T11:00:00Z',
-        updatedAt: '2026-05-29T11:00:00Z',
+        body: '<!-- crosscheck: fix_applied -->',
+        createdAt: '2026-05-30T09:00:00Z',
+        updatedAt: '2026-05-30T09:00:00Z',
       },
     ])
 
     expect(annotations.latestAnnotation?.commentId).toBe(2)
     expect(annotations.latestVerdictAnnotation?.commentId).toBe(1)
     expect(annotations.latestVerdictAnnotation?.verdict).toBe('NEEDS_WORK')
-  })
-
-  it('uses the latest verdict annotation when logs are absent', () => {
-    const verdict = chooseLatestVerdict('NEEDS_WORK', '2026-05-29T10:00:00Z', {
-      reviewVerdict: null,
-      recheckVerdict: null,
-      latestVerdict: null,
-      latestVerdictAt: null,
-      latestStep: null,
-      latestLogAt: null,
-      fixAppliedCount: null,
-      fixCompletedAt: null,
-      skippedReasons: [],
-      tokens: { review: 0, fix: 0, recheck: 0, total: 0 },
-    })
-
-    expect(verdict).toBe('NEEDS_WORK')
-  })
-
-  it('does not infer recheck progress from annotation type', () => {
-    const annotation: ScanAnnotationMetadata = {
-      commentId: 1,
-      commentCreatedAt: '2026-05-29T10:00:00Z',
-      raw: 'origin=codex reviewer=claude verdict=APPROVE type=recheck',
-      attrs: { origin: 'codex', reviewer: 'claude', verdict: 'APPROVE', type: 'recheck' },
-      origin: 'codex',
-      reviewer: 'claude',
-      verdict: 'APPROVE',
-      type: 'recheck',
-    }
-
-    expect(buildProgressSummary(annotation, {
-      reviewVerdict: null,
-      recheckVerdict: null,
-      latestVerdict: null,
-      latestVerdictAt: null,
-      latestStep: null,
-      latestLogAt: null,
-      fixAppliedCount: null,
-      fixCompletedAt: null,
-      skippedReasons: [],
-      tokens: { review: 0, fix: 0, recheck: 0, total: 0 },
-    })).toBe('PR -> CR(APPROVE)')
-  })
-})
-
-describe('mapWithConcurrencyForScan', () => {
-  it('caps concurrent work while preserving result order', async () => {
-    let active = 0
-    let peak = 0
-
-    const results = await mapWithConcurrencyForScan([1, 2, 3, 4, 5], 2, async (value) => {
-      active += 1
-      peak = Math.max(peak, active)
-      await new Promise(resolve => setTimeout(resolve, 1))
-      active -= 1
-      return value * 2
-    })
-
-    expect(results).toEqual([2, 4, 6, 8, 10])
-    expect(peak).toBeLessThanOrEqual(2)
   })
 })

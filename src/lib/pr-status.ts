@@ -1,3 +1,521 @@
+import { readdirSync, readFileSync, existsSync } from 'fs'
+import { join } from 'path'
+import type { Config } from '../config/schema.js'
+import {
+  createGithubClient,
+  listCheckRuns,
+  listCommitStatuses,
+  listIssueComments,
+  listOpenPRs,
+  listOrgRepos,
+  listPRCommitActivity,
+  listPRReviewComments,
+  listTimelineEvents,
+  listUserRepos,
+  type CommitStatusDetail,
+  type OpenPR,
+} from '../github/client.js'
+import { getPRMergeSummary } from '../github/merge.js'
+import { isAuthorAllowed } from './filter.js'
+import { getLogDir, logError } from './logger.js'
+import { dedupScopes, type Scope } from './scopes.js'
+
+export type Freshness = 'stale' | 'not_stale'
+// FIX is reserved for future structured fix annotations; current scans infer
+// post-fix work as RECHECK from workflow logs.
+export type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
+export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
+export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
+
+export interface CrosscheckAnnotation {
+  marker?: string
+  origin?: string
+  reviewer?: string
+  verdict?: CrosscheckVerdict
+  type?: string
+  sha?: string
+}
+
+export interface PRActivityComment {
+  body: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface PRActivityCommit {
+  sha: string
+  committedAt: string
+}
+
+export interface PRActivityTimestamp {
+  state?: string
+  name?: string
+  conclusion?: string | null
+  status?: string | null
+  updatedAt: string
+}
+
+export interface PRWorkflowLogEvent {
+  ts: string
+  event: string
+  repo?: string
+  pr?: number
+  verdict?: string | null
+  applied_count?: number
+  conflicts_resolved?: number
+  last_verdict?: string | null
+  [key: string]: unknown
+}
+
+export interface PRStatusInput {
+  owner: string
+  repo: string
+  number: number
+  title: string
+  author: string
+  url: string
+  headSha: string
+  headRef: string
+  headRepo?: string | null
+  baseRef: string
+  prUpdatedAt: string
+  comments: PRActivityComment[]
+  reviewComments: PRActivityComment[]
+  commits: PRActivityCommit[]
+  commitStatuses: CommitStatusDetail[]
+  checkRuns: PRActivityTimestamp[]
+  timelineEvents: PRActivityTimestamp[]
+  logEvents: PRWorkflowLogEvent[]
+  merge?: PRMergeSummary
+}
+
+export interface PRMergeSummary {
+  mergeable: boolean | null
+  mergeStateStatus?: string
+  protectedBase: boolean | null
+}
+
+export interface ScanPRStatus {
+  owner: string
+  repo: string
+  number: number
+  title: string
+  author: string
+  url: string
+  headSha: string
+  headRef: string
+  headRepo?: string | null
+  baseRef: string
+  freshness: Freshness
+  reviewState: ReviewState
+  nextAction: NextAction
+  lastActiveAt: string
+  staleAfterMs: number
+  ageMs: number
+  verdict: CrosscheckVerdict | null
+  latestAnnotation: CrosscheckAnnotation | null
+  merge?: PRMergeSummary
+}
+
+export interface ScanSummary {
+  total: number
+  stale: number
+  not_stale: number
+  actionable: number
+}
+
+export interface ScanResult {
+  scannedAt: string
+  staleAfterMs: number
+  scopeHash?: string
+  cached: boolean
+  summary: ScanSummary
+  prs: ScanPRStatus[]
+}
+
+export interface DeriveStatusOptions {
+  nowMs: number
+  staleAfterMs: number
+}
+
+export interface ScanOpenPRStatusesOptions {
+  now?: Date
+  staleAfterMs: number
+}
+
+interface TimedAnnotation {
+  annotation: CrosscheckAnnotation
+  timestamp: string
+}
+
+interface TimedVerdict {
+  verdict: CrosscheckVerdict
+  timestamp: string
+  annotation: CrosscheckAnnotation | null
+}
+
+const GITHUB_SCAN_CONCURRENCY = 8
+
+// Only state-changing workflow events should refresh staleness. No-op
+// bookkeeping like step_skipped/comment_posted can happen while a PR still
+// needs operator action, so those entries stay out of the activity signal.
+const WORKFLOW_ACTIVITY_EVENTS = new Set([
+  'review_complete',
+  'fix_complete',
+  'conflict_resolve_complete',
+  'workflow_complete',
+])
+
+export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | null {
+  const matches = [...body.matchAll(/<!--\s*crosscheck:\s*([^>]+?)\s*-->/g)]
+  const last = matches.at(-1)
+  if (!last) return null
+
+  const raw = last[1].trim()
+  const parts = raw.split(/\s+/).filter(Boolean)
+  const attrs = new Map<string, string>()
+  for (const part of parts) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    attrs.set(part.slice(0, eq), part.slice(eq + 1))
+  }
+
+  const first = parts[0]
+  const marker = first && !first.includes('=') ? first : undefined
+  const verdict = normalizeVerdict(attrs.get('verdict'))
+  return {
+    ...(marker && { marker }),
+    ...(attrs.has('origin') && { origin: attrs.get('origin') }),
+    ...(attrs.has('reviewer') && { reviewer: attrs.get('reviewer') }),
+    ...(verdict && { verdict }),
+    ...(attrs.has('type') && { type: attrs.get('type') }),
+    ...(attrs.has('sha') && { sha: attrs.get('sha') }),
+  }
+}
+
+export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOptions): ScanPRStatus {
+  const annotations = latestTimedAnnotations([...input.comments, ...input.reviewComments])
+  const latestAnnotation = annotations[0] ?? null
+  const latestVerdict = latestTimedVerdict(input, annotations)
+  const latestFix = latestAppliedFixAfter(input.logEvents, latestVerdict?.timestamp)
+  const lastActiveMs = maxTimestampMs([
+    input.prUpdatedAt,
+    ...input.comments.flatMap(comment => [comment.createdAt, comment.updatedAt]),
+    ...input.reviewComments.flatMap(comment => [comment.createdAt, comment.updatedAt]),
+    ...input.commits.map(commit => commit.committedAt),
+    ...input.commitStatuses.map(status => status.updatedAt),
+    ...input.checkRuns.map(run => run.updatedAt),
+    ...input.timelineEvents.map(event => event.updatedAt),
+    ...input.logEvents.filter(event => WORKFLOW_ACTIVITY_EVENTS.has(event.event)).map(event => event.ts),
+  ]) ?? Date.parse(input.prUpdatedAt)
+
+  const ageMs = Math.max(0, options.nowMs - lastActiveMs)
+  const reviewState = computeReviewState(latestVerdict, latestFix)
+  const nextAction = nextActionForState(reviewState)
+  const freshness: Freshness = ageMs >= options.staleAfterMs && nextAction !== null ? 'stale' : 'not_stale'
+
+  return {
+    owner: input.owner,
+    repo: input.repo,
+    number: input.number,
+    title: input.title,
+    author: input.author,
+    url: input.url,
+    headSha: input.headSha,
+    headRef: input.headRef,
+    ...(input.headRepo !== undefined && { headRepo: input.headRepo }),
+    baseRef: input.baseRef,
+    freshness,
+    reviewState,
+    nextAction,
+    lastActiveAt: new Date(lastActiveMs).toISOString(),
+    staleAfterMs: options.staleAfterMs,
+    ageMs,
+    verdict: latestVerdict?.verdict ?? null,
+    latestAnnotation: latestAnnotation?.annotation ?? null,
+    ...(input.merge && { merge: input.merge }),
+  }
+}
+
+export function summarizeStatuses(prs: ScanPRStatus[]): ScanSummary {
+  return {
+    total: prs.length,
+    stale: prs.filter(pr => pr.freshness === 'stale').length,
+    not_stale: prs.filter(pr => pr.freshness === 'not_stale').length,
+    actionable: prs.filter(pr => pr.nextAction !== null).length,
+  }
+}
+
+export async function scanOpenPRStatuses(
+  config: Config,
+  token: string,
+  options: ScanOpenPRStatusesOptions,
+): Promise<ScanResult> {
+  const now = options.now ?? new Date()
+  const [repoScopes, logEvents] = await Promise.all([
+    buildRepoScopes(config, token),
+    loadWorkflowLogEvents(),
+  ])
+  const octokit = createGithubClient(token)
+  const limitGithub = createConcurrencyLimiter(GITHUB_SCAN_CONCURRENCY)
+
+  const perRepoPRs = await Promise.all(
+    repoScopes.map(({ owner, repo }) =>
+      limitGithub(async () => {
+        try {
+          const prs = await listOpenPRs(owner, repo, token)
+          return prs
+            .filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
+            .map(pr => ({ owner, repo, pr }))
+        } catch (err: unknown) {
+          logError({ event: 'scan_repo_skipped', owner, repo }, err)
+          return [] as Array<{ owner: string; repo: string; pr: OpenPR }>
+        }
+      }),
+    ),
+  )
+
+  const statusResults = await Promise.all(
+    perRepoPRs.flat().map(async ({ owner, repo, pr }) => {
+      try {
+        const [
+          comments,
+          reviewComments,
+          commits,
+          commitStatuses,
+          checkRuns,
+          timelineEvents,
+          merge,
+        ] = await Promise.all([
+          limitGithub(() => listIssueComments(owner, repo, pr.number, token)),
+          limitGithub(() => listPRReviewComments(owner, repo, pr.number, token)),
+          limitGithub(() => listPRCommitActivity(owner, repo, pr.number, token)),
+          limitGithub(() => listCommitStatuses(owner, repo, pr.headSha, token)),
+          limitGithub(() => listCheckRuns(owner, repo, pr.headSha, token)),
+          limitGithub(() => listTimelineEvents(owner, repo, pr.number, token)),
+          limitGithub(() => getPRMergeSummary(octokit, owner, repo, pr.number, pr.baseRef)),
+        ])
+
+        return derivePRStatus({
+          owner,
+          repo,
+          number: pr.number,
+          title: pr.title,
+          author: pr.author,
+          url: pr.url ?? `https://github.com/${owner}/${repo}/pull/${pr.number}`,
+          headSha: pr.headSha,
+          headRef: pr.headRef,
+          headRepo: pr.headRepo,
+          baseRef: pr.baseRef,
+          prUpdatedAt: pr.updatedAt ?? pr.createdAt,
+          comments,
+          reviewComments,
+          commits,
+          commitStatuses,
+          checkRuns,
+          timelineEvents,
+          logEvents: filterLogEventsForPR(logEvents, owner, repo, pr.number),
+          merge,
+        }, { nowMs: now.getTime(), staleAfterMs: options.staleAfterMs })
+      } catch (err: unknown) {
+        logError({ event: 'scan_pr_skipped', owner, repo, pr: pr.number }, err)
+        return null
+      }
+    }),
+  )
+  const statuses = statusResults.filter((status): status is ScanPRStatus => status !== null)
+
+  statuses.sort((a, b) => {
+    if (a.freshness !== b.freshness) return a.freshness === 'stale' ? -1 : 1
+    return Date.parse(a.lastActiveAt) - Date.parse(b.lastActiveAt)
+  })
+
+  return {
+    scannedAt: now.toISOString(),
+    staleAfterMs: options.staleAfterMs,
+    cached: false,
+    summary: summarizeStatuses(statuses),
+    prs: statuses,
+  }
+}
+
+export function loadWorkflowLogEvents(logDir = getLogDir()): PRWorkflowLogEvent[] {
+  if (!existsSync(logDir)) return []
+  const files = readdirSync(logDir)
+    .filter(file => file.endsWith('.ndjson'))
+    .sort()
+    .map(file => join(logDir, file))
+
+  return files.flatMap(file => parseLogFile(file))
+}
+
+export function filterLogEventsForPR(
+  events: PRWorkflowLogEvent[],
+  owner: string,
+  repo: string,
+  pr: number,
+): PRWorkflowLogEvent[] {
+  const fullName = `${owner}/${repo}`
+  return events.filter(event => event.repo === fullName && event.pr === pr)
+}
+
+function parseLogFile(path: string): PRWorkflowLogEvent[] {
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .flatMap(line => {
+      try {
+        const parsed = JSON.parse(line) as unknown
+        return isWorkflowLogEvent(parsed) ? [parsed] : []
+      } catch {
+        return []
+      }
+    })
+}
+
+function isWorkflowLogEvent(value: unknown): value is PRWorkflowLogEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return typeof record.ts === 'string' && typeof record.event === 'string'
+}
+
+// Use createdAt for ordering annotation timestamps — updatedAt would flip verdict
+// ordering if an older comment is edited after a newer one is posted.
+// Returns all annotations sorted descending by createdAt; bare markers without
+// a verdict are included so callers can skip them when searching for a verdict.
+function latestTimedAnnotations(comments: PRActivityComment[]): TimedAnnotation[] {
+  return comments.flatMap(comment => {
+    const annotation = parseCrosscheckAnnotation(comment.body)
+    if (!annotation) return []
+    return [{ annotation, timestamp: comment.createdAt }]
+  }).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+}
+
+function latestTimedVerdict(input: PRStatusInput, annotations: TimedAnnotation[]): TimedVerdict | null {
+  const annotationVerdicts = annotations.flatMap(({ annotation, timestamp }) => (
+    annotation.verdict
+      ? [{ verdict: annotation.verdict, timestamp, annotation }]
+      : []
+  ))
+
+  const logVerdicts = input.logEvents.flatMap(event => {
+    if (event.event !== 'review_complete' && event.event !== 'workflow_complete') return []
+    const verdict = normalizeVerdict(event.verdict ?? event.last_verdict)
+    return verdict ? [{ verdict, timestamp: event.ts, annotation: null }] : []
+  })
+
+  return [...annotationVerdicts, ...logVerdicts]
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0] ?? null
+}
+
+function latestAppliedFixAfter(events: PRWorkflowLogEvent[], after: string | undefined): PRWorkflowLogEvent | null {
+  const afterMs = after ? Date.parse(after) : 0
+  return events
+    .filter(event => Date.parse(event.ts) >= afterMs)
+    .filter(event => {
+      if (event.event === 'fix_complete') return typeof event.applied_count === 'number' && event.applied_count > 0
+      if (event.event === 'conflict_resolve_complete') return typeof event.conflicts_resolved === 'number' && event.conflicts_resolved > 0
+      return false
+    })
+    .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0] ?? null
+}
+
+function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
+  if (!latestVerdict) return 'PR'
+  if (latestFix) return 'RECHECK'
+  return latestVerdict.verdict
+}
+
+function nextActionForState(state: ReviewState): NextAction {
+  if (state === 'PR') return 'review'
+  if (state === 'RECHECK') return 'recheck'
+  if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'fix'
+  if (state === 'APPROVE') return 'merge'
+  return null
+}
+
+function createConcurrencyLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: Array<() => void> = []
+
+  return async function limitTask<T>(task: () => Promise<T>): Promise<T> {
+    if (active >= limit) {
+      await new Promise<void>(resolve => {
+        waiting.push(resolve)
+      })
+    }
+    active += 1
+    try {
+      return await task()
+    } finally {
+      active -= 1
+      waiting.shift()?.()
+    }
+  }
+}
+
+function maxTimestampMs(values: Array<string | undefined>): number | null {
+  const timestamps = values
+    .filter((value): value is string => typeof value === 'string')
+    .map(value => Date.parse(value))
+    .filter(value => Number.isFinite(value))
+  if (timestamps.length === 0) return null
+  return Math.max(...timestamps)
+}
+
+function normalizeVerdict(value: unknown): CrosscheckVerdict | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toUpperCase().replace(/\s+/g, '_')
+  if (normalized === 'APPROVE' || normalized === 'NEEDS_WORK' || normalized === 'BLOCK') return normalized
+  return null
+}
+
+async function buildRepoScopes(config: Config, token: string): Promise<Array<{ owner: string; repo: string }>> {
+  const userScopes = await Promise.all(
+    config.users.map(async (user) => {
+      try {
+        const repos = await listUserRepos(user, token)
+        return repos.map(({ owner, name }) => ({ owner, repo: name }) as Scope)
+      } catch (err: unknown) {
+        logError({ event: 'scan_user_scope_skipped', user }, err)
+        return [] as Scope[]
+      }
+    }),
+  )
+
+  const rawScopes: Scope[] = [
+    ...config.orgs.map(org => ({ org }) as Scope),
+    ...config.repos.map(repo => ({ owner: repo.owner, repo: repo.name }) as Scope),
+    ...userScopes.flat(),
+  ]
+
+  const deduped = dedupScopes(rawScopes).scopes
+  const expanded = await Promise.all(
+    deduped.map(async (scope) => {
+      if ('org' in scope) {
+        try {
+          const repos = await listOrgRepos(scope.org, token)
+          return repos.map(repo => ({ owner: repo.owner, repo: repo.name }))
+        } catch (err: unknown) {
+          logError({ event: 'scan_org_scope_skipped', org: scope.org }, err)
+          return [] as Array<{ owner: string; repo: string }>
+        }
+      }
+      return [{ owner: scope.owner, repo: scope.repo }]
+    }),
+  )
+
+  const byKey = new Map<string, { owner: string; repo: string }>()
+  for (const repo of expanded.flat()) {
+    byKey.set(`${repo.owner.toLowerCase()}/${repo.repo.toLowerCase()}`, repo)
+  }
+  return [...byKey.values()]
+}
+
+// ── Legacy API (used by backtrace.ts / watch workflow) ──────────────────────
+// This block preserves the foldPRStatus-based API that was present in staging.
+// The scan command uses the newer derivePRStatus / ScanPRStatus API above.
+
 export type PRReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
 export type PRNextAction = 'review' | 'fix' | 'recheck' | 'none'
 export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
@@ -81,6 +599,8 @@ export interface PRProgressStep {
   tokens?: number
 }
 
+// Legacy PRStatus — distinct from ScanPRStatus (the scan command shape).
+// Used by backtrace.ts and the watch workflow.
 export interface PRStatus {
   pr: PRStatusPullRequest
   state: PRReviewState
@@ -92,66 +612,66 @@ export interface PRStatus {
   stale?: boolean
 }
 
-interface ParsedAnnotation {
+interface LegacyParsedAnnotation {
   marker?: string
   type?: string
   reviewer?: string
   verdict?: PRVerdict
 }
 
-interface ReviewEvent {
+interface LegacyReviewEvent {
   type: 'review' | 'recheck'
   verdict: PRVerdict
   at: Date
 }
 
-interface FixEvent {
+interface LegacyFixEvent {
   at: Date
   appliedCount?: number
   tokens?: number
   complete: boolean
 }
 
-const EMPTY_BUCKET: TokenBucket = { review: 0, fix: 0, recheck: 0, total: 0 }
+const LEGACY_EMPTY_BUCKET: TokenBucket = { review: 0, fix: 0, recheck: 0, total: 0 }
 
-function cloneBucket(bucket: TokenBucket = EMPTY_BUCKET): TokenBucket {
+function legacyCloneBucket(bucket: TokenBucket = LEGACY_EMPTY_BUCKET): TokenBucket {
   return { review: bucket.review, fix: bucket.fix, recheck: bucket.recheck, total: bucket.total }
 }
 
-function addTokens(bucket: TokenBucket, kind: keyof Omit<TokenBucket, 'total'>, tokens: number): void {
+function legacyAddTokens(bucket: TokenBucket, kind: keyof Omit<TokenBucket, 'total'>, tokens: number): void {
   bucket[kind] += tokens
   bucket.total += tokens
 }
 
-function prKey(owner: string, repo: string, number: number): string {
+function legacyPrKey(owner: string, repo: string, number: number): string {
   return `${owner}/${repo}#${number}`
 }
 
-function logEventKey(event: PRStatusLogEvent): string | null {
+function legacyLogEventKey(event: PRStatusLogEvent): string | null {
   if (!event.repo || typeof event.pr !== 'number') return null
   return `${event.repo}#${event.pr}`
 }
 
-function logEventSha(event: PRStatusLogEvent): string | null {
+function legacyLogEventSha(event: PRStatusLogEvent): string | null {
   if (typeof event.sha === 'string' && event.sha.length > 0) return event.sha
   if (typeof event.headSha === 'string' && event.headSha.length > 0) return event.headSha
   if (typeof event.head_sha === 'string' && event.head_sha.length > 0) return event.head_sha
   return null
 }
 
-function parseDate(value: unknown): Date | null {
+function legacyParseDate(value: unknown): Date | null {
   if (typeof value !== 'string') return null
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-function maxDate(current: Date | null, candidate: Date | null): Date | null {
+function legacyMaxDate(current: Date | null, candidate: Date | null): Date | null {
   if (!candidate) return current
   if (!current || candidate.getTime() > current.getTime()) return candidate
   return current
 }
 
-function normalizeVerdict(value: string | undefined): PRVerdict | undefined {
+function legacyNormalizeVerdict(value: string | undefined): PRVerdict | undefined {
   if (!value) return undefined
   const normalized = value.trim().toUpperCase().replace(/\s+/g, '_')
   if (normalized === 'APPROVE') return 'APPROVE'
@@ -160,8 +680,8 @@ function normalizeVerdict(value: string | undefined): PRVerdict | undefined {
   return undefined
 }
 
-function parseAttrs(raw: string): ParsedAnnotation {
-  const attrs: ParsedAnnotation = {}
+function legacyParseAttrs(raw: string): LegacyParsedAnnotation {
+  const attrs: LegacyParsedAnnotation = {}
   for (const part of raw.trim().split(/\s+/).filter(Boolean)) {
     const eq = part.indexOf('=')
     if (eq === -1) {
@@ -172,14 +692,14 @@ function parseAttrs(raw: string): ParsedAnnotation {
     const value = part.slice(eq + 1)
     if (key === 'type') attrs.type = value
     else if (key === 'reviewer') attrs.reviewer = value
-    else if (key === 'verdict') attrs.verdict = normalizeVerdict(value)
+    else if (key === 'verdict') attrs.verdict = legacyNormalizeVerdict(value)
   }
   return attrs
 }
 
-function parseLatestCrosscheckAnnotation(body: string): ParsedAnnotation | null {
+function legacyParseLatestAnnotation(body: string): LegacyParsedAnnotation | null {
   let inFence = false
-  let latest: ParsedAnnotation | null = null
+  let latest: LegacyParsedAnnotation | null = null
   for (const line of body.split('\n')) {
     const trimmed = line.trim()
     if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
@@ -189,28 +709,25 @@ function parseLatestCrosscheckAnnotation(body: string): ParsedAnnotation | null 
     if (inFence) continue
     const match = trimmed.match(/^<!--\s*crosscheck:\s*([^>]*)-->/)
     if (!match) continue
-    latest = parseAttrs(match[1])
+    latest = legacyParseAttrs(match[1])
   }
   return latest
 }
 
-// Use createdAt for ordering review events — updatedAt would flip verdict
-// ordering if an older comment is edited after a newer one is posted.
-function commentCreatedAt(comment: PRStatusComment): Date | null {
-  return parseDate(comment.createdAt) ?? parseDate(comment.created_at)
+function legacyCommentCreatedAt(comment: PRStatusComment): Date | null {
+  return legacyParseDate(comment.createdAt) ?? legacyParseDate(comment.created_at)
 }
 
-// Use updatedAt for lastActive computation so edits and reactions are captured.
-function commentDate(comment: PRStatusComment): Date | null {
-  return parseDate(comment.updatedAt) ?? parseDate(comment.updated_at)
-    ?? parseDate(comment.createdAt) ?? parseDate(comment.created_at)
+function legacyCommentDate(comment: PRStatusComment): Date | null {
+  return legacyParseDate(comment.updatedAt) ?? legacyParseDate(comment.updated_at)
+    ?? legacyParseDate(comment.createdAt) ?? legacyParseDate(comment.created_at)
 }
 
-function collectReviewEvents(comments: PRStatusComment[]): ReviewEvent[] {
-  const events: ReviewEvent[] = []
+function legacyCollectReviewEvents(comments: PRStatusComment[]): LegacyReviewEvent[] {
+  const events: LegacyReviewEvent[] = []
   for (const comment of comments) {
-    const annotation = parseLatestCrosscheckAnnotation(comment.body)
-    const at = commentCreatedAt(comment)
+    const annotation = legacyParseLatestAnnotation(comment.body)
+    const at = legacyCommentCreatedAt(comment)
     if (!annotation?.verdict || !at) continue
     if (annotation.type === 'review' || annotation.type === 'recheck') {
       events.push({ type: annotation.type, verdict: annotation.verdict, at })
@@ -227,25 +744,25 @@ function collectReviewEvents(comments: PRStatusComment[]): ReviewEvent[] {
   return events.sort((a, b) => a.at.getTime() - b.at.getTime())
 }
 
-function collectCommentFixEvents(comments: PRStatusComment[]): FixEvent[] {
-  const events: FixEvent[] = []
+function legacyCollectCommentFixEvents(comments: PRStatusComment[]): LegacyFixEvent[] {
+  const events: LegacyFixEvent[] = []
   for (const comment of comments) {
-    const annotation = parseLatestCrosscheckAnnotation(comment.body)
-    const at = commentCreatedAt(comment)
+    const annotation = legacyParseLatestAnnotation(comment.body)
+    const at = legacyCommentCreatedAt(comment)
     if (!annotation || !at) continue
     if (annotation.marker === 'fix_applied') events.push({ at, complete: true })
   }
   return events
 }
 
-function isFixStartedEvent(event: PRStatusLogEvent): boolean {
+function legacyIsFixStartedEvent(event: PRStatusLogEvent): boolean {
   return event.event === 'fix_started'
     || (event.event === 'step_started' && (event.step_type === 'fix' || event.type === 'fix'))
 }
 
-function collectLogFixEvents(logEvents: PRStatusLogEvent[]): FixEvent[] {
-  return logEvents.flatMap((event): FixEvent[] => {
-    const at = parseDate(event.ts)
+function legacyCollectLogFixEvents(logEvents: PRStatusLogEvent[]): LegacyFixEvent[] {
+  return logEvents.flatMap((event): LegacyFixEvent[] => {
+    const at = legacyParseDate(event.ts)
     if (!at) return []
     if (event.event === 'fix_complete') {
       return [{
@@ -255,12 +772,12 @@ function collectLogFixEvents(logEvents: PRStatusLogEvent[]): FixEvent[] {
         complete: true,
       }]
     }
-    if (isFixStartedEvent(event)) return [{ at, complete: false }]
+    if (legacyIsFixStartedEvent(event)) return [{ at, complete: false }]
     return []
   }).sort((a, b) => a.at.getTime() - b.at.getTime())
 }
 
-function collectProgress(reviewEvents: ReviewEvent[], fixEvents: FixEvent[]): PRProgressStep[] {
+function legacyCollectProgress(reviewEvents: LegacyReviewEvent[], fixEvents: LegacyFixEvent[]): PRProgressStep[] {
   const steps: PRProgressStep[] = [
     ...reviewEvents.map((event, index): PRProgressStep => ({
       kind: event.type === 'review' && index === 0 ? 'cr' : 'recheck',
@@ -277,12 +794,12 @@ function collectProgress(reviewEvents: ReviewEvent[], fixEvents: FixEvent[]): PR
   return steps.sort((a, b) => a.at.getTime() - b.at.getTime())
 }
 
-function relevantLogEvents(pr: PRStatusPullRequest, logEvents: PRStatusLogEvent[]): PRStatusLogEvent[] {
-  const key = prKey(pr.owner, pr.repo, pr.number)
-  return logEvents.filter(event => logEventKey(event) === key)
+function legacyRelevantLogEvents(pr: PRStatusPullRequest, logEvents: PRStatusLogEvent[]): PRStatusLogEvent[] {
+  const key = legacyPrKey(pr.owner, pr.repo, pr.number)
+  return logEvents.filter(event => legacyLogEventKey(event) === key)
 }
 
-function relevantLogDate(event: PRStatusLogEvent): Date | null {
+function legacyRelevantLogDate(event: PRStatusLogEvent): Date | null {
   if (
     event.event === 'review_complete'
     || event.event === 'fix_complete'
@@ -290,18 +807,18 @@ function relevantLogDate(event: PRStatusLogEvent): Date | null {
     || event.event === 'comment_posted'
     || event.event === 'pr_received'
     || event.event === 'pr_skipped'
-    || isFixStartedEvent(event)
+    || legacyIsFixStartedEvent(event)
   ) {
-    return parseDate(event.ts)
+    return legacyParseDate(event.ts)
   }
   return null
 }
 
-function latestCrosscheckCommentDate(comments: PRStatusComment[]): Date | null {
+function legacyLatestCrosscheckCommentDate(comments: PRStatusComment[]): Date | null {
   let latest: Date | null = null
   for (const comment of comments) {
-    if (!parseLatestCrosscheckAnnotation(comment.body)) continue
-    latest = maxDate(latest, commentDate(comment))
+    if (!legacyParseLatestAnnotation(comment.body)) continue
+    latest = legacyMaxDate(latest, legacyCommentDate(comment))
   }
   return latest
 }
@@ -309,7 +826,7 @@ function latestCrosscheckCommentDate(comments: PRStatusComment[]): Date | null {
 export function computeTokenTotals(logEvents: PRStatusLogEvent[]): TokenTotals {
   const totals: TokenTotals = { byPR: {}, byPRHeadSha: {} }
   for (const event of logEvents) {
-    const key = logEventKey(event)
+    const key = legacyLogEventKey(event)
     const tokens = typeof event.tokens_used === 'number' ? event.tokens_used : 0
     if (!key || tokens <= 0) continue
 
@@ -322,14 +839,14 @@ export function computeTokenTotals(logEvents: PRStatusLogEvent[]): TokenTotals {
           : null
     if (!kind) continue
 
-    totals.byPR[key] = cloneBucket(totals.byPR[key])
-    addTokens(totals.byPR[key], kind, tokens)
+    totals.byPR[key] = legacyCloneBucket(totals.byPR[key])
+    legacyAddTokens(totals.byPR[key], kind, tokens)
 
-    const sha = logEventSha(event)
+    const sha = legacyLogEventSha(event)
     if (sha) {
       const shaKey = `${key}@${sha}`
-      totals.byPRHeadSha[shaKey] = cloneBucket(totals.byPRHeadSha[shaKey])
-      addTokens(totals.byPRHeadSha[shaKey], kind, tokens)
+      totals.byPRHeadSha[shaKey] = legacyCloneBucket(totals.byPRHeadSha[shaKey])
+      legacyAddTokens(totals.byPRHeadSha[shaKey], kind, tokens)
     }
   }
   return totals
@@ -340,19 +857,19 @@ export function computeLastActive(
   comments: PRStatusComment[],
   logEvents: PRStatusLogEvent[],
 ): Date {
-  let latest = parseDate(pr.updatedAt) ?? parseDate(pr.updated_at)
-    ?? parseDate(pr.createdAt) ?? parseDate(pr.created_at)
+  let latest = legacyParseDate(pr.updatedAt) ?? legacyParseDate(pr.updated_at)
+    ?? legacyParseDate(pr.createdAt) ?? legacyParseDate(pr.created_at)
 
-  latest = maxDate(latest, latestCrosscheckCommentDate(comments))
+  latest = legacyMaxDate(latest, legacyLatestCrosscheckCommentDate(comments))
 
-  for (const event of relevantLogEvents(pr, logEvents)) {
-    latest = maxDate(latest, relevantLogDate(event))
+  for (const event of legacyRelevantLogEvents(pr, logEvents)) {
+    latest = legacyMaxDate(latest, legacyRelevantLogDate(event))
   }
   for (const commit of pr.commits ?? []) {
-    latest = maxDate(latest, parseDate(commit.committedAt) ?? parseDate(commit.committed_at))
+    latest = legacyMaxDate(latest, legacyParseDate(commit.committedAt) ?? legacyParseDate(commit.committed_at))
   }
   for (const status of [...(pr.commitStatuses ?? []), ...(pr.statuses ?? [])]) {
-    latest = maxDate(latest, parseDate(status.updatedAt) ?? parseDate(status.updated_at))
+    latest = legacyMaxDate(latest, legacyParseDate(status.updatedAt) ?? legacyParseDate(status.updated_at))
   }
 
   return latest ?? new Date(0)
@@ -363,9 +880,9 @@ export function foldPRStatus(
   comments: PRStatusComment[],
   logEvents: PRStatusLogEvent[],
 ): PRStatus {
-  const logsForPR = relevantLogEvents(pr, logEvents)
-  const reviewEvents = collectReviewEvents(comments)
-  const fixEvents = [...collectCommentFixEvents(comments), ...collectLogFixEvents(logsForPR)]
+  const logsForPR = legacyRelevantLogEvents(pr, logEvents)
+  const reviewEvents = legacyCollectReviewEvents(comments)
+  const fixEvents = [...legacyCollectCommentFixEvents(comments), ...legacyCollectLogFixEvents(logsForPR)]
     .sort((a, b) => a.at.getTime() - b.at.getTime())
   const latestReview = reviewEvents.at(-1)
   const latestFixAfterReview = latestReview
@@ -393,7 +910,7 @@ export function foldPRStatus(
   }
 
   const totals = computeTokenTotals(logsForPR)
-  const key = prKey(pr.owner, pr.repo, pr.number)
+  const key = legacyPrKey(pr.owner, pr.repo, pr.number)
 
   return {
     pr,
@@ -401,8 +918,8 @@ export function foldPRStatus(
     nextAction,
     verdict,
     lastActive: computeLastActive(pr, comments, logEvents),
-    tokenTotals: cloneBucket(totals.byPR[key]),
-    progress: collectProgress(reviewEvents, fixEvents),
+    tokenTotals: legacyCloneBucket(totals.byPR[key]),
+    progress: legacyCollectProgress(reviewEvents, fixEvents),
   }
 }
 
@@ -410,7 +927,7 @@ export function isStale(status: PRStatus, staleAfter: number): boolean {
   return Date.now() - status.lastActive.getTime() > staleAfter
 }
 
-function formatTokens(tokens: number | undefined): string | null {
+function legacyFormatTokens(tokens: number | undefined): string | null {
   if (tokens === undefined || tokens <= 0) return null
   if (tokens < 1000) return String(tokens)
   const rounded = Math.round(tokens / 100) / 10
@@ -434,7 +951,7 @@ export function buildProgressSummary(status: PRStatus): string {
       if (fixCount >= 2) continue
       fixCount++
       const count = step.appliedCount ?? 0
-      const tokens = formatTokens(step.tokens)
+      const tokens = legacyFormatTokens(step.tokens)
       parts.push(tokens ? `Fix(${count}, ${tokens})` : `Fix(${count})`)
       continue
     }

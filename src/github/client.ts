@@ -679,7 +679,7 @@ export async function fetchActiveRepos(login: string, token: string): Promise<Re
     if (data.length === 0) break
 
     for (const r of data) {
-      if (r.archived || r.owner.login !== login) continue
+      if (r.archived || r.owner.login.toLowerCase() !== login.toLowerCase()) continue
       const createdAt = new Date(r.created_at)
       const pushedAt = r.pushed_at ? new Date(r.pushed_at) : createdAt
       const createdAgo = now - createdAt.getTime()

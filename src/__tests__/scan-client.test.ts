@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listIssueCommentsForScan, listOpenPRsForScan, listUserReposForScan } from '../github/client.js'
+import { listIssueCommentsForScan, listOpenPRsForScan, listUserReposForScan, fetchActiveRepos } from '../github/client.js'
 
 function jsonResponse(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -67,5 +67,17 @@ describe('scan GitHub client helpers', () => {
 
     await expect(listIssueCommentsForScan('acme', 'api', 12, 'token'))
       .rejects.toThrow('GitHub rate limit or secondary rate limit')
+  })
+
+  it('filters fetchActiveRepos by owner login case-insensitively', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse([
+      { name: 'repo1', owner: { login: 'BeingZY' }, archived: false, pushed_at: '2026-05-01T00:00:00Z', created_at: '2026-01-01T00:00:00Z' },
+      { name: 'fork', owner: { login: 'SomeoneElse' }, archived: false, pushed_at: '2026-05-01T00:00:00Z', created_at: '2026-01-01T00:00:00Z' },
+    ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const repos = await fetchActiveRepos('beingzy', 'token')
+
+    expect(repos.map(r => r.fullName)).toEqual(['beingzy/repo1'])
   })
 })

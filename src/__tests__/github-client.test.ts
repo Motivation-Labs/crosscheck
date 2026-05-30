@@ -15,7 +15,7 @@ describe('github client listing failures', () => {
     ))
 
     await expect(listOpenPRs('acme', 'api', 'token')).rejects.toThrow(
-      'Failed to list open PRs [500]: Internal Server Error',
+      'Failed to list open PRs for acme/api page 1 [500]: server error',
     )
   })
 

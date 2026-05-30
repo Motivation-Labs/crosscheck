@@ -85,6 +85,8 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     let reviewText: string
     let tokensUsed: number | undefined
+    let model = 'default'
+    let origin = 'human'
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
@@ -93,7 +95,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     try {
       if (reviewer === 'codex') {
-        ;({ review: reviewText, tokensUsed } = await runCodexReview(
+        ;({ review: reviewText, tokensUsed, model } = await runCodexReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -103,7 +105,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           msg => { reviewSpinner!.text = msg },
         ))
       } else {
-        ;({ review: reviewText, tokensUsed } = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -123,12 +125,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
     console.log(`  ${formatVerdict(verdict)}`)
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand)
+    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

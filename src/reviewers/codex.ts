@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
+import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
@@ -30,13 +31,6 @@ function extractErrorSummary(stderr: string): string | undefined {
   ).at(-1)
 }
 
-// Models for API-key auth. When using ChatGPT subscription auth, omit model override.
-const TIER_MODELS_API: Record<string, string> = {
-  fast: 'gpt-4o-mini',
-  balanced: 'o4-mini',
-  thorough: 'o3',
-}
-
 const TIER_TIMEOUT_MS: Record<string, number> = {
   fast: 300_000,
   balanced: 600_000,
@@ -52,10 +46,7 @@ export async function runCodexReview(
   stepInstructions?: string,
   onLog?: (msg: string) => void,
 ): Promise<ReviewResult> {
-  // subscription auth has a fixed model set by ChatGPT plan; only override for api-key
-  const model = vendor.auth === 'api-key'
-    ? (vendor.model ?? TIER_MODELS_API[quality.tier] ?? 'o4-mini')
-    : undefined
+  const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
 
   // --base and [PROMPT] are mutually exclusive in codex review;
@@ -75,8 +66,8 @@ export async function runCodexReview(
   writeFileSync(instructionsPath, instructionsNote)
 
   try {
-    const modelArgs = model ? ['-c', `model="${model}"`] : []
-    onLog?.(`  running: codex review --base ${baseBranch}${model ? ` -c model="${model}"` : ''}`)
+    const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
+    onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
 
     const timeoutMs = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
     const result = await execa(
@@ -101,7 +92,7 @@ export async function runCodexReview(
     const review = rawReview.includes('VERDICT:')
       ? rawReview
       : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
-    return { review, tokensUsed }
+    return { review, tokensUsed, model }
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''

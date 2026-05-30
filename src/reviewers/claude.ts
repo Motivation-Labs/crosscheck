@@ -1,12 +1,7 @@
 import { execa } from 'execa'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
-
-const TIER_MODELS: Record<string, string> = {
-  fast: 'claude-haiku-4-5-20251001',
-  balanced: 'claude-sonnet-4-6',
-  thorough: 'claude-opus-4-7',
-}
+import { resolveClaudeModel } from '../lib/review-models.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -18,6 +13,7 @@ const EFFORT_MAP: Record<string, string> = {
 export interface ReviewResult {
   review: string
   tokensUsed?: number
+  model: string
 }
 
 interface ClaudeJsonOutput {
@@ -38,7 +34,7 @@ export async function runClaudeReview(
   stepInstructions?: string,
   onLog?: (msg: string) => void,
 ): Promise<ReviewResult> {
-  const model = TIER_MODELS[quality.tier] ?? 'claude-sonnet-4-6'
+  const model = resolveClaudeModel(quality)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`
@@ -82,9 +78,9 @@ export async function runClaudeReview(
       const tokensUsed = typeof inTok === 'number' && typeof outTok === 'number'
         ? inTok + outTok
         : undefined
-      return { review, tokensUsed }
+      return { review, tokensUsed, model }
     } catch {
-      return { review: raw }
+      return { review: raw, model }
     }
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }

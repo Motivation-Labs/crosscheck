@@ -101,10 +101,10 @@ describe('parseCrosscheckAnnotation', () => {
 })
 
 describe('derivePRStatus', () => {
-  it('marks untouched PRs as reviewable PR state', () => {
+  it('marks untouched PRs as NEEDS_REVIEW', () => {
     const status = derivePRStatus(input(), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('PR')
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
     expect(status.freshness).toBe('stale')
     expect(status.nextAction).toBe('review')
   })
@@ -139,7 +139,7 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.nextAction).toBe('fix')
   })
 
@@ -159,11 +159,11 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
   })
 
-  it('moves a PR with fix activity after review to RECHECK', () => {
+  it('moves a PR with fix activity after review to NEEDS_RECHECK', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -179,7 +179,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
     expect(status.freshness).toBe('stale')
   })
@@ -201,7 +201,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
   })
 
@@ -214,7 +214,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.nextAction).toBe('fix')
     expect(status.freshness).toBe('stale')
   })
@@ -264,10 +264,10 @@ describe('derivePRStatus', () => {
 })
 
 describe('foldPRStatus', () => {
-  it('returns PR when there is no crosscheck comment', () => {
+  it('returns NEEDS_REVIEW when there is no crosscheck comment', () => {
     const status = foldPRStatus(BASE_PR, [], [])
 
-    expect(status.state).toBe('PR')
+    expect(status.state).toBe('NEEDS_REVIEW')
     expect(status.nextAction).toBe('review')
     expect(status.verdict).toBeNull()
   })
@@ -283,7 +283,7 @@ describe('foldPRStatus', () => {
     expect(status.verdict).toBe('APPROVE')
   })
 
-  it('returns RECHECK when NEEDS_WORK has a later fix but no later recheck', () => {
+  it('returns NEEDS_RECHECK when NEEDS_WORK has a later fix but no later recheck', () => {
     const logs: PRStatusLogEvent[] = [
       {
         ts: '2026-01-01T03:00:00Z',
@@ -301,7 +301,7 @@ describe('foldPRStatus', () => {
       reviewComment('NEEDS_WORK', '2026-01-01T02:00:00Z'),
     ], logs)
 
-    expect(status.state).toBe('RECHECK')
+    expect(status.state).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
     expect(buildProgressSummary(status)).toBe('PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K)')
   })

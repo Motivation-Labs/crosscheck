@@ -22,9 +22,7 @@ import { parseAnnotationFieldsFenced } from './annotation.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
-// FIX is reserved for future structured fix annotations; current scans infer
-// post-fix work as RECHECK from workflow logs.
-export type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
+export type ReviewState = 'NEEDS_REVIEW' | 'APPROVE' | 'NEEDS_FIX' | 'BLOCK' | 'NEEDS_RECHECK'
 export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
@@ -409,16 +407,21 @@ function latestAppliedFixAfter(events: PRWorkflowLogEvent[], after: string | und
     .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0] ?? null
 }
 
+function verdictToReviewState(verdict: CrosscheckVerdict): ReviewState {
+  if (verdict === 'NEEDS_WORK') return 'NEEDS_FIX'
+  return verdict
+}
+
 function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
-  if (!latestVerdict) return 'PR'
-  if (latestFix) return 'RECHECK'
-  return latestVerdict.verdict
+  if (!latestVerdict) return 'NEEDS_REVIEW'
+  if (latestFix) return 'NEEDS_RECHECK'
+  return verdictToReviewState(latestVerdict.verdict)
 }
 
 function nextActionForState(state: ReviewState): NextAction {
-  if (state === 'PR') return 'review'
-  if (state === 'RECHECK') return 'recheck'
-  if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'fix'
+  if (state === 'NEEDS_REVIEW') return 'review'
+  if (state === 'NEEDS_RECHECK') return 'recheck'
+  if (state === 'NEEDS_FIX' || state === 'BLOCK') return 'fix'
   if (state === 'APPROVE') return 'merge'
   return null
 }
@@ -505,7 +508,7 @@ async function buildRepoScopes(config: Config, token: string): Promise<Array<{ o
 // This block preserves the foldPRStatus-based API that was present in staging.
 // The scan command uses the newer derivePRStatus / ScanPRStatus API above.
 
-export type PRReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
+export type PRReviewState = 'NEEDS_REVIEW' | 'APPROVE' | 'NEEDS_FIX' | 'BLOCK' | 'FIX_IN_PROGRESS' | 'NEEDS_RECHECK'
 export type PRNextAction = 'review' | 'fix' | 'recheck' | 'none'
 export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
@@ -851,7 +854,7 @@ export function foldPRStatus(
     ? fixEvents.filter(event => event.at.getTime() > latestReview.at.getTime()).at(-1)
     : undefined
 
-  let state: PRReviewState = 'PR'
+  let state: PRReviewState = 'NEEDS_REVIEW'
   let nextAction: PRNextAction = 'review'
   const verdict = latestReview?.verdict ?? null
 
@@ -860,13 +863,13 @@ export function foldPRStatus(
       state = 'APPROVE'
       nextAction = 'none'
     } else if (latestFixAfterReview?.complete) {
-      state = 'RECHECK'
+      state = 'NEEDS_RECHECK'
       nextAction = 'recheck'
     } else if (latestFixAfterReview && !latestFixAfterReview.complete) {
-      state = 'FIX'
+      state = 'FIX_IN_PROGRESS'
       nextAction = 'fix'
     } else {
-      state = latestReview.verdict
+      state = latestReview.verdict === 'NEEDS_WORK' ? 'NEEDS_FIX' : latestReview.verdict
       nextAction = 'fix'
     }
   }

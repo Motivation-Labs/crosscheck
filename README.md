@@ -41,6 +41,50 @@ crosscheck serve        # always-on team server
 
 ## Commands
 
+```bash
+crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
+crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
+crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck scan                     # show open PR workflow state across monitored repos
+crosscheck kickass                  # advance stale PRs from an interactive operator queue
+crosscheck init                     # check prerequisites, write starter config
+crosscheck status                   # auth state, config summary, CLI versions
+```
+
+**Operator queue (scan + kickass)**
+
+`crosscheck scan` classifies every open PR by freshness and workflow state:
+
+| State | Meaning | Next action |
+|---|---|---|
+| `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
+| `NEEDS_FIX` | Reviewed — changes requested | fix |
+| `BLOCK` | Reviewed — hard block, do not merge | fix |
+| `NEEDS_RECHECK` | Fix was applied, recheck pending | recheck |
+| `APPROVE` | Reviewed and approved | merge |
+
+```bash
+crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
+crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
+```
+
+`crosscheck run` and `crosscheck review` both accept vendor aliases via `--reviewer`:
+- Claude: `claude`, `claude-code`, `cc`, `anthropic`
+- Codex: `codex`, `openai`
+
+**Continuous improvement** *(experimental)*
+
+```bash
+crosscheck diagnose                 # surface failure patterns from review logs
+crosscheck optimize [--apply]       # rewrite reviewer instructions based on diagnose output
+crosscheck impact [--money]         # time saved, issues caught, code quality trends
+crosscheck issue                    # draft and file a bug report from recent error logs
+```
+
+---
+
 ### `crosscheck onboard`
 
 Interactive setup wizard. Picks repos/orgs to monitor, selects single-vendor or cross-vendor mode, configures the review pipeline, and writes `~/.crosscheck/config.yml` and `workflow.yml`.
@@ -87,6 +131,8 @@ One-shot review of a single PR. Clones, checks out, reviews, and posts the comme
 crosscheck review https://github.com/org/repo/pull/42
 crosscheck review <pr-url> --reviewer claude    # force Claude regardless of detection
 crosscheck review <pr-url> --reviewer codex     # force Codex regardless of detection
+crosscheck review <pr-url> --reviewer cc        # alias for Claude
+crosscheck review <pr-url> --reviewer openai    # alias for Codex
 ```
 
 ---
@@ -109,7 +155,7 @@ crosscheck run <pr-url> --dry-run                # review without posting or fix
 
 Scans every open PR in the configured monitor scope and reports where each one is in the crosscheck workflow. Results are cached for 60 seconds.
 
-States: `PR` (needs review) · `APPROVE` · `NEEDS_WORK` · `BLOCK` · `RECHECK` (fix applied, needs recheck)
+States: `NEEDS_REVIEW` · `NEEDS_FIX` · `BLOCK` · `NEEDS_RECHECK` · `APPROVE`
 
 ```bash
 crosscheck scan                          # all open PRs, grouped stale/not-stale
@@ -132,7 +178,7 @@ crosscheck kickass --stale-after 2h      # tighter staleness threshold
 crosscheck kickass --force               # bypass scan cache before picking
 ```
 
-Actions: `PR → CR` · `NEEDS_WORK/BLOCK → Fix` · `FIX/RECHECK → Recheck` · `APPROVE → Merge`
+Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
 
 ---
 

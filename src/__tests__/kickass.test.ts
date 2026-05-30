@@ -24,7 +24,7 @@ function pr(overrides: Partial<PRStatus> = {}): PRStatus {
     headRepo: 'acme/web',
     baseRef: 'main',
     freshness: 'stale',
-    reviewState: nextAction === 'recheck' ? 'RECHECK' : 'PR',
+    reviewState: nextAction === 'recheck' ? 'NEEDS_RECHECK' : 'NEEDS_REVIEW',
     nextAction,
     lastActiveAt: '2026-05-29T00:00:00.000Z',
     staleAfterMs: 60_000,
@@ -65,7 +65,7 @@ describe('buildKickassRunArgs', () => {
   it('targets only fix for stale PRs with unresolved findings', () => {
     expect(buildKickassRunArgs(pr({
       nextAction: 'fix',
-      reviewState: 'NEEDS_WORK',
+      reviewState: 'NEEDS_FIX',
       latestAnnotation: {
         origin: 'claude',
         reviewer: 'codex',
@@ -140,7 +140,7 @@ describe('runKickassWithDeps', () => {
   it('skips execution when the PR head changed after scan', async () => {
     const selected = pr({
       nextAction: 'review',
-      reviewState: 'PR',
+      reviewState: 'NEEDS_REVIEW',
       headSha: 'abc123456789',
     })
     const plan = buildPreflightPlan([selected])
@@ -166,7 +166,7 @@ describe('runKickassWithDeps', () => {
 
   it('downgrades NEEDS_WORK fix to CR when no current-head review comment is usable', () => {
     const selected = pr({
-      reviewState: 'NEEDS_WORK',
+      reviewState: 'NEEDS_FIX',
       nextAction: 'fix',
       latestAnnotation: {
         origin: 'claude',
@@ -188,7 +188,7 @@ describe('runKickassWithDeps', () => {
     const review = pr({
       number: 1,
       nextAction: 'review',
-      reviewState: 'PR',
+      reviewState: 'NEEDS_REVIEW',
       headRepo: 'fork/web',
     })
     const fix = pr({

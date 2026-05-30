@@ -8,6 +8,7 @@ import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detec
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
+import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -49,8 +50,14 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   let reviewer: 'claude' | 'codex' | null
   let origin: PROrigin = 'human'
 
-  if (forceReviewer === 'codex' || forceReviewer === 'claude') {
-    reviewer = forceReviewer
+  const normalizedReviewer = normalizeVendor(forceReviewer)
+  if (forceReviewer !== undefined && normalizedReviewer === null) {
+    console.error(chalk.red(`✗ Unknown reviewer "${forceReviewer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+
+  if (normalizedReviewer !== null) {
+    reviewer = normalizedReviewer
     console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
   } else {
     const { origin: detectedOrigin, method } = await detectOriginFull(
@@ -66,7 +73,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     origin = detectedOrigin
     reviewer = await assignReviewer(origin, config)
     if (!reviewer) {
-      console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) — no reviewer assigned (use --reviewer codex|claude to force)`))
+      console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) — no reviewer assigned (use --reviewer ${VENDOR_ALIAS_HINT} to force)`))
       return
     }
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) → assigned reviewer: ${reviewer}`))

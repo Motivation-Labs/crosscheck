@@ -90,13 +90,37 @@ PR #49 opened: implement caching layer
 ## Commands
 
 ```bash
-crosscheck init                     # check prerequisites, write starter config
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
-crosscheck review <pr-url>          # one-shot review of a specific PR
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck scan                     # show open PR workflow state across monitored repos
+crosscheck kickass                  # advance stale PRs from an interactive operator queue
+crosscheck init                     # check prerequisites, write starter config
 crosscheck status                   # auth state, config summary, CLI versions
 ```
+
+**Operator queue (scan + kickass)**
+
+`crosscheck scan` classifies every open PR by freshness and workflow state:
+
+| State | Meaning | Next action |
+|---|---|---|
+| `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
+| `NEEDS_FIX` | Reviewed — changes requested | fix |
+| `BLOCK` | Reviewed — hard block, do not merge | fix |
+| `NEEDS_RECHECK` | Fix was applied, recheck pending | recheck |
+| `APPROVE` | Reviewed and approved | merge |
+
+```bash
+crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
+crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
+```
+
+`crosscheck run` and `crosscheck review` both accept vendor aliases via `--reviewer`:
+- Claude: `claude`, `claude-code`, `cc`, `anthropic`
+- Codex: `codex`, `openai`
 
 **Continuous improvement** *(experimental)*
 

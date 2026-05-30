@@ -6,6 +6,7 @@ import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
+import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow } from '../lib/workflow.js'
@@ -56,11 +57,17 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: prData.head.sha })
 
   // Resolve origin and reviewer
+  const normalizedReviewer = normalizeVendor(opts.reviewer)
+  if (opts.reviewer !== undefined && normalizedReviewer === null) {
+    console.error(chalk.red(`✗ Unknown reviewer "${opts.reviewer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+
   let origin: import('../github/detector.js').PROrigin
-  if (opts.reviewer === 'codex' || opts.reviewer === 'claude') {
+  if (normalizedReviewer !== null) {
     // --reviewer forces the origin to the opposite vendor (cross-vendor semantics)
-    origin = opts.reviewer === 'codex' ? 'claude' : 'codex'
-    console.log(chalk.dim(`  reviewer: ${opts.reviewer} (forced)`))
+    origin = normalizedReviewer === 'codex' ? 'claude' : 'codex'
+    console.log(chalk.dim(`  reviewer: ${normalizedReviewer} (forced)`))
   } else {
     const { origin: detectedOrigin, method } = await detectOriginFull(
       prData.body ?? '',
@@ -76,15 +83,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method})`))
   }
 
-  const assignedReviewer = opts.reviewer === 'codex' || opts.reviewer === 'claude'
-    ? opts.reviewer
+  const assignedReviewer = normalizedReviewer !== null
+    ? normalizedReviewer
     : await assignReviewer(origin, config)
 
   if (!assignedReviewer) {
-    console.log(chalk.dim(`  no reviewer assigned for origin "${origin}" — use --reviewer codex|claude to force`))
+    console.log(chalk.dim(`  no reviewer assigned for origin "${origin}" — use --reviewer ${VENDOR_ALIAS_HINT} to force`))
     return
   }
-  if (!opts.reviewer) {
+  if (normalizedReviewer === null) {
     console.log(chalk.dim(`  assigned reviewer: ${assignedReviewer}`))
   }
 

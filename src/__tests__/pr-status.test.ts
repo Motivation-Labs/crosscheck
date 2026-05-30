@@ -46,10 +46,10 @@ describe('parseCrosscheckAnnotation', () => {
 })
 
 describe('derivePRStatus', () => {
-  it('marks untouched PRs as reviewable PR state', () => {
+  it('marks untouched PRs as NEEDS_REVIEW', () => {
     const status = derivePRStatus(input(), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('PR')
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
     expect(status.freshness).toBe('stale')
     expect(status.nextAction).toBe('review')
   })
@@ -84,7 +84,7 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.nextAction).toBe('fix')
   })
 
@@ -104,11 +104,11 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
   })
 
-  it('moves a PR with fix activity after review to RECHECK', () => {
+  it('moves a PR with fix activity after review to NEEDS_RECHECK', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -124,7 +124,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
     expect(status.freshness).toBe('stale')
   })
@@ -146,7 +146,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
   })
 
@@ -159,7 +159,7 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
     expect(status.nextAction).toBe('fix')
     expect(status.freshness).toBe('stale')
   })

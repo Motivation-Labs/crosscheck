@@ -3,12 +3,41 @@ import {
   buildProgressSummary,
   computeLastActive,
   computeTokenTotals,
+  derivePRStatus,
   foldPRStatus,
   isStale,
+  parseCrosscheckAnnotation,
   type PRStatusComment,
+  type PRStatusInput,
   type PRStatusLogEvent,
   type PRStatusPullRequest,
 } from '../lib/pr-status.js'
+
+const NOW = Date.parse('2026-05-29T12:00:00.000Z')
+
+function input(overrides: Partial<PRStatusInput> = {}): PRStatusInput {
+  return {
+    owner: 'acme',
+    repo: 'web',
+    number: 7,
+    title: 'Add dashboard',
+    author: 'alice',
+    url: 'https://github.com/acme/web/pull/7',
+    headSha: 'abc123',
+    headRef: 'feature',
+    headRepo: 'acme/web',
+    baseRef: 'main',
+    prUpdatedAt: '2026-05-28T10:00:00.000Z',
+    comments: [],
+    reviewComments: [],
+    commits: [],
+    commitStatuses: [],
+    checkRuns: [],
+    timelineEvents: [],
+    logEvents: [],
+    ...overrides,
+  }
+}
 
 const BASE_PR: PRStatusPullRequest = {
   owner: 'acme',
@@ -35,6 +64,204 @@ function reviewComment(verdict: 'APPROVE' | 'NEEDS_WORK' | 'BLOCK', createdAt: s
     createdAt,
   )
 }
+
+describe('parseCrosscheckAnnotation', () => {
+  it('parses the last footer annotation and normalizes verdict underscores', () => {
+    const annotation = parseCrosscheckAnnotation(
+      'quoted <!-- crosscheck: fix_applied -->\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+    )
+    expect(annotation).toEqual({
+      origin: 'claude',
+      reviewer: 'codex',
+      verdict: 'NEEDS_WORK',
+      type: 'review',
+    })
+  })
+
+  it('parses bare crosscheck markers', () => {
+    expect(parseCrosscheckAnnotation('<!-- crosscheck: fix_applied -->')).toEqual({ marker: 'fix_applied' })
+  })
+
+  it('ignores quoted and fenced annotations', () => {
+    expect(parseCrosscheckAnnotation([
+      'The text mentions `<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->`.',
+      '',
+      '```',
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+      '```',
+      '',
+      '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->',
+    ].join('\n'))).toEqual({
+      origin: 'claude',
+      reviewer: 'codex',
+      verdict: 'BLOCK',
+      type: 'review',
+    })
+  })
+})
+
+describe('derivePRStatus', () => {
+  it('marks untouched PRs as reviewable PR state', () => {
+    const status = derivePRStatus(input(), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('PR')
+    expect(status.freshness).toBe('stale')
+    expect(status.nextAction).toBe('review')
+  })
+
+  it('uses the latest crosscheck verdict annotation as review state', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('APPROVE')
+    expect(status.nextAction).toBe('merge')
+    expect(status.freshness).toBe('stale')
+  })
+
+  it('keeps the latest verdict when a newer bare crosscheck marker exists', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-27T11:00:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: fix_applied -->',
+          createdAt: '2026-05-27T12:00:00.000Z',
+          updatedAt: '2026-05-27T12:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.nextAction).toBe('fix')
+  })
+
+  it('orders annotation verdicts by creation time, not later edits', () => {
+    const status = derivePRStatus(input({
+      comments: [
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
+          createdAt: '2026-05-27T11:00:00.000Z',
+          updatedAt: '2026-05-29T11:30:00.000Z',
+        },
+        {
+          body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+          createdAt: '2026-05-28T11:00:00.000Z',
+          updatedAt: '2026-05-28T11:00:00.000Z',
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
+  })
+
+  it('moves a PR with fix activity after review to RECHECK', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [{
+        ts: '2026-05-27T12:00:00.000Z',
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 2,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('RECHECK')
+    expect(status.nextAction).toBe('recheck')
+    expect(status.freshness).toBe('stale')
+  })
+
+  it('treats same-timestamp fix activity as needing recheck', () => {
+    const timestamp = '2026-05-27T11:00:00.000Z'
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }],
+      logEvents: [{
+        ts: timestamp,
+        event: 'fix_complete',
+        repo: 'acme/web',
+        pr: 7,
+        applied_count: 1,
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('RECHECK')
+    expect(status.nextAction).toBe('recheck')
+  })
+
+  it('keeps NEEDS_WORK when no fix has landed yet', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.nextAction).toBe('fix')
+    expect(status.freshness).toBe('stale')
+  })
+
+  it('uses every activity source when computing last active time', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      commits: [{ sha: 'def456', committedAt: '2026-05-29T11:55:00.000Z' }],
+    }), { nowMs: NOW, staleAfterMs: 30 * 60 * 1000 })
+
+    expect(status.lastActiveAt).toBe('2026-05-29T11:55:00.000Z')
+    expect(status.freshness).toBe('not_stale')
+  })
+
+  it('does not let no-op workflow bookkeeping hide stale actionable PRs', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+      logEvents: [
+        {
+          ts: '2026-05-29T11:55:00.000Z',
+          event: 'step_skipped',
+          repo: 'acme/web',
+          pr: 7,
+          reason: 'when_condition',
+        },
+        {
+          ts: '2026-05-29T11:56:00.000Z',
+          event: 'comment_posted',
+          repo: 'acme/web',
+          pr: 7,
+        },
+      ],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.lastActiveAt).toBe('2026-05-28T10:00:00.000Z')
+    expect(status.freshness).toBe('stale')
+    expect(status.nextAction).toBe('fix')
+  })
+})
 
 describe('foldPRStatus', () => {
   it('returns PR when there is no crosscheck comment', () => {
@@ -120,8 +347,6 @@ describe('foldPRStatus', () => {
       { ts: '2026-01-01T06:00:00Z', level: 'info', event: 'fix_complete', repo: 'acme/api', pr: 42, applied_count: 2, tokens_used: 2200 },
     ])
 
-    // 3 fix events total; only 2 fit within the cap — the trailing +1 more marker
-    // lets readers know the timeline is truncated.
     expect(buildProgressSummary(status)).toBe('PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K) -> Recheck(NEEDS_WORK) -> Fix(1, 1.2K) -> Recheck(APPROVE) -> +1 more')
   })
 })
@@ -145,6 +370,18 @@ describe('stale activity', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('uses normal PR comments as activity', () => {
+    const pr: PRStatusPullRequest = {
+      ...BASE_PR,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+
+    expect(computeLastActive(pr, [
+      comment('human reply', '2026-01-02T00:00:00Z'),
+    ], []).toISOString()).toBe('2026-01-02T00:00:00.000Z')
   })
 })
 

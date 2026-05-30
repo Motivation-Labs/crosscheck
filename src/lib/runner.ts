@@ -11,7 +11,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
-import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } from '../github/client.js'
+import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
@@ -182,6 +182,13 @@ export interface WorkflowContext {
   // fires mid-workflow — otherwise process.exit bypasses the runner's finally
   // and the pending status is leaked indefinitely on GitHub.
   pushedShas?: string[]
+  // Optional review comment selected by the caller. Used by operator flows that
+  // already scanned the PR and want fix-only runs to avoid reselecting a
+  // different comment after dispatch.
+  initialReviewComment?: {
+    id: number
+    body: string
+  }
 }
 
 export interface WorkflowResult {
@@ -327,7 +334,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -352,9 +359,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
-      // Find the most recent review result that has a comment body
+      // Find the most recent review result that has a comment body. A fix-only
+      // invocation (used by kickass) has no in-memory review result, so seed it
+      // from the latest fresh crosscheck review comment on GitHub.
       const reviewResult = Object.values(results).reverse().find(r => r.commentBody)
-      if (!reviewResult?.commentBody) { skipFix('no_review_comment'); continue }
+      let reviewCommentBody = reviewResult?.commentBody
+      let reviewCommentId = reviewResult?.commentId
+      if (!reviewCommentBody) {
+        reviewCommentBody = ctx.initialReviewComment?.body
+        reviewCommentId = ctx.initialReviewComment?.id
+      }
+      if (!reviewCommentBody) {
+        const latestReviewComment = await getLastCrossCheckReviewComment(owner, repoName, prNumber, token)
+        reviewCommentBody = latestReviewComment?.body
+        reviewCommentId = latestReviewComment?.id
+      }
+      if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
@@ -386,7 +406,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config, fixModel,
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
@@ -401,7 +421,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
         try {
           ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewResult.commentBody, step.instructions ?? '', config, fixModel,
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
           ))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
@@ -466,7 +486,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const octokit = createGithubClient(token)
           const body = buildFixAppliedCommentBody({
             owner, repo: repoName, sha: newSha, appliedCount,
-            reviewCommentId: reviewResult.commentId,
+            reviewCommentId,
           })
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
           fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })

@@ -7,6 +7,25 @@ export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
 }
 
+async function readGithubErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = await res.json() as { message?: unknown }
+    if (typeof body.message === 'string' && body.message.trim().length > 0) return body.message
+  } catch {
+    // Fall back to status text when GitHub returns a non-JSON error body.
+  }
+  return res.statusText || `HTTP ${res.status}`
+}
+
+async function throwGithubRequestError(res: Response, context: string): Promise<never> {
+  const message = await readGithubErrorMessage(res)
+  throw new Error(`GitHub API request failed (${context}) [${res.status}]: ${message}`)
+}
+
+function repoPath(owner: string, repo: string): string {
+  return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+}
+
 export function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
   const expected = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
   try {
@@ -146,9 +165,10 @@ export async function listUserRepos(
   while (true) {
     const url = isSelf
       ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
-      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+      : `https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner`
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
-    if (!res.ok) break
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list user repos for ${username}`)
     const data = await res.json() as Array<{ name: string; owner: { login: string }; archived: boolean }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -168,13 +188,11 @@ export async function listOrgRepos(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      `https://api.github.com/orgs/${encodeURIComponent(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list org repos [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) throw new Error(`Failed to list org repos [${res.status}]: ${res.statusText} (GitHub API request failed)`)
     const data = await res.json() as Array<{ name: string; archived: boolean; pushed_at: string | null }>
     if (data.length === 0) break
     for (const repo of data) {
@@ -199,6 +217,7 @@ export interface OpenPR {
   body: string | null
   createdAt: string
   updatedAt: string
+  url?: string
 }
 
 export interface ScanOpenPR extends Omit<OpenPR, 'body'> {
@@ -228,29 +247,28 @@ export async function listOpenPRs(
   let page = 1
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
-    if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText}`)
-      break
-    }
+    if (res.status === 404) return results
+    if (!res.ok) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText} (GitHub API request failed)`)
     const data = await res.json() as Array<{
       number: number
       title: string
-      user: { login: string }
+      user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
       created_at: string
       updated_at: string
+      html_url: string
     }>
     if (data.length === 0) break
     for (const pr of data) {
       results.push({
         number: pr.number,
         title: pr.title,
-        author: pr.user.login,
+        author: pr.user?.login ?? 'ghost',
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,
@@ -258,6 +276,7 @@ export async function listOpenPRs(
         body: pr.body,
         createdAt: pr.created_at,
         updatedAt: pr.updated_at,
+        url: pr.html_url,
       })
     }
     if (data.length < 100) break
@@ -284,16 +303,12 @@ async function githubJson<T>(url: string, token: string, label: string): Promise
   return await res.json() as T
 }
 
-function apiPath(...parts: Array<string | number>): string {
-  return parts.map(part => encodeURIComponent(String(part))).join('/')
-}
-
 export async function listOrgReposForScan(org: string, token: string): Promise<ScanRepo[]> {
   const results: ScanRepo[] = []
   let page = 1
   while (true) {
     const data = await githubJson<Array<{ name: string; archived: boolean }>>(
-      `https://api.github.com/orgs/${apiPath(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      `https://api.github.com/orgs/${encodeURIComponent(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       token,
       `List repos for org ${org}`,
     )
@@ -313,7 +328,7 @@ export async function listUserReposForScan(username: string, token: string, isSe
   while (true) {
     const url = isSelf
       ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
-      : `https://api.github.com/users/${apiPath(username)}/repos?per_page=100&page=${page}&type=owner`
+      : `https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner`
     const data = await githubJson<Array<{ name: string; owner: { login: string }; archived: boolean }>>(
       url,
       token,
@@ -321,7 +336,9 @@ export async function listUserReposForScan(username: string, token: string, isSe
     )
     if (data.length === 0) break
     for (const repo of data) {
-      if (!repo.archived && repo.owner.login.toLowerCase() === username.toLowerCase()) results.push({ owner: repo.owner.login, name: repo.name })
+      if (!repo.archived && repo.owner.login.toLowerCase() === username.toLowerCase()) {
+        results.push({ owner: repo.owner.login, name: repo.name })
+      }
     }
     if (data.length < 100) break
     page++
@@ -343,7 +360,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
       updated_at: string
       html_url: string
     }>>(
-      `https://api.github.com/repos/${apiPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
       token,
       `List open PRs for ${owner}/${repo}`,
     )
@@ -384,7 +401,7 @@ export async function listIssueCommentsForScan(
       created_at: string
       updated_at: string
     }>>(
-      `https://api.github.com/repos/${apiPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}&sort=created&direction=asc`,
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}&sort=created&direction=asc`,
       token,
       `List comments for ${owner}/${repo}#${issueNumber}`,
     )
@@ -505,6 +522,168 @@ export async function listCommitStatuses(
   }
   return results
 }
+
+export interface GitHubCommentActivity {
+  body: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface GitHubCommitActivity {
+  sha: string
+  committedAt: string
+}
+
+export interface GitHubTimestampActivity {
+  state?: string
+  name?: string
+  conclusion?: string | null
+  status?: string | null
+  updatedAt: string
+}
+
+export async function listIssueComments(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list issue comments for ${owner}/${repo}#${issueNumber}`)
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRReviewComments(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommentActivity[]> {
+  const results: GitHubCommentActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR review comments for ${owner}/${repo}#${pullNumber}`)
+    const data = await res.json() as Array<{ body: string; created_at: string; updated_at: string }>
+    if (data.length === 0) break
+    for (const comment of data) {
+      results.push({ body: comment.body, createdAt: comment.created_at, updatedAt: comment.updated_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listPRCommitActivity(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<GitHubCommitActivity[]> {
+  const results: GitHubCommitActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/pulls/${pullNumber}/commits?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list PR commits for ${owner}/${repo}#${pullNumber}`)
+    const data = await res.json() as Array<{
+      sha: string
+      commit: { author: { date: string | null } | null; committer: { date: string | null } | null }
+    }>
+    if (data.length === 0) break
+    for (const commit of data) {
+      const committedAt = commit.commit.committer?.date ?? commit.commit.author?.date
+      if (committedAt) results.push({ sha: commit.sha, committedAt })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listCheckRuns(
+  owner: string,
+  repo: string,
+  ref: string,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100&page=${page}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list check runs for ${owner}/${repo}@${ref}`)
+    const data = await res.json() as {
+      check_runs: Array<{ name: string; status: string; conclusion: string | null; completed_at: string | null; started_at: string | null }>
+    }
+    if (data.check_runs.length === 0) break
+    for (const run of data.check_runs) {
+      const updatedAt = run.completed_at ?? run.started_at
+      if (updatedAt) results.push({ name: run.name, status: run.status, conclusion: run.conclusion, updatedAt })
+    }
+    if (data.check_runs.length < 100) break
+    page++
+  }
+  return results
+}
+
+export async function listTimelineEvents(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+): Promise<GitHubTimestampActivity[]> {
+  const results: GitHubTimestampActivity[] = []
+  let page = 1
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${repoPath(owner, repo)}/issues/${issueNumber}/timeline?per_page=100&page=${page}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+        },
+      },
+    )
+    if (res.status === 404) return results
+    if (!res.ok) await throwGithubRequestError(res, `list timeline events for ${owner}/${repo}#${issueNumber}`)
+    const data = await res.json() as Array<{ event?: string; created_at?: string }>
+    if (data.length === 0) break
+    for (const event of data) {
+      if (event.created_at) results.push({ name: event.event, updatedAt: event.created_at })
+    }
+    if (data.length < 100) break
+    page++
+  }
+  return results
+}
+
 // Returns true if any comment on the PR contains '[crosscheck]' — meaning it
 // has already been reviewed by this tool.
 export async function prHasCrossCheckComment(
@@ -570,8 +749,22 @@ export async function getLastCrossCheckCommentId(
   prNumber: number,
   token: string,
 ): Promise<number | undefined> {
+  return (await getLastCrossCheckReviewComment(owner, repo, prNumber, token))?.id
+}
+
+export interface CrossCheckReviewComment {
+  id: number
+  body: string
+}
+
+export async function getLastCrossCheckReviewComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<CrossCheckReviewComment | undefined> {
   let page = 1
-  let lastId: number | undefined
+  let lastComment: CrossCheckReviewComment | undefined
   while (true) {
     const res = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
@@ -582,13 +775,13 @@ export async function getLastCrossCheckCommentId(
     if (data.length === 0) break
     for (const comment of data) {
       if (isFreshReviewComment(comment.body)) {
-        lastId = comment.id
+        lastComment = { id: comment.id, body: comment.body }
       }
     }
     if (data.length < 100) break
     page++
   }
-  return lastId
+  return lastComment
 }
 
 export async function getPRCommits(
@@ -712,6 +905,7 @@ export interface ReviewCommentBodyInput {
   model?: string
   stepType?: CrosscheckStepType
   round?: number
+  sha?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -745,6 +939,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     round,
     verdict: input.verdict ?? 'UNKNOWN',
     service: serviceName,
+    ...(input.sha && { sha: input.sha }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -769,6 +964,7 @@ export async function postReviewComment(
   model = 'default',
   stepType?: CrosscheckStepType,
   round = 1,
+  sha?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -786,6 +982,7 @@ export async function postReviewComment(
       model,
       stepType,
       round,
+      sha,
     }),
   })
   return comment.id

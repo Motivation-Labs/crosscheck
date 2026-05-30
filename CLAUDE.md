@@ -176,9 +176,9 @@ Never add a gate to Phase 1 that belongs in Phase 2. "We don't know who wrote th
 
 ### Annotation contract
 
-`<!-- crosscheck: origin=<claude|codex> reviewer=<claude|codex> verdict=<APPROVE|NEEDS_WORK|BLOCK> -->`
+`<!-- crosscheck: origin=<claude|codex> reviewer=<claude|codex> model=<model-id> type=<review|recheck|fix|conflict-resolve> round=<n> verdict=<APPROVE|NEEDS_WORK|BLOCK|UNKNOWN> service=<service-name> sha=<head-sha> -->`
 
-This tag is embedded in every review comment crosscheck posts. It is the stable schema that Phase 2 step 4 reads. **Changing the format is a breaking change** — same rules as config schema changes (update `annotation.ts`, bump minor version, document in changelog).
+This tag is embedded in every review comment crosscheck posts. It is the stable schema that Phase 2 step 4 reads. `sha=` is optional for older comments; parsers must tolerate unknown additive fields. **Changing or removing existing fields is a breaking change** — same rules as config schema changes (update `annotation.ts`, bump minor version, document in changelog).
 
 ### `routing.fallback_reviewer`
 

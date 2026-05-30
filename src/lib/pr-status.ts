@@ -1,3 +1,5 @@
+import { parseAnnotationFieldsFenced } from './annotation.js'
+
 export type PRReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
 export type PRNextAction = 'review' | 'fix' | 'recheck' | 'none'
 export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
@@ -5,14 +7,12 @@ export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 export interface PRStatusCommit {
   sha: string
   committedAt?: string
-  committed_at?: string
 }
 
 export interface PRStatusCommitStatus {
   context: string
   state: string
   updatedAt?: string
-  updated_at?: string
 }
 
 export interface PRStatusPullRequest {
@@ -27,21 +27,16 @@ export interface PRStatusPullRequest {
   baseRef: string
   body: string | null
   createdAt: string
-  created_at?: string
   updatedAt?: string
-  updated_at?: string
   commits?: PRStatusCommit[]
   commitStatuses?: PRStatusCommitStatus[]
-  statuses?: PRStatusCommitStatus[]
 }
 
 export interface PRStatusComment {
   id: number
   body: string
   createdAt?: string
-  created_at?: string
   updatedAt?: string
-  updated_at?: string
 }
 
 export interface PRStatusLogEvent {
@@ -160,50 +155,30 @@ function normalizeVerdict(value: string | undefined): PRVerdict | undefined {
   return undefined
 }
 
-function parseAttrs(raw: string): ParsedAnnotation {
+// Delegates to the canonical fence-aware parser in annotation.ts so the logic
+// lives in one place. Returns a simplified ParsedAnnotation for pr-status use.
+function parseLatestCrosscheckAnnotation(body: string): ParsedAnnotation | null {
+  const fields = parseAnnotationFieldsFenced(body)
+  if (!fields) return null
   const attrs: ParsedAnnotation = {}
-  for (const part of raw.trim().split(/\s+/).filter(Boolean)) {
-    const eq = part.indexOf('=')
-    if (eq === -1) {
-      attrs.marker = part
-      continue
-    }
-    const key = part.slice(0, eq)
-    const value = part.slice(eq + 1)
-    if (key === 'type') attrs.type = value
+  for (const [key, value] of fields) {
+    if (key === '__marker__') attrs.marker = value
+    else if (key === 'type') attrs.type = value
     else if (key === 'reviewer') attrs.reviewer = value
     else if (key === 'verdict') attrs.verdict = normalizeVerdict(value)
   }
   return attrs
 }
 
-function parseLatestCrosscheckAnnotation(body: string): ParsedAnnotation | null {
-  let inFence = false
-  let latest: ParsedAnnotation | null = null
-  for (const line of body.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-      inFence = !inFence
-      continue
-    }
-    if (inFence) continue
-    const match = trimmed.match(/^<!--\s*crosscheck:\s*([^>]*)-->/)
-    if (!match) continue
-    latest = parseAttrs(match[1])
-  }
-  return latest
-}
-
 // Use createdAt for ordering review events — updatedAt would flip verdict
 // ordering if an older comment is edited after a newer one is posted.
 function commentCreatedAt(comment: PRStatusComment): Date | null {
-  return parseDate(comment.createdAt) ?? parseDate(comment.created_at)
+  return parseDate(comment.createdAt)
 }
 
 // Use updatedAt for lastActive computation so edits and reactions are captured.
 function commentDate(comment: PRStatusComment): Date | null {
-  return parseDate(comment.updatedAt) ?? parseDate(comment.updated_at)
-    ?? parseDate(comment.createdAt) ?? parseDate(comment.created_at)
+  return parseDate(comment.updatedAt) ?? parseDate(comment.createdAt)
 }
 
 function collectReviewEvents(comments: PRStatusComment[]): ReviewEvent[] {
@@ -297,15 +272,6 @@ function relevantLogDate(event: PRStatusLogEvent): Date | null {
   return null
 }
 
-function latestCrosscheckCommentDate(comments: PRStatusComment[]): Date | null {
-  let latest: Date | null = null
-  for (const comment of comments) {
-    if (!parseLatestCrosscheckAnnotation(comment.body)) continue
-    latest = maxDate(latest, commentDate(comment))
-  }
-  return latest
-}
-
 export function computeTokenTotals(logEvents: PRStatusLogEvent[]): TokenTotals {
   const totals: TokenTotals = { byPR: {}, byPRHeadSha: {} }
   for (const event of logEvents) {
@@ -340,19 +306,22 @@ export function computeLastActive(
   comments: PRStatusComment[],
   logEvents: PRStatusLogEvent[],
 ): Date {
-  let latest = parseDate(pr.updatedAt) ?? parseDate(pr.updated_at)
-    ?? parseDate(pr.createdAt) ?? parseDate(pr.created_at)
+  let latest = parseDate(pr.updatedAt) ?? parseDate(pr.createdAt)
 
-  latest = maxDate(latest, latestCrosscheckCommentDate(comments))
+  // Include ALL comments (not just crosscheck-annotated ones) so that normal
+  // reviewer replies correctly reset the staleness clock.
+  for (const comment of comments) {
+    latest = maxDate(latest, commentDate(comment))
+  }
 
   for (const event of relevantLogEvents(pr, logEvents)) {
     latest = maxDate(latest, relevantLogDate(event))
   }
   for (const commit of pr.commits ?? []) {
-    latest = maxDate(latest, parseDate(commit.committedAt) ?? parseDate(commit.committed_at))
+    latest = maxDate(latest, parseDate(commit.committedAt))
   }
-  for (const status of [...(pr.commitStatuses ?? []), ...(pr.statuses ?? [])]) {
-    latest = maxDate(latest, parseDate(status.updatedAt) ?? parseDate(status.updated_at))
+  for (const status of pr.commitStatuses ?? []) {
+    latest = maxDate(latest, parseDate(status.updatedAt))
   }
 
   return latest ?? new Date(0)
@@ -417,11 +386,15 @@ function formatTokens(tokens: number | undefined): string | null {
   return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}K`
 }
 
+// Renders a human-readable timeline of up to 2 fix cycles and 2 rechecks.
+// Steps beyond that cap are counted and surfaced as a trailing "+N more" marker
+// so readers know the timeline is not complete.
 export function buildProgressSummary(status: PRStatus): string {
   const parts = ['PR']
   let fixCount = 0
   let recheckCount = 0
   let sawCR = false
+  let skipped = 0
 
   for (const step of status.progress) {
     if (step.kind === 'cr') {
@@ -431,7 +404,7 @@ export function buildProgressSummary(status: PRStatus): string {
       continue
     }
     if (step.kind === 'fix') {
-      if (fixCount >= 2) continue
+      if (fixCount >= 2) { skipped++; continue }
       fixCount++
       const count = step.appliedCount ?? 0
       const tokens = formatTokens(step.tokens)
@@ -439,11 +412,13 @@ export function buildProgressSummary(status: PRStatus): string {
       continue
     }
     if (step.kind === 'recheck') {
-      if (recheckCount >= 2 || !step.verdict) continue
+      if (recheckCount >= 2 || !step.verdict) { if (recheckCount >= 2) skipped++; continue }
       recheckCount++
       parts.push(`Recheck(${step.verdict})`)
     }
   }
+
+  if (skipped > 0) parts.push(`+${skipped} more`)
 
   return parts.join(' -> ')
 }

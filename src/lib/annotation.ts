@@ -59,6 +59,44 @@ export function parseAnnotationFields(body: string): ReadonlyMap<string, string>
   return parseFields(last[1])
 }
 
+// Like parseAnnotationFields but skips annotations inside fenced code blocks
+// (``` or ~~~). Prevents annotations in examples from being misread as the
+// authoritative crosscheck marker for a comment.
+//
+// Bareword tokens (e.g. `fix_applied`, `conflict_resolved`) that have no `=`
+// are stored in the returned map under the key '__marker__' so callers can
+// detect them without special-casing the loop.
+export function parseAnnotationFieldsFenced(body: string): ReadonlyMap<string, string> | null {
+  let inFence = false
+  let lastMatch: string | null = null
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const match = trimmed.match(/^<!--\s*crosscheck:\s*([^>]*)-->/)
+    if (match) lastMatch = match[1]
+  }
+  if (!lastMatch) return null
+  return parseFieldsWithMarker(lastMatch)
+}
+
+function parseFieldsWithMarker(attrs: string): Map<string, string> {
+  const fields = new Map<string, string>()
+  for (const token of attrs.trim().split(/\s+/).filter(Boolean)) {
+    const eq = token.indexOf('=')
+    if (eq === -1) {
+      // Bareword token: store as marker (last one wins, matching legacy behaviour)
+      fields.set('__marker__', token)
+    } else {
+      fields.set(token.slice(0, eq), token.slice(eq + 1))
+    }
+  }
+  return fields
+}
+
 export function buildCommitTrailers(input: CrosscheckCommitTrailerInput): string {
   return [
     `Crosscheck-Reviewer: ${fieldValue(input.reviewer)}`,

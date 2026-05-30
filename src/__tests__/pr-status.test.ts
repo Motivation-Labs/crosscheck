@@ -120,7 +120,9 @@ describe('foldPRStatus', () => {
       { ts: '2026-01-01T06:00:00Z', level: 'info', event: 'fix_complete', repo: 'acme/api', pr: 42, applied_count: 2, tokens_used: 2200 },
     ])
 
-    expect(buildProgressSummary(status)).toBe('PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K) -> Recheck(NEEDS_WORK) -> Fix(1, 1.2K) -> Recheck(APPROVE)')
+    // 3 fix events total; only 2 fit within the cap — the trailing +1 more marker
+    // lets readers know the timeline is truncated.
+    expect(buildProgressSummary(status)).toBe('PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K) -> Recheck(NEEDS_WORK) -> Fix(1, 1.2K) -> Recheck(APPROVE) -> +1 more')
   })
 })
 

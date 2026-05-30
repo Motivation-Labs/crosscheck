@@ -17,7 +17,7 @@ const codexVendor = (auth: CodexVendorConfig['auth'], model: string | null = nul
 
 describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
-    expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5')
+    expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5-20251001')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-4-6')
     expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-4-7')
   })
@@ -37,7 +37,7 @@ describe('review model resolution', () => {
   it('formats known model display names', () => {
     expect(modelDisplayName('claude-opus-4-7')).toBe('Opus 4.7')
     expect(modelDisplayName('claude-sonnet-4-6')).toBe('Sonnet 4.6')
-    expect(modelDisplayName('claude-haiku-4-5')).toBe('Haiku 4.5')
+    expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
     expect(modelDisplayName('o4-mini')).toBe('o4-mini')
     expect(modelDisplayName('o3')).toBe('o3')
     expect(modelDisplayName('gpt-4o-mini')).toBe('gpt-4o-mini')

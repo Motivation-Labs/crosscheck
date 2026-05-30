@@ -1,6 +1,6 @@
 {
   "name": "@motivation-labs/crosscheck",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Cross-vendor AI code review orchestrator — Claude Code ↔ Codex",
   "bin": {
     "crosscheck": "dist/cli.js",

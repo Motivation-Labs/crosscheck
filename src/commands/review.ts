@@ -4,7 +4,7 @@ import { join } from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient, postReviewComment } from '../github/client.js'
-import { detectOriginFull, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
@@ -47,12 +47,13 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 
   let reviewer: 'claude' | 'codex' | null
+  let origin: PROrigin = 'human'
 
   if (forceReviewer === 'codex' || forceReviewer === 'claude') {
     reviewer = forceReviewer
     console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
   } else {
-    const { origin, method } = await detectOriginFull(
+    const { origin: detectedOrigin, method } = await detectOriginFull(
       pr.body ?? '',
       pr.head.ref,
       owner,
@@ -62,6 +63,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       token,
       pr.user?.login,
     )
+    origin = detectedOrigin
     reviewer = await assignReviewer(origin, config)
     if (!reviewer) {
       console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) — no reviewer assigned (use --reviewer codex|claude to force)`))
@@ -86,7 +88,6 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     let reviewText: string
     let tokensUsed: number | undefined
     let model = 'default'
-    let origin = 'human'
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0

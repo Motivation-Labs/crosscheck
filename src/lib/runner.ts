@@ -15,6 +15,7 @@ import { createGithubClient, postReviewComment, getLastCrossCheckCommentId } fro
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
+import { resolveClaudeModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -445,7 +446,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             '-m',
             `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code`,
             '-m',
-            buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'fix', service: 'crosscheck' }),
+            buildCommitTrailers({ reviewer: vendor, model: resolveClaudeModel(config.quality), step: 'fix', service: 'crosscheck' }),
           ],
           { cwd: tmpDir },
         )
@@ -486,7 +487,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             '-m',
             `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code`,
             '-m',
-            buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'fix', service: 'crosscheck' }),
+            buildCommitTrailers({ reviewer: vendor, model: resolveClaudeModel(config.quality), step: 'fix', service: 'crosscheck' }),
           ],
           { cwd: tmpDir },
         )
@@ -678,7 +679,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           '-m',
           `[crosscheck] resolve: resolve ${conflictedFiles.length} conflict${conflictedFiles.length !== 1 ? 's' : ''} — by Claude Code`,
           '-m',
-          buildCommitTrailers({ reviewer: vendor, model: 'default', step: 'conflict-resolve', service: 'crosscheck' }),
+          buildCommitTrailers({ reviewer: vendor, model: resolveClaudeModel(config.quality), step: 'conflict-resolve', service: 'crosscheck' }),
         ],
         { cwd: tmpDir },
       )

@@ -189,10 +189,17 @@ export interface WorkflowContext {
     id: number
     body: string
   }
+  // When set, overrides step.max_rounds for all fix and recheck steps in this
+  // run. Pass Infinity to disable the per-step cap entirely (used by --crazy /
+  // --halfcrazy modes, which apply their own outer ceiling instead).
+  overrideMaxRounds?: number
 }
 
 export interface WorkflowResult {
   verdict: string | null
+  // Sum of applied_count across all fix steps; 0 means fix ran but made no
+  // changes; undefined means no fix step executed in this run.
+  fixAppliedCount?: number
 }
 
 function countComments(reviewText: string): number {
@@ -253,7 +260,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
-    if (exceedsMaxRounds(effectiveType, step.type, step.max_rounds, ctx.round)) {
+    if (exceedsMaxRounds(effectiveType, step.type, ctx.overrideMaxRounds ?? step.max_rounds, ctx.round)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -748,7 +755,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
 
   const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
-  return { verdict: verdict ?? null }
+  const fixAppliedCount = Object.values(results).reduce<number | undefined>((acc, r) => {
+    if (r.applied_count === undefined) return acc
+    return (acc ?? 0) + r.applied_count
+  }, undefined)
+  return { verdict: verdict ?? null, fixAppliedCount }
   } catch (err) {
     workflowFailed = true
     throw err

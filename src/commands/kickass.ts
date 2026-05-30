@@ -5,7 +5,6 @@ import { createInterface } from 'readline/promises'
 import { fileURLToPath } from 'url'
 import { execa } from 'execa'
 import { createGithubClient } from '../github/client.js'
-import { mergePullRequest } from '../github/merge.js'
 import { getGithubToken } from '../config/loader.js'
 import { parseDuration } from '../lib/durations.js'
 import { logError } from '../lib/logger.js'
@@ -17,9 +16,10 @@ export interface KickassOpts {
   force?: boolean
   staleAfter?: string
   dryRun?: boolean
+  roundMode?: 'crazy' | 'halfcrazy'
 }
 
-export type KickassAction = 'review' | 'fix' | 'recheck' | 'merge' | 'skip'
+export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
 export type KickassFailureReason = 'error'
 
@@ -41,7 +41,6 @@ export interface KickassExecutionResult {
 export interface ExecuteKickassDeps {
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
   dispatchRun: (item: PreflightItem) => Promise<void>
-  dispatchMerge: (item: PreflightItem) => Promise<void>
 }
 
 export interface KickassDeps {
@@ -50,11 +49,10 @@ export interface KickassDeps {
   confirm: (message: string) => Promise<boolean>
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
   dispatchRun: (item: PreflightItem) => Promise<void>
-  dispatchMerge: (item: PreflightItem) => Promise<void>
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
-  await runKickassWithDeps(opts, defaultKickassDeps())
+  await runKickassWithDeps(opts, defaultKickassDeps(opts))
 }
 
 export async function runKickassWithDeps(
@@ -71,10 +69,25 @@ export async function runKickassWithDeps(
 
   try {
     const scan = await deps.loadScanResult({ force: opts.force, staleAfterMs })
-    const queue = scan.prs.filter(pr => pr.freshness === 'stale' && pr.nextAction !== null)
 
+    // Actionable = nextAction is set and is not merge (merge not dispatched in v1).
+    // Stale PRs shown first; not-stale actionable PRs follow.
+    const queue = scan.prs
+      .filter(pr => pr.nextAction !== null && pr.nextAction !== 'merge')
+      .sort((a, b) => {
+        if (a.freshness !== b.freshness) return a.freshness === 'stale' ? -1 : 1
+        return 0
+      })
+
+    const mergeReady = scan.prs.filter(pr => pr.nextAction === 'merge')
+
+    if (queue.length === 0 && mergeReady.length === 0) {
+      console.log(chalk.dim('No actionable PRs found.'))
+      return
+    }
     if (queue.length === 0) {
-      console.log(chalk.dim('No stale PRs need attention.'))
+      printMergeReady(mergeReady)
+      console.log(chalk.dim('\nNo PRs need review, fix, or recheck — all actionable work is merge-ready (manual).'))
       return
     }
 
@@ -84,8 +97,8 @@ export async function runKickassWithDeps(
       return
     }
 
-    const plan = buildPreflightPlan(selected)
-    printPreflight(plan)
+    const plan = buildPreflightPlan(selected, opts.roundMode)
+    printPreflight(plan, mergeReady)
 
     if (opts.dryRun) {
       console.log(chalk.dim('\ndry-run: no mutations executed'))
@@ -108,7 +121,8 @@ export async function runKickassWithDeps(
   }
 }
 
-export function buildPreflightPlan(prs: PRStatus[]): PreflightItem[] {
+export function buildPreflightPlan(prs: PRStatus[], roundMode?: 'crazy' | 'halfcrazy'): PreflightItem[] {
+  const modeTag = roundMode ? ` [${roundMode}]` : ''
   return prs.map((pr) => {
     const fork = isForkPR(pr)
     if (pr.nextAction === 'fix' && fork) {
@@ -144,25 +158,17 @@ export function buildPreflightPlan(prs: PRStatus[]): PreflightItem[] {
       return {
         pr,
         action: 'fix',
-        transition: `${pr.reviewState} -> Fix`,
+        transition: `${pr.reviewState} -> fix→recheck${modeTag}`,
         details: [`fixer ${fixerLabel(pr)}`, 'delivery commit'],
       }
     }
 
-    if (pr.nextAction === 'recheck') {
-      return {
-        pr,
-        action: 'recheck',
-        transition: `${pr.reviewState} -> Recheck`,
-        details: ['links latest review'],
-      }
-    }
-
+    // nextAction === 'recheck' — fix was applied externally; close the loop with one recheck
     return {
       pr,
-      action: 'merge',
-      transition: 'APPROVE -> Merge',
-      details: ['method squash', `checks ${checksLabel(pr)}`],
+      action: 'recheck',
+      transition: `${pr.reviewState} -> Recheck`,
+      details: ['links latest review'],
     }
   })
 }
@@ -189,11 +195,7 @@ export async function executeKickassPlan(
       }
 
       console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
-      if (item.action === 'merge') {
-        await deps.dispatchMerge(item)
-      } else {
-        await deps.dispatchRun(item)
-      }
+      await deps.dispatchRun(item)
       results.push({ pr: item.pr, status: 'executed' })
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
@@ -205,7 +207,7 @@ export async function executeKickassPlan(
   return results
 }
 
-export function printPreflight(plan: PreflightItem[]): void {
+export function printPreflight(plan: PreflightItem[], mergeReady: PRStatus[] = []): void {
   console.log('\nPreflight')
   const grouped = groupPreflight(plan)
   for (const [transition, items] of grouped) {
@@ -214,6 +216,14 @@ export function printPreflight(plan: PreflightItem[]): void {
       const explanation = item.explanation ? `  ${chalk.dim(item.explanation)}` : ''
       console.log(`  ${formatPRSignature(item.pr)}  ${item.details.join('  ')}${explanation}`)
     }
+  }
+  if (mergeReady.length > 0) printMergeReady(mergeReady)
+}
+
+export function printMergeReady(prs: PRStatus[]): void {
+  console.log(chalk.dim('\nneeds merge (manual — not selected)'))
+  for (const pr of prs) {
+    console.log(chalk.dim(`  ${formatPRSignature(pr)}  APPROVE`))
   }
 }
 
@@ -228,10 +238,13 @@ export function printExecutionSummary(results: KickassExecutionResult[]): void {
   console.log(chalk.dim(`\n${summarizeExecutionResults(results)}`))
 }
 
-export function buildKickassRunArgs(itemOrPR: PreflightItem | PRStatus): string[] {
+export function buildKickassRunArgs(
+  itemOrPR: PreflightItem | PRStatus,
+  roundMode?: 'crazy' | 'halfcrazy',
+): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
-  if (item.action === 'merge' || item.action === 'skip') return []
-  return [
+  if (item.action === 'skip') return []
+  const args = [
     'run',
     item.pr.url,
     '--steps',
@@ -239,6 +252,9 @@ export function buildKickassRunArgs(itemOrPR: PreflightItem | PRStatus): string[
     '--expected-head-sha',
     item.pr.headSha,
   ]
+  if (roundMode === 'crazy') args.push('--crazy')
+  else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+  return args
 }
 
 export interface CliInvocation {
@@ -273,7 +289,7 @@ export function resolveCliInvocation(options: ResolveCliInvocationOptions = {}):
   throw new Error('Cannot resolve crosscheck CLI entrypoint. Run npm run build before kickass, or run from a source checkout with dev dependencies installed.')
 }
 
-function defaultKickassDeps(): KickassDeps {
+function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
   let cli: CliInvocation | undefined
   const getCli = (): CliInvocation => {
     cli ??= resolveCliInvocation()
@@ -295,15 +311,7 @@ function defaultKickassDeps(): KickassDeps {
     },
     dispatchRun: async (item) => {
       const invocation = getCli()
-      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item)], { stdio: 'inherit' })
-    },
-    dispatchMerge: async (item) => {
-      const token = getGithubToken()
-      const octokit = createGithubClient(token)
-      await mergePullRequest(octokit, item.pr.owner, item.pr.repo, item.pr.number, {
-        method: 'squash',
-        expectedHeadSha: item.pr.headSha,
-      })
+      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode)], { stdio: 'inherit' })
     },
   }
 }
@@ -354,9 +362,9 @@ function checksLabel(pr: PRStatus): string {
   return pr.merge.mergeStateStatus ?? 'unknown'
 }
 
-function stepForAction(action: Exclude<KickassAction, 'merge' | 'skip'>): string {
+function stepForAction(action: Exclude<KickassAction, 'skip'>): string {
   if (action === 'review') return 'review'
-  if (action === 'fix') return 'fix'
+  if (action === 'fix') return 'fix,recheck'  // always dispatch full cycle
   return 'recheck'
 }
 

@@ -20,11 +20,21 @@ export interface RunOpts {
   reviewer?: string
   steps?: string
   dryRun?: boolean
+  roundMode?: 'crazy' | 'halfcrazy'
   initialReviewComment?: {
     id: number
     body: string
   }
   expectedHeadSha?: string
+}
+
+const CRAZY_ROUND_CEILING = 2
+
+function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcrazy'): boolean {
+  if (verdict === null) return false
+  if (mode === 'crazy') return verdict === 'APPROVE'
+  // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
+  return verdict !== 'BLOCK'
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -34,9 +44,14 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
 }
 
 export async function runRun(prUrl: string, opts: RunOpts = {}) {
+  if (opts.roundMode && opts.dryRun) {
+    console.error(chalk.red(`✗ --${opts.roundMode} and --dry-run are mutually exclusive`))
+    process.exit(1)
+  }
+
   const config = loadConfig(opts.config)
   initLogger(config.logs)
-  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl })
+  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl, ...(opts.roundMode && { round_mode: opts.roundMode }) })
 
   let token: string
   try {
@@ -217,33 +232,84 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
-      const { verdict } = await runWorkflow({
-        owner,
-        repoName: repo,
-        prNumber: number,
-        pr,
-        tmpDir,
-        token,
-        config,
-        origin,
-        reviewStart: Date.now(),
-        log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
-        onPhaseChange: (label) => { activeSpinner.text = label },
-        crosscheckShas: new Set(),
+      const sharedCtx = {
+        owner, repoName: repo, prNumber: number, token, config, origin,
+        log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
+        onPhaseChange: (label: string) => { activeSpinner.text = label },
+        crosscheckShas: new Set<string>(),
         pushedShas,
         dryRun: opts.dryRun,
+        // crazy/halfcrazy bypass per-step max_rounds; the outer ceiling is the only cap
+        overrideMaxRounds: opts.roundMode ? Infinity : undefined,
+      }
+
+      let { verdict, fixAppliedCount } = await runWorkflow({
+        ...sharedCtx,
+        pr,
+        tmpDir,
+        reviewStart: Date.now(),
         steps: filteredSteps,
         initialReviewComment: opts.initialReviewComment,
       })
 
+      // Autonomous fix→recheck loop for --crazy / --halfcrazy
+      if (opts.roundMode) {
+        const mode = opts.roundMode
+        const fixRecheckSteps = filteredSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+        let loopRound = 1
+        let loopSha = sha
+
+        while (loopRound < CRAZY_ROUND_CEILING && !meetsCrazyStopCondition(verdict, mode)) {
+          // No-progress guard: if fix ran but applied nothing, looping is futile
+          if (fixAppliedCount === 0) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  no progress in round ${loopRound} — stopping`))
+            break
+          }
+
+          loopRound++
+          console.log(chalk.dim(`\n  round ${loopRound}  previous verdict ${verdict ?? '--'} — continuing...`))
+
+          // Refresh head SHA so the remote lock targets the commit fix pushed
+          const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+          const freshSha = freshPR.head.sha
+          if (freshSha === loopSha) {
+            // Head didn't advance — fix made no changes despite applied_count > 0 (edge case)
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))
+            break
+          }
+          loopSha = freshSha
+
+          stopHeartbeat()
+          await acquireRemoteLock(octokit, owner, repo, loopSha)
+          stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+
+          const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
+          ;({ verdict, fixAppliedCount } = await runWorkflow({
+            ...sharedCtx,
+            pr: loopPR,
+            tmpDir,
+            reviewStart: Date.now(),
+            steps: fixRecheckSteps,
+            round: loopRound,
+          }))
+
+          await releaseRemoteLock(octokit, owner, repo, loopSha, 'success')
+          const done = meetsCrazyStopCondition(verdict, mode)
+          console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
+        }
+
+        if (loopRound >= CRAZY_ROUND_CEILING && !meetsCrazyStopCondition(verdict, mode)) {
+          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'crazy_ceiling', mode, round: loopRound })
+          console.log(chalk.yellow(`  ceiling reached (${CRAZY_ROUND_CEILING} rounds) — last verdict: ${verdict ?? '--'}`))
+        }
+      }
+
       activeSpinner.stop()
       console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
 
-      if (!opts.dryRun) {
-        console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
-      } else {
-        console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
-      }
+      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
 
       stopHeartbeat()
       if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')

@@ -85,7 +85,12 @@ program
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
+  .option('--crazy', 'loop fix→recheck until APPROVE (ceiling: 2 rounds)')
+  .option('--halfcrazy', 'loop fix→recheck until verdict is not BLOCK (ceiling: 2 rounds)')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfcrazy?: boolean }) => {
+    const roundMode = opts.crazy ? 'crazy' : opts.halfcrazy ? 'halfcrazy' : undefined
+    void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode })
+  })
 
 program
   .command('scan')
@@ -98,11 +103,16 @@ program
 
 program
   .command('kickass')
-  .description('Select stale PRs from the operator queue and advance them')
+  .description('Select actionable PRs from the operator queue and advance them')
   .option('--force', 'bypass the 1-minute scan cache')
   .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
   .option('--dry-run', 'print selected actions without running them')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean }) => void runKickass(opts))
+  .option('--crazy', 'loop fix→recheck per PR until APPROVE (ceiling: 2 rounds)')
+  .option('--halfcrazy', 'loop fix→recheck per PR until verdict is not BLOCK (ceiling: 2 rounds)')
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfcrazy?: boolean }) => {
+    const roundMode = opts.crazy ? 'crazy' : opts.halfcrazy ? 'halfcrazy' : undefined
+    void runKickass({ ...opts, roundMode })
+  })
 
 program
   .command('status')

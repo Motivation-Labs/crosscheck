@@ -231,9 +231,11 @@ export async function listOpenPRs(
       `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
+    if (res.status === 404) return results
     if (!res.ok) {
-      if (page === 1) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText}`)
-      break
+      let message = res.statusText
+      try { const err = await res.json() as { message?: string }; message = err.message ?? message } catch { /* keep status text */ }
+      throw new Error(`Failed to list open PRs for ${owner}/${repo} page ${page} [${res.status}]: ${message}`)
     }
     const data = await res.json() as Array<{
       number: number

@@ -4,7 +4,7 @@ import { join } from 'path'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createGithubClient, postReviewComment } from '../github/client.js'
-import { detectOriginFull, assignReviewer } from '../github/detector.js'
+import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
@@ -47,12 +47,13 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: pr.head.sha })
 
   let reviewer: 'claude' | 'codex' | null
+  let origin: PROrigin = 'human'
 
   if (forceReviewer === 'codex' || forceReviewer === 'claude') {
     reviewer = forceReviewer
     console.log(chalk.dim(`  reviewer: ${reviewer} (forced)`))
   } else {
-    const { origin, method } = await detectOriginFull(
+    const { origin: detectedOrigin, method } = await detectOriginFull(
       pr.body ?? '',
       pr.head.ref,
       owner,
@@ -62,6 +63,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
       token,
       pr.user?.login,
     )
+    origin = detectedOrigin
     reviewer = await assignReviewer(origin, config)
     if (!reviewer) {
       console.log(chalk.dim(`  PR origin: ${origin} (via ${method}) — no reviewer assigned (use --reviewer codex|claude to force)`))
@@ -85,6 +87,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     let reviewText: string
     let tokensUsed: number | undefined
+    let model = 'default'
     const reviewStart = Date.now()
     fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repo}`, pr: number, reviewer })
     let elapsed = 0
@@ -93,7 +96,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
 
     try {
       if (reviewer === 'codex') {
-        ;({ review: reviewText, tokensUsed } = await runCodexReview(
+        ;({ review: reviewText, tokensUsed, model } = await runCodexReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -103,7 +106,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           msg => { reviewSpinner!.text = msg },
         ))
       } else {
-        ;({ review: reviewText, tokensUsed } = await runClaudeReview(
+        ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
           tmpDir,
           pr.base.ref,
           pr.title,
@@ -123,12 +126,12 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     if (verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
     }
-    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
+    fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
     console.log(`  ${formatVerdict(verdict)}`)
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
       : prependVerdictToComment(clean, verdict)
-    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand)
+    await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))
 

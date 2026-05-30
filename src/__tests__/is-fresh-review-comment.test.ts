@@ -8,10 +8,22 @@ describe('isFreshReviewComment', () => {
     )).toBe(true)
   })
 
+  it('returns true for a v2 review annotation with model, round, and service', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex model=gpt-5 type=review round=2 verdict=BLOCK service=crosscheck -->',
+    )).toBe(true)
+  })
+
   it('returns false for a recheck annotation', () => {
     expect(isFreshReviewComment(
       '> Recheck of [original review](#issuecomment-1)\n\n### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=recheck -->',
     )).toBe(false)
+  })
+
+  it('returns true for a verdict-less review annotation from a null-verdict run', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex type=review -->',
+    )).toBe(true)
   })
 
   it('returns false for a fix_failed annotation', () => {
@@ -79,6 +91,12 @@ describe('isFreshReviewComment', () => {
     )).toBe(false)
   })
 
+  it('does not treat parser defaults alone as proof of a fresh review', () => {
+    expect(isFreshReviewComment(
+      'Status note without the review header.\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK -->',
+    )).toBe(false)
+  })
+
   it('returns false for an unrelated human comment with neither annotation nor header', () => {
     expect(isFreshReviewComment('LGTM, merging now.')).toBe(false)
   })
@@ -102,5 +120,14 @@ describe('isFreshReviewComment', () => {
       + 'Quote of the prior review annotation: `<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->`\n\n'
       + '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=recheck -->'
     expect(isFreshReviewComment(body)).toBe(false)
+  })
+
+  // Guards the Codex PR #155 [P2]: an explicit but unrecognized type (emitted by
+  // a future minor version) must not be treated as a review — the annotation
+  // contract says any explicit type other than 'review' is not a fresh review.
+  it('returns false for an annotation with an explicit but unrecognized step type', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=future-step -->',
+    )).toBe(false)
   })
 })

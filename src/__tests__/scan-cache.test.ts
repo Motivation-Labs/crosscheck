@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { buildScanCacheKey, readScanCache, writeScanCache } from '../lib/scan-cache.js'
@@ -52,5 +52,13 @@ describe('scan cache', () => {
     expect(wrote).toBe(false)
     expect(readFileSync(cachePath, 'utf8')).toBe(before)
     expect(readScanCache<{ rows: string[] }>(key, { cachePath, now: 3_000 })).toEqual({ rows: ['old'] })
+  })
+
+  it('creates cache directories with owner-only permissions', () => {
+    const nestedCachePath = join(tmpDir, 'nested', 'cache', 'scan.json')
+
+    writeScanCache(key, { rows: [1] }, { cachePath: nestedCachePath, now: 1_000 })
+
+    expect(statSync(join(tmpDir, 'nested', 'cache')).mode & 0o777).toBe(0o700)
   })
 })

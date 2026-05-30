@@ -62,7 +62,7 @@ export function writeScanCache<T>(key: string, data: T, options: ScanCacheOption
   if (options.partialFailure === true) return false
 
   const path = options.cachePath ?? getScanCachePath()
-  mkdirSync(dirname(path), { recursive: true })
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const envelope: ScanCacheEnvelope<T> = {
     key,
     createdAt: new Date(options.now ?? Date.now()).toISOString(),

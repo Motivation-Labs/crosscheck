@@ -1,5 +1,7 @@
 import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
+import { modelDisplayName } from '../lib/review-models.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -265,37 +267,30 @@ export async function prHasCrossCheckComment(
 
 // True iff `body` is a fresh review comment that a recheck should link back to.
 // Classification cascade:
-//   1. Annotation with `type=review`      → review.
-//   2. Annotation with any other `type=`  → not a review (recheck, etc.).
-//   3. Annotation without `type=` but carrying `reviewer=` → pre-type-era review
-//      (2026-05-18 annotated comments between commits 9a0c324 and 36c915d carry
-//      `origin/reviewer/verdict` without a `type=` field). Fall through to the
-//      header check so these are still found by getLastCrossCheckCommentId.
-//   4. Annotation without `type=` and without `reviewer=` → summary or
-//      notification marker (`fix_failed`, `fix_applied`, `conflict_resolved`,
-//      `no_diff_change`, future bare markers). Not a review.
-//   5. No annotation → legacy pre-annotation comment. Identify reviews by the
+//   1. Contract annotation parsed by annotation.ts with explicit type=review
+//      → review. Other explicit types are not reviews.
+//   2. Legacy annotations without type= fall through to the header check so
+//      pre-type rechecks are still excluded by the "> Recheck of" prefix.
+//   3. Bare summary/notification markers (`fix_failed`, `fix_applied`,
+//      `conflict_resolved`, `no_diff_change`, future bare markers) are not reviews.
+//   4. No annotation → legacy pre-annotation comment. Identify reviews by the
 //      canonical "### Code Review by" header, exclude rechecks by the
 //      "> Recheck of" prefix.
 export function isFreshReviewComment(body: string): boolean {
-  // Parse the LAST annotation in the body, not the first. The canonical
-  // crosscheck annotation is appended as a footer by postReviewComment; any
-  // earlier `<!-- crosscheck: ... -->` occurrence is quoted example text in
-  // the review body (Codex's own reviews routinely reference marker names),
-  // and reading the first one misclassifies legitimate reviews.
-  const annotationMatches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
-  const lastAnnotation = annotationMatches.at(-1)
-  if (lastAnnotation) {
-    const attrs = lastAnnotation[1]
-    if (/\btype=review\b/.test(attrs)) return true
-    if (/\btype=/.test(attrs)) return false
-    // Untyped annotation: only the 2026-05-18 pre-type review/recheck shape
-    // carries `reviewer=`; summary/notification markers do not. Without it,
-    // this is a non-review annotation and must not match.
-    if (!/\breviewer=/.test(attrs)) return false
-    // Untyped + has reviewer= → pre-type review; verify with the legacy header
-    // check below (the recheck prefix excludes pre-type rechecks).
+  const fields = parseAnnotationFields(body)
+  const parsed = parseAnnotation(body)
+  if (parsed && fields?.has('type')) {
+    // Explicit type= field present — trust it directly.
+    return parsed.type === 'review'
   }
+  if (parsed && !fields?.has('type')) {
+    // Pre-type-era annotation: type was defaulted to 'review', not stated.
+    // Fall through to the header/prefix check so legacy rechecks are excluded.
+  } else if (fields && !parsed) {
+    // Has an annotation tag but no origin+reviewer — bare summary marker.
+    return false
+  }
+  // No annotation (or pre-type fallthrough): use header + recheck-prefix heuristic.
   return body.includes('### Code Review by') && !body.startsWith('> Recheck of')
 }
 
@@ -440,6 +435,59 @@ export interface BrandOptions {
   reviewer_attribution?: string
 }
 
+export interface ReviewCommentBodyInput {
+  body: string
+  reviewer: string
+  brand?: BrandOptions
+  origin?: string
+  verdict?: string | null
+  replyToCommentId?: number
+  isRecheck?: boolean
+  model?: string
+  stepType?: CrosscheckStepType
+  round?: number
+}
+
+export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
+  const reviewer = input.reviewer
+  const brand = input.brand ?? {}
+  const model = input.model ?? 'default'
+  const round = input.round ?? 1
+  const stepType = input.stepType ?? (input.isRecheck ? 'recheck' : 'review')
+  const serviceName = brand.service_name || 'crosscheck'
+  const isClaude = reviewer === 'claude'
+  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
+  const modelDisplay = modelDisplayName(model)
+  const serviceSegment = serviceName !== 'crosscheck' ? ` · ${serviceName}` : ''
+  const modelSegment = modelDisplay ? ` · ${modelDisplay}` : ''
+  const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
+
+  const defaultAttribution = isClaude
+    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
+    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+  const attribution = brand.reviewer_attribution || defaultAttribution
+  const footer = `\n\n---\n${attribution}`
+
+  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
+  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
+
+  const annotationTag = `\n\n${buildAnnotation({
+    origin: input.origin ?? 'human',
+    reviewer,
+    model,
+    type: stepType,
+    round,
+    verdict: input.verdict ?? 'UNKNOWN',
+    service: serviceName,
+  })}`
+
+  const replyPrefix = input.replyToCommentId
+    ? `> Recheck of [original review](#issuecomment-${input.replyToCommentId})\n\n`
+    : ''
+
+  return customHeader + replyPrefix + header + input.body + footer + customFooter + annotationTag
+}
+
 export async function postReviewComment(
   octokit: Octokit,
   owner: string,
@@ -452,42 +500,34 @@ export async function postReviewComment(
   verdict?: string | null,
   replyToCommentId?: number,
   isRecheck?: boolean,
+  model = 'default',
+  stepType?: CrosscheckStepType,
+  round = 1,
 ): Promise<number> {
-  const isClaude = reviewer === 'claude'
-  const vendorLabel = isClaude ? '🤖 Claude Code' : '⚡ Codex'
-  const hasCustomName = brand.service_name && brand.service_name !== 'crosscheck'
-  const headerLabel = hasCustomName ? `${vendorLabel} — ${brand.service_name}` : vendorLabel
-  const header = `### Code Review by ${headerLabel}\n\n`
-
-  const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
-  const attribution = brand.reviewer_attribution || defaultAttribution
-  const footer = `\n\n---\n${attribution}`
-
-  const customHeader = brand.comment_header ? `${brand.comment_header}\n\n` : ''
-  const customFooter = brand.comment_footer ? `\n\n${brand.comment_footer}` : ''
-
-  // Annotation tag for Phase 2 step 4 detection — matches the documented contract:
-  //   <!-- crosscheck: origin=<value> reviewer=<value> verdict=<value> type=<review|recheck> -->
-  // origin= is always present so scanners matching "crosscheck: origin=" reliably find it.
-  // type= is explicit from isRecheck (not inferred from backlink resolution).
-  // verdict is normalized (spaces → underscores) to stay whitespace-safe inside the tag.
-  const annotationParts = [`origin=${origin}`, `reviewer=${reviewer}`]
-  if (verdict) annotationParts.push(`verdict=${verdict.replace(/\s+/g, '_')}`)
-  annotationParts.push(`type=${isRecheck ? 'recheck' : 'review'}`)
-  const annotationTag = `\n\n<!-- crosscheck: ${annotationParts.join(' ')} -->`
-
-  // Recheck: prepend a reference back to the original review so the thread is navigable
-  const replyPrefix = replyToCommentId
-    ? `> Recheck of [original review](#issuecomment-${replyToCommentId})\n\n`
-    : ''
 
   const { data: comment } = await octokit.rest.issues.createComment({
     owner,
     repo,
     issue_number: pullNumber,
-    body: customHeader + replyPrefix + header + body + footer + customFooter + annotationTag,
+    body: buildReviewCommentBody({
+      body,
+      reviewer,
+      brand,
+      origin,
+      verdict,
+      replyToCommentId,
+      isRecheck,
+      model,
+      stepType,
+      round,
+    }),
   })
   return comment.id
+}
+
+function stepVerb(stepType: CrosscheckStepType): string {
+  if (stepType === 'recheck') return 'Recheck'
+  if (stepType === 'fix') return 'Fixes'
+  if (stepType === 'conflict-resolve') return 'Conflict resolution'
+  return 'Code Review'
 }

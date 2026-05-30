@@ -243,12 +243,9 @@ async function buildScanRow(
   const latestVerdictAnnotation = annotations.latestVerdictAnnotation
   const logSummary = logIndex.get(`${repoName}#${pr.number}`) ?? emptyLogSummary()
 
-  const annotationVerdict = latestVerdictAnnotation?.verdict ?? null
-  const latestVerdict = chooseLatestVerdict(
-    annotationVerdict,
-    latestVerdictAnnotation?.commentCreatedAt ?? null,
-    logSummary,
-  )
+  const latestVerdict = latestVerdictAnnotation?.verdict
+    ? chooseLatestVerdict(latestVerdictAnnotation.verdict, latestVerdictAnnotation.commentCreatedAt, logSummary)
+    : logSummary.latestVerdict
   const reviewState = latestVerdict ?? 'PR'
   const lastActiveAt = maxTimestamp([pr.updatedAt, latestAnnotation?.commentCreatedAt, logSummary.latestLogAt]) ?? pr.createdAt
   const isStale = now - new Date(lastActiveAt).getTime() >= staleAfterMs
@@ -276,13 +273,11 @@ async function buildScanRow(
 }
 
 export function chooseLatestVerdict(
-  annotationVerdict: ReviewState | null,
-  annotationAt: string | null,
+  annotationVerdict: ReviewState,
+  annotationAt: string,
   logSummary: PRLogSummary,
 ): ReviewState | null {
-  if (!annotationVerdict) return logSummary.latestVerdict
   if (!logSummary.latestVerdictAt) return annotationVerdict
-  if (!annotationAt) return logSummary.latestVerdict
   return new Date(annotationAt).getTime() >= new Date(logSummary.latestVerdictAt).getTime()
     ? annotationVerdict
     : logSummary.latestVerdict
@@ -550,40 +545,17 @@ export async function mapWithConcurrencyForScan<T, R>(
 
   const results: R[] = new Array<R>(items.length)
   let nextIndex = 0
-  let settledCount = 0
-  let rejected = false
   const workerCount = Math.min(limit, items.length)
 
-  return await new Promise<R[]>((resolve, reject) => {
-    const maybeResolve = (): void => {
-      if (settledCount === items.length) resolve(results)
-    }
-
-    const startNext = (): void => {
-      if (rejected) return
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
       const index = nextIndex
       nextIndex += 1
-      if (index >= items.length) {
-        maybeResolve()
-        return
-      }
-
-      Promise.resolve()
-        .then(() => mapper(items[index]))
-        .then(
-          (result) => {
-            results[index] = result
-            settledCount += 1
-            startNext()
-            maybeResolve()
-          },
-          (err: unknown) => {
-            rejected = true
-            reject(err)
-          },
-        )
+      if (index >= items.length) return
+      results[index] = await mapper(items[index])
     }
-
-    Array.from({ length: workerCount }, () => startNext())
   })
+
+  await Promise.all(workers)
+  return results
 }

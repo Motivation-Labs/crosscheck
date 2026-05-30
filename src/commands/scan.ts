@@ -36,6 +36,9 @@ export interface ScanAnnotationMetadata {
   reviewer?: string
   verdict?: ReviewState
   type?: string
+  // true when the comment has a "> Recheck of" prefix — covers pre-type-era
+  // annotations that lack an explicit type= field in the tag.
+  isRecheck?: boolean
 }
 
 export interface ScanRow {
@@ -173,15 +176,24 @@ async function collectScanPayload(config: Config, staleAfterMs: number, githubLo
   const now = Date.now()
 
   const perRepoRows = await mapWithConcurrency(repos, SCAN_REPO_CONCURRENCY, async (repo) => {
+    let prs: Awaited<ReturnType<typeof listOpenPRsForScan>>
     try {
-      const prs = await listOpenPRsForScan(repo.owner, repo.name, token)
-      const allowedPRs = prs.filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
-      const rows = await mapWithConcurrency(allowedPRs, SCAN_PR_CONCURRENCY, pr => buildScanRow(repo, pr, token, logIndex, staleAfterMs, now))
-      return rows
+      prs = await listOpenPRsForScan(repo.owner, repo.name, token)
     } catch (err) {
       skippedRepos.push({ repo: `${repo.owner}/${repo.name}`, reason: conciseReason(err) })
       return [] as ScanRow[]
     }
+    const allowedPRs = prs.filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
+    // Catch per-PR so a flaky comment fetch on one PR doesn't drop the rest
+    const rows = await mapWithConcurrency(allowedPRs, SCAN_PR_CONCURRENCY, async (pr) => {
+      try {
+        return await buildScanRow(repo, pr, token, logIndex, staleAfterMs, now)
+      } catch (err) {
+        skippedRepos.push({ repo: `${repo.owner}/${repo.name}#${pr.number}`, reason: conciseReason(err) })
+        return null
+      }
+    })
+    return rows.filter((r): r is ScanRow => r !== null)
   })
 
   const rows = perRepoRows.flat().sort((a, b) => {
@@ -207,7 +219,8 @@ async function expandConfiguredRepos(
 ): Promise<ScanRepo[]> {
   const repoMap = new Map<string, ScanRepo>()
   const addRepo = (repo: ScanRepo): void => {
-    repoMap.set(`${repo.owner}/${repo.name}`, repo)
+    // Case-insensitive key so Acme/api and acme/api don't produce duplicate rows
+    repoMap.set(`${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`, repo)
   }
 
   for (const repo of config.repos) addRepo({ owner: repo.owner, name: repo.name })
@@ -303,7 +316,7 @@ export function buildProgressSummary(annotation: ScanAnnotationMetadata | null, 
   if (logSummary.reviewVerdict) {
     parts.push(`CR(${logSummary.reviewVerdict})`)
   } else if (annotation?.verdict) {
-    parts.push(`${annotation.type === 'recheck' ? 'recheck' : 'CR'}(${annotation.verdict})`)
+    parts.push(`${annotation.isRecheck ? 'recheck' : 'CR'}(${annotation.verdict})`)
   }
   if (logSummary.fixAppliedCount !== null) parts.push(`fix(${logSummary.fixAppliedCount})`)
   const recheckVerdict = logSummary.recheckVerdict
@@ -336,6 +349,7 @@ export function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotati
       reviewer: attrs.reviewer,
       verdict: normalizeReviewState(attrs.verdict) ?? undefined,
       type: attrs.type,
+      isRecheck: attrs.type === 'recheck' || comment.body.startsWith('> Recheck of'),
     }
     latestAnnotation = annotation
     if (annotation.verdict) latestVerdictAnnotation = annotation

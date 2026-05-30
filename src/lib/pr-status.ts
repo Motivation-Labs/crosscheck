@@ -194,6 +194,13 @@ function parseLatestCrosscheckAnnotation(body: string): ParsedAnnotation | null 
   return latest
 }
 
+// Use createdAt for ordering review events — updatedAt would flip verdict
+// ordering if an older comment is edited after a newer one is posted.
+function commentCreatedAt(comment: PRStatusComment): Date | null {
+  return parseDate(comment.createdAt) ?? parseDate(comment.created_at)
+}
+
+// Use updatedAt for lastActive computation so edits and reactions are captured.
 function commentDate(comment: PRStatusComment): Date | null {
   return parseDate(comment.updatedAt) ?? parseDate(comment.updated_at)
     ?? parseDate(comment.createdAt) ?? parseDate(comment.created_at)
@@ -203,7 +210,7 @@ function collectReviewEvents(comments: PRStatusComment[]): ReviewEvent[] {
   const events: ReviewEvent[] = []
   for (const comment of comments) {
     const annotation = parseLatestCrosscheckAnnotation(comment.body)
-    const at = commentDate(comment)
+    const at = commentCreatedAt(comment)
     if (!annotation?.verdict || !at) continue
     if (annotation.type === 'review' || annotation.type === 'recheck') {
       events.push({ type: annotation.type, verdict: annotation.verdict, at })
@@ -224,7 +231,7 @@ function collectCommentFixEvents(comments: PRStatusComment[]): FixEvent[] {
   const events: FixEvent[] = []
   for (const comment of comments) {
     const annotation = parseLatestCrosscheckAnnotation(comment.body)
-    const at = commentDate(comment)
+    const at = commentCreatedAt(comment)
     if (!annotation || !at) continue
     if (annotation.marker === 'fix_applied') events.push({ at, complete: true })
   }

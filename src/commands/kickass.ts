@@ -10,7 +10,7 @@ import { getGithubToken } from '../config/loader.js'
 import { parseDuration } from '../lib/durations.js'
 import { logError } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
-import type { PRStatus, ScanResult } from '../lib/pr-status.js'
+import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
 
 export interface KickassOpts {

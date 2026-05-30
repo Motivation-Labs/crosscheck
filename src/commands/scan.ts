@@ -5,7 +5,7 @@ import type { Config } from '../config/schema.js'
 import { formatDuration, parseDuration } from '../lib/durations.js'
 import { initLogger, logError } from '../lib/logger.js'
 import { UserInputError } from '../lib/pr-picker.js'
-import { scanOpenPRStatuses, type PRStatus, type ScanResult } from '../lib/pr-status.js'
+import { scanOpenPRStatuses, type ScanPRStatus as PRStatus, type ScanResult } from '../lib/pr-status.js'
 import { readScanCache, writeScanCache, type ScanCachePayload } from '../lib/scan-cache.js'
 
 export interface ScanOpts {

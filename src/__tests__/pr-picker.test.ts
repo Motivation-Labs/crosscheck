@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { actionGroupLabel, formatPickerLabel, parseSelection, sortPRsForPicker, UserInputError } from '../lib/pr-picker.js'
-import type { PRStatus } from '../lib/pr-status.js'
+import type { ScanPRStatus as PRStatus } from '../lib/pr-status.js'
 
 function pr(number: number): PRStatus {
   return {

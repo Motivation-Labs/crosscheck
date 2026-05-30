@@ -1,5 +1,5 @@
 import { promptRepoPicker } from './repo-picker.js'
-import type { PRStatus } from './pr-status.js'
+import type { ScanPRStatus as PRStatus } from './pr-status.js'
 
 export class UserInputError extends Error {
   constructor(message: string) {

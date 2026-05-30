@@ -7,7 +7,7 @@ import {
   runKickassWithDeps,
   type KickassDeps,
 } from '../commands/kickass.js'
-import type { PRStatus, ScanResult } from '../lib/pr-status.js'
+import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 
 function pr(overrides: Partial<PRStatus> = {}): PRStatus {
   const nextAction = overrides.nextAction ?? 'review'

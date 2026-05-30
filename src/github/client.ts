@@ -265,9 +265,16 @@ async function githubJson<T>(url: string, token: string, label: string): Promise
       const data = await res.json() as { message?: string }
       message = data.message ?? message
     } catch { /* keep status text */ }
-    throw new Error(`${label} failed [${res.status}]: ${message}`)
+    const context = res.status === 403 || res.status === 429
+      ? 'GitHub rate limit or secondary rate limit'
+      : 'GitHub API request'
+    throw new Error(`${label} failed [${res.status}]: ${context}: ${message}`)
   }
   return await res.json() as T
+}
+
+function apiPath(...parts: Array<string | number>): string {
+  return parts.map(part => encodeURIComponent(String(part))).join('/')
 }
 
 export async function listOrgReposForScan(org: string, token: string): Promise<ScanRepo[]> {
@@ -275,7 +282,7 @@ export async function listOrgReposForScan(org: string, token: string): Promise<S
   let page = 1
   while (true) {
     const data = await githubJson<Array<{ name: string; archived: boolean }>>(
-      `https://api.github.com/orgs/${org}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
+      `https://api.github.com/orgs/${apiPath(org)}/repos?per_page=100&page=${page}&sort=pushed&type=all`,
       token,
       `List repos for org ${org}`,
     )
@@ -295,7 +302,7 @@ export async function listUserReposForScan(username: string, token: string, isSe
   while (true) {
     const url = isSelf
       ? `https://api.github.com/user/repos?affiliation=owner&visibility=all&per_page=100&page=${page}`
-      : `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&type=owner`
+      : `https://api.github.com/users/${apiPath(username)}/repos?per_page=100&page=${page}&type=owner`
     const data = await githubJson<Array<{ name: string; owner: { login: string }; archived: boolean }>>(
       url,
       token,
@@ -326,7 +333,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
       updated_at: string
       html_url: string
     }>>(
-      `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${apiPath(owner, repo)}/pulls?state=open&per_page=100&page=${page}`,
       token,
       `List open PRs for ${owner}/${repo}`,
     )
@@ -368,7 +375,7 @@ export async function listIssueCommentsForScan(
       created_at: string
       updated_at: string
     }>>(
-      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      `https://api.github.com/repos/${apiPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100&page=${page}&sort=created&direction=asc`,
       token,
       `List comments for ${owner}/${repo}#${issueNumber}`,
     )

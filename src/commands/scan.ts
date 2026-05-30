@@ -78,7 +78,7 @@ interface ScanOptions {
   force?: boolean
 }
 
-interface LogEntry {
+export interface LogEntry {
   ts: string
   event: string
   repo?: string
@@ -87,10 +87,11 @@ interface LogEntry {
   verdict?: string | null
   tokens_used?: number
   applied_count?: number
+  conflicts_resolved?: number
   reason?: string
 }
 
-interface PRLogSummary {
+export interface PRLogSummary {
   reviewVerdict: ReviewState | null
   recheckVerdict: ReviewState | null
   latestVerdict: ReviewState | null
@@ -99,7 +100,6 @@ interface PRLogSummary {
   latestLogAt: string | null
   fixAppliedCount: number | null
   fixCompletedAt: string | null
-  skippedReasons: string[]
   tokens: ScanTokens
 }
 
@@ -277,7 +277,7 @@ async function buildScanRow(
   }
 }
 
-function chooseLatestVerdict(
+export function chooseLatestVerdict(
   annotationVerdict: ReviewState,
   annotationAt: string,
   logSummary: PRLogSummary,
@@ -288,7 +288,7 @@ function chooseLatestVerdict(
     : logSummary.latestVerdict
 }
 
-function selectNextAction(latestVerdict: ReviewState | null, logSummary: PRLogSummary): string | null {
+export function selectNextAction(latestVerdict: ReviewState | null, logSummary: PRLogSummary): string | null {
   if (!latestVerdict || latestVerdict === 'PR') return 'next CR'
   if (latestVerdict === 'APPROVE') return 'next merge'
   if (latestVerdict === 'NEEDS_WORK' || latestVerdict === 'BLOCK') {
@@ -298,10 +298,13 @@ function selectNextAction(latestVerdict: ReviewState | null, logSummary: PRLogSu
   return null
 }
 
-function buildProgressSummary(annotation: ScanAnnotationMetadata | null, logSummary: PRLogSummary): string {
+export function buildProgressSummary(annotation: ScanAnnotationMetadata | null, logSummary: PRLogSummary): string {
   const parts = ['PR']
-  const reviewVerdict = logSummary.reviewVerdict ?? annotation?.verdict ?? null
-  if (reviewVerdict) parts.push(`CR(${reviewVerdict})`)
+  if (logSummary.reviewVerdict) {
+    parts.push(`CR(${logSummary.reviewVerdict})`)
+  } else if (annotation?.verdict) {
+    parts.push(`${annotation.type === 'recheck' ? 'recheck' : 'CR'}(${annotation.verdict})`)
+  }
   if (logSummary.fixAppliedCount !== null) parts.push(`fix(${logSummary.fixAppliedCount})`)
   const recheckVerdict = logSummary.recheckVerdict
   if (recheckVerdict) parts.push(`recheck(${recheckVerdict})`)
@@ -313,7 +316,7 @@ interface ScanAnnotations {
   latestVerdictAnnotation: ScanAnnotationMetadata | null
 }
 
-function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotations {
+export function findLatestAnnotation(comments: ScanIssueComment[]): ScanAnnotations {
   let latestAnnotation: ScanAnnotationMetadata | null = null
   let latestVerdictAnnotation: ScanAnnotationMetadata | null = null
   const orderedComments = [...comments].sort(
@@ -382,6 +385,7 @@ function parseLogEntry(line: string): LogEntry | null {
       verdict: typeof parsed.verdict === 'string' || parsed.verdict === null ? parsed.verdict : undefined,
       tokens_used: finiteNumber(parsed.tokens_used),
       applied_count: finiteNumber(parsed.applied_count),
+      conflicts_resolved: finiteNumber(parsed.conflicts_resolved),
       reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
     }
   } catch {
@@ -397,7 +401,7 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-function applyLogEntry(summary: PRLogSummary, entry: LogEntry): void {
+export function applyLogEntry(summary: PRLogSummary, entry: LogEntry): void {
   if (entry.ts) summary.latestLogAt = maxTimestamp([summary.latestLogAt, entry.ts])
 
   if (entry.event === 'review_complete') {
@@ -411,13 +415,16 @@ function applyLogEntry(summary: PRLogSummary, entry: LogEntry): void {
       summary.latestStep = stepType
     }
     addTokens(summary.tokens, stepType, entry.tokens_used)
-  } else if (entry.event === 'fix_complete' || entry.event === 'conflict_resolve_complete') {
-    summary.fixAppliedCount = entry.applied_count ?? summary.fixAppliedCount ?? 0
+  } else if (entry.event === 'fix_complete') {
+    if (entry.applied_count !== undefined) summary.fixAppliedCount = entry.applied_count
     summary.fixCompletedAt = entry.ts
     summary.latestStep = 'fix'
     addTokens(summary.tokens, 'fix', entry.tokens_used)
-  } else if (entry.event === 'step_skipped' && entry.reason) {
-    summary.skippedReasons.push(entry.reason)
+  } else if (entry.event === 'conflict_resolve_complete') {
+    if (entry.conflicts_resolved !== undefined) summary.fixAppliedCount = entry.conflicts_resolved
+    summary.fixCompletedAt = entry.ts
+    summary.latestStep = 'fix'
+    addTokens(summary.tokens, 'fix', entry.tokens_used)
   }
 }
 
@@ -427,7 +434,7 @@ function addTokens(tokens: ScanTokens, step: StepType, value: number | undefined
   tokens.total += value
 }
 
-function emptyLogSummary(): PRLogSummary {
+export function emptyLogSummary(): PRLogSummary {
   return {
     reviewVerdict: null,
     recheckVerdict: null,
@@ -437,7 +444,6 @@ function emptyLogSummary(): PRLogSummary {
     latestLogAt: null,
     fixAppliedCount: null,
     fixCompletedAt: null,
-    skippedReasons: [],
     tokens: { review: 0, fix: 0, recheck: 0, total: 0 },
   }
 }

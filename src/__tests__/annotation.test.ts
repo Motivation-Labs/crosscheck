@@ -3,6 +3,7 @@ import {
   buildAnnotation,
   buildCommitTrailers,
   parseAnnotation,
+  parseAnnotationFieldsFenced,
   type CrosscheckStepType,
 } from '../lib/annotation.js'
 
@@ -95,6 +96,25 @@ describe('crosscheck annotation contract', () => {
 
   it('returns null for bare summary markers', () => {
     expect(parseAnnotation('<!-- crosscheck: fix_applied -->')).toBeNull()
+  })
+
+  it('skips fenced annotations and parses the footer annotation', () => {
+    const body = [
+      'Example:',
+      '```',
+      '<!-- crosscheck: origin=claude reviewer=codex type=review verdict=BLOCK -->',
+      '```',
+      '<!-- crosscheck: origin=codex reviewer=claude type=recheck verdict=APPROVE -->',
+    ].join('\n')
+
+    expect(parseAnnotation(body)?.type).toBe('recheck')
+    expect(parseAnnotation(body)?.verdict).toBe('APPROVE')
+  })
+
+  it('exposes bare summary markers through the fenced field parser', () => {
+    const fields = parseAnnotationFieldsFenced('<!-- crosscheck: fix_applied -->')
+
+    expect(fields?.get('__marker__')).toBe('fix_applied')
   })
 })
 

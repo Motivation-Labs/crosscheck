@@ -52,11 +52,7 @@ export function parseAnnotation(body: string): CrosscheckAnnotationInput | null 
 }
 
 export function parseAnnotationFields(body: string): ReadonlyMap<string, string> | null {
-  const matches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
-  const last = matches.at(-1)
-  if (!last) return null
-
-  return parseFields(last[1])
+  return parseAnnotationFieldsFenced(body)
 }
 
 // Like parseAnnotationFields but skips annotations inside fenced code blocks

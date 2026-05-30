@@ -412,7 +412,8 @@ export function buildProgressSummary(status: PRStatus): string {
       continue
     }
     if (step.kind === 'recheck') {
-      if (recheckCount >= 2 || !step.verdict) { if (recheckCount >= 2) skipped++; continue }
+      if (recheckCount >= 2) { skipped++; continue }
+      if (!step.verdict) continue
       recheckCount++
       parts.push(`Recheck(${step.verdict})`)
     }

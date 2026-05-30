@@ -14,7 +14,9 @@ export async function checkRemoteLock(
 ): Promise<boolean> {
   try {
     const { data } = await octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha })
-    const status = data.statuses.find(s => s.context === CONTEXT)
+    const status = data.statuses
+      .filter(s => s.context === CONTEXT)
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0]
     if (!status || status.state !== 'pending') return false
     const age = Date.now() - new Date(status.updated_at).getTime()
     return age < STALE_MS

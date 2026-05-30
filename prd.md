@@ -641,6 +641,101 @@ These four items fix the two-phase model described in Design Principles. Any new
     - `renderPRSlot()` with `crTokens: 1200` and `phase: 'reviewed'` includes `(1.2K)` after the verdict badge.
     - `renderPRSlot()` with `crTokens: undefined` renders no suffix.
 
+- [ ] **`crosscheck scan` + `crosscheck kickass` — operator queue for stale PRs across monitored repos** — add a CLI control plane that scans every open PR in the configured monitor scope, summarizes where each PR is in the crosscheck workflow, separates stale from non-stale work, and lets an operator advance selected stale PRs to the next action.
+  - **User:** A repo owner or team lead who wants one command to answer "which open PRs need crosscheck attention right now?" across `orgs`, `users`, and `repos`, then safely push those PRs forward without opening each GitHub tab manually.
+  - **Public CLI API changes:**
+    - `crosscheck scan [--tidy] [--force] [--stale-after <duration>] [--json]`
+    - `crosscheck kickass [--force] [--stale-after <duration>] [--dry-run]`
+    - `--tidy` shows only stale PRs that need attention; default scan shows both stale and not-stale groups.
+    - `--force` bypasses the local 1-minute scan cache.
+    - `--stale-after` accepts a duration like `30m`, `2h`, `1d`; default is `24h`.
+    - `--json` emits the complete scan result for scripts; default is a terminal table.
+  - **Status model:**
+    - Every open PR receives two classifications:
+      - **Freshness:** `stale` or `not_stale`.
+      - **Review state:** `PR`, `APPROVE`, `NEEDS_WORK`, `BLOCK`, `FIX`, or `RECHECK`.
+    - State is derived from the latest crosscheck annotation and structured logs:
+      - `PR` — no fresh crosscheck review comment for the current head SHA; next action is `CR`.
+      - `APPROVE` — latest review/recheck verdict is `APPROVE`; next action is `merge`.
+      - `NEEDS_WORK` — latest review/recheck verdict is `NEEDS_WORK`; next action is `fix`.
+      - `BLOCK` — latest review/recheck verdict is `BLOCK`; next action is `fix`.
+      - `FIX` — a fix or conflict-resolve step is pending, running, failed, or applied without a later recheck; next action is `recheck` when applied, otherwise `fix`.
+      - `RECHECK` — a fix was applied and the branch needs a recheck verdict for the new head SHA; next action is `recheck`.
+    - Progress summary uses the workflow shorthand `PR -> CR -> [Fix -> Recheck] * N`, capped at two automated fix/recheck rounds in the scan display. Example: `PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K) -> Recheck(APPROVE)`.
+    - "Last active" is the max timestamp across PR `updated_at`, latest crosscheck comment, latest relevant workflow log event, latest commit, and latest commit status update. A PR is stale when `now - last_active >= stale_after` and its state has a non-terminal next action. `APPROVE` is considered actionable because the next action is merge.
+  - **Scan output:**
+    - Default terminal output groups by freshness first, then review state:
+
+      ```text
+      STALE
+        NEEDS_WORK
+          owner/repo#123  title  PR -> CR(NEEDS_WORK)  created 3d ago  last active 27h ago  tokens 42.8K  next fix
+        APPROVE
+          owner/repo#124  title  PR -> CR(APPROVE)     created 2d ago  last active 25h ago  tokens 9.1K   next merge
+
+      NOT STALE
+        PR
+          owner/repo#125  title  PR                    created 20m ago last active 20m ago tokens --     next CR
+      ```
+
+    - Each row includes: `owner/repo#pr`, title, author, branch, head SHA short, latest verdict, progress summary, elapsed since created, elapsed since last active, total tokens burned so far, next action, and PR URL.
+    - `--tidy` prints only stale rows with a next action and hides non-stale and terminal/no-action rows.
+    - `--json` includes the raw timestamps, token totals split by step (`review`, `fix`, `recheck`), latest annotation metadata, and the selected next action.
+  - **Local scan cache:**
+    - Scan results are cached at `~/.crosscheck/cache/scan.json` for 60 seconds.
+    - Cache key includes config path, monitor scope hash, current GitHub login, `stale_after`, and crosscheck package version.
+    - `crosscheck scan --force` and `crosscheck kickass --force` ignore the cache and rewrite it after a successful scan.
+    - If GitHub API calls partially fail, cache is not updated; terminal output lists skipped repos with concise reasons.
+  - **Kickass flow:**
+    - `crosscheck kickass` always runs `scan` first, using the 1-minute cache unless `--force` is passed.
+    - It lists stale PRs with actionable next steps in a multi-select picker, grouped by next action: `CR`, `fix`, `recheck`, `merge`.
+    - After selection, it prints a preflight summary grouped by transition:
+
+      ```text
+      PR -> CR
+        owner/repo#125@abc1234  reviewer codex
+
+      NEEDS_WORK -> Fix
+        owner/repo#123@def5678  fixer claude  delivery commit
+
+      APPROVE -> Merge
+        owner/repo#124@999aaaa  method squash  checks green
+      ```
+
+    - The PR signature format is stable: `<owner>/<repo>#<number>@<headSha7> [<state> -> <action>]`.
+    - The operator must confirm the preflight before any mutation. `--dry-run` stops after preflight and exits 0.
+    - Execution is sequential by default to avoid subscription-limit spikes and merge races; a later `--concurrency` flag can be added after rate-limit behavior is measured.
+  - **Kickass actions:**
+    - `PR -> CR`: dispatch the same code path as `crosscheck run <pr-url> --steps review`, preserving origin detection, assignment, locks, remote status, comments, and logs.
+    - `NEEDS_WORK -> Fix` and `BLOCK -> Fix`: dispatch `crosscheck run <pr-url> --steps fix` using the latest fresh review comment as input. If no usable review comment exists for the current head SHA, downgrade the action to `PR -> CR` in preflight and explain why.
+    - `FIX -> Recheck` and `RECHECK -> Recheck`: dispatch `crosscheck run <pr-url> --steps recheck`; link back to the latest fresh review comment.
+    - `APPROVE -> Merge`: merge only when the head SHA still matches the scan signature, the PR is mergeable, required checks are green, and no branch protection rule rejects the merge. If any precondition fails, skip that PR with a `merge_preflight_failed` reason. Default merge method is `squash` unless the repo API reports squash merge disabled, then use the first allowed method in `squash`, `merge`, `rebase` order.
+    - Fork PRs follow existing workflow safety rules: review is allowed, direct fix/merge is skipped unless GitHub permissions allow it.
+  - **Data sources and freshness rules:**
+    - GitHub: open PR list, issue comments, review comments, timeline events where needed, commits, commit statuses/check runs, mergeability, and branch protection merge allowances.
+    - Local logs: `review_complete`, `fix_complete`, `conflict_resolve_complete`, `workflow_complete`, `step_skipped`, `comment_posted` for token totals, durations, step history, and failed actions.
+    - Crosscheck annotations remain the source of truth for verdict and review type. Logs enrich the display but must not be required for correctness because logs are local and may be missing on another machine.
+  - **Technical Notes:**
+    - Extend `src/lib/backtrace.ts` into a reusable scanner rather than creating a second scope expander. Add `scanOpenPRStatuses(scopes, config, token, opts)` returning `ScanResult`.
+    - New command files: `src/commands/scan.ts` and `src/commands/kickass.ts`; wire both in `src/cli.ts`.
+    - New helpers:
+      - `src/lib/scan-cache.ts` — read/write `~/.crosscheck/cache/scan.json`, TTL validation, cache-key hashing.
+      - `src/lib/pr-status.ts` — parse annotations, fold GitHub + log events into the status model, compute stale/fresh and next action.
+      - `src/lib/durations.ts` — parse `--stale-after` durations and format elapsed times consistently.
+      - `src/lib/pr-picker.ts` — multi-select picker for actionable stale PRs (can reuse repo-picker rendering patterns).
+      - `src/github/merge.ts` — merge preflight and merge execution through Octokit; no raw `fetch` outside `github/client.ts`/GitHub modules.
+    - Keep `cli.ts` as command wiring only; command orchestration belongs in `commands/scan.ts` and `commands/kickass.ts`.
+    - Additive config is not required for v1. Use flags and hardcoded defaults first. If a later config field is added for stale thresholds or merge method, update `schema.ts`, `crosscheck.config.example.yml`, and `get-started.md` per the config schema contract.
+  - **Tests Required:**
+    - Status folding: no comment → `PR`; latest review `APPROVE` → `APPROVE`; latest `NEEDS_WORK` plus later fix without recheck → `RECHECK`; `BLOCK` maps to next action `fix`; stale threshold uses latest activity, not PR creation time alone.
+    - Annotation parser prefers the latest crosscheck annotation and ignores quoted/example annotations inside review text.
+    - Token totals aggregate review/fix/recheck log events for the same PR/head SHA and tolerate missing logs.
+    - Cache: hit within 60 seconds, miss after TTL, `--force` bypasses, partial scan failures do not overwrite the prior successful cache.
+    - `scan --tidy` hides non-stale rows and rows without next action.
+    - `kickass --dry-run` runs scan, picker selection, and preflight without calling review/fix/recheck/merge mutators.
+    - Kickass head-SHA guard: if the PR head changed between scan and execution, skip with `stale_signature`.
+    - Merge preflight: skips when checks are failing, mergeable is false/null after retry, or branch protection rejects the selected method.
+
 - [ ] **`ck` short alias** — support both `crosscheck [method]` and `ck [method]` as equivalent invocations.
   - **User:** Any developer who wants faster CLI invocations.
   - **Acceptance Criteria:**

@@ -12,6 +12,7 @@ const SHA = 'abc12345def67890'
 afterEach(() => {
   releasePRLock(OWNER, REPO, PR, SHA)
   releasePRLock(OWNER, REPO, PR + 1, SHA)
+  releasePRLock(OWNER, REPO, PR, 'ffffffff00000000')
 })
 
 describe('acquirePRLock', () => {
@@ -24,11 +25,10 @@ describe('acquirePRLock', () => {
     expect(acquirePRLock(OWNER, REPO, PR, SHA)).toBe(false)
   })
 
-  it('returns true for a different SHA on the same PR', () => {
+  it('returns false for a different SHA on the same PR', () => {
     acquirePRLock(OWNER, REPO, PR, SHA)
     const newSha = 'ffffffff00000000'
-    expect(acquirePRLock(OWNER, REPO, PR, newSha)).toBe(true)
-    releasePRLock(OWNER, REPO, PR, newSha)
+    expect(acquirePRLock(OWNER, REPO, PR, newSha)).toBe(false)
   })
 
   it('returns true after lock is released', () => {
@@ -45,7 +45,7 @@ describe('acquirePRLock', () => {
   it('acquires a stale lock (mtime > 20 min)', () => {
     const lockDir = join(homedir(), '.crosscheck', 'locks')
     mkdirSync(lockDir, { recursive: true })
-    const stalePath = join(lockDir, `${OWNER}-${REPO}-${PR}-${SHA.slice(0, 8)}.lock`)
+    const stalePath = join(lockDir, `${OWNER}-${REPO}-${PR}.lock`)
     writeFileSync(stalePath, '')
     // Back-date the mtime to 21 minutes ago
     const staleTime = new Date(Date.now() - 21 * 60 * 1000)
@@ -80,7 +80,7 @@ describe('handleLockSignal', () => {
 
   it('removes active lock files when signal fires', () => {
     acquirePRLock(OWNER, REPO, PR, SHA)
-    const lockFile = join(homedir(), '.crosscheck', 'locks', `${OWNER}-${REPO}-${PR}-${SHA.slice(0, 8)}.lock`)
+    const lockFile = join(homedir(), '.crosscheck', 'locks', `${OWNER}-${REPO}-${PR}.lock`)
     expect(existsSync(lockFile)).toBe(true)
 
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)

@@ -121,4 +121,13 @@ describe('isFreshReviewComment', () => {
       + '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=recheck -->'
     expect(isFreshReviewComment(body)).toBe(false)
   })
+
+  // Guards the Codex PR #155 [P2]: an explicit but unrecognized type (emitted by
+  // a future minor version) must not be treated as a review — the annotation
+  // contract says any explicit type other than 'review' is not a fresh review.
+  it('returns false for an annotation with an explicit but unrecognized step type', () => {
+    expect(isFreshReviewComment(
+      '### Code Review by ⚡ Codex\n\nbody\n\n<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=future-step -->',
+    )).toBe(false)
+  })
 })

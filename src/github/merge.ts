@@ -1,24 +1,57 @@
 import type { Octokit } from 'octokit'
+import type { PRMergeSummary } from '../lib/pr-status.js'
 
 export type MergeMethod = 'merge' | 'squash' | 'rebase'
 
-export interface MergePullRequestInput {
-  owner: string
-  repo: string
-  pullNumber: number
-  method: MergeMethod
-  expectedHeadSha?: string
+export async function getPRMergeSummary(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  baseRef: string,
+): Promise<PRMergeSummary> {
+  const [{ data: pull }, protectedBase] = await Promise.all([
+    octokit.rest.pulls.get({ owner, repo, pull_number: pullNumber }),
+    getProtectedBase(octokit, owner, repo, baseRef),
+  ])
+
+  const mergeStateStatus = typeof pull.mergeable_state === 'string'
+    ? pull.mergeable_state
+    : undefined
+
+  return {
+    mergeable: pull.mergeable,
+    ...(mergeStateStatus && { mergeStateStatus }),
+    protectedBase,
+  }
 }
 
 export async function mergePullRequest(
   octokit: Octokit,
-  input: MergePullRequestInput,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  options: { method: MergeMethod; expectedHeadSha?: string },
 ): Promise<void> {
   await octokit.rest.pulls.merge({
-    owner: input.owner,
-    repo: input.repo,
-    pull_number: input.pullNumber,
-    merge_method: input.method,
-    sha: input.expectedHeadSha,
+    owner,
+    repo,
+    pull_number: pullNumber,
+    merge_method: options.method,
+    ...(options.expectedHeadSha && { sha: options.expectedHeadSha }),
   })
+}
+
+async function getProtectedBase(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<boolean | null> {
+  try {
+    const { data } = await octokit.rest.repos.getBranch({ owner, repo, branch })
+    return data.protected
+  } catch {
+    return null
+  }
 }

@@ -1,556 +1,376 @@
 import chalk from 'chalk'
-import { createHash } from 'crypto'
-import { createGithubClient, listOpenPRs, listOrgRepos, listPRComments, type PRComment } from '../github/client.js'
-import { detectOriginFull, assignReviewer, type PROrigin } from '../github/detector.js'
+import { existsSync } from 'fs'
+import { stdin as input, stdout as output } from 'process'
+import { createInterface } from 'readline/promises'
+import { fileURLToPath } from 'url'
+import { execa } from 'execa'
+import { createGithubClient } from '../github/client.js'
 import { mergePullRequest } from '../github/merge.js'
-import { loadConfig, getGithubToken } from '../config/loader.js'
-import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { isAuthorAllowed } from '../lib/filter.js'
-import { buildScopesFromConfig, type BacktraceScope } from '../lib/backtrace.js'
-import { promptPRPicker, type PRPickerItem } from '../lib/pr-picker.js'
-import { runRun, type RunOpts } from './run.js'
-import type { Config } from '../config/schema.js'
-
-const SCAN_CACHE_MS = 60_000
+import { getGithubToken } from '../config/loader.js'
+import { parseDuration } from '../lib/durations.js'
+import { logError } from '../lib/logger.js'
+import { pickPRs } from '../lib/pr-picker.js'
+import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
+import { handleScanError, loadScanResult } from './scan.js'
 
 export interface KickassOpts {
-  config?: string
   force?: boolean
+  staleAfter?: string
   dryRun?: boolean
 }
 
-export interface KickassScannedPR {
-  owner: string
-  repo: string
-  number: number
-  title: string
-  author: string
-  headSha: string
-  headRef: string
-  headRepo: string | null
-  baseRef: string
-  body: string | null
-  createdAt: string
-  comments: PRComment[]
-  origin: PROrigin
-  reviewer: 'claude' | 'codex' | null
-}
+export type KickassAction = 'review' | 'fix' | 'recheck' | 'merge' | 'skip'
+export type KickassSkipReason = 'fork_pr' | 'stale_signature'
+export type KickassFailureReason = 'error'
 
-export type KickassAction = 'review' | 'fix' | 'recheck' | 'merge'
-
-export interface FreshReviewComment {
-  id: number
-  body: string
-}
-
-export interface KickassPlanItem {
-  key: string
-  pr: KickassScannedPR
+export interface PreflightItem {
+  pr: PRStatus
   action: KickassAction
   transition: string
-  scannedHeadSha: string
-  reviewer?: 'claude' | 'codex'
-  fixer?: 'claude' | 'codex' | 'auto'
-  delivery?: string
-  mergeMethod?: string
-  checks?: string
+  details: string[]
   explanation?: string
-  reviewComment?: FreshReviewComment
+  skipReason?: KickassSkipReason
 }
 
 export interface KickassExecutionResult {
-  executed: number
-  skipped: Array<{ pr: string; reason: string }>
+  pr: PRStatus
+  status: 'executed' | 'skipped' | 'failed'
+  reason?: KickassSkipReason | KickassFailureReason
 }
 
-export interface KickassScanResult {
-  candidates: KickassScannedPR[]
+export interface ExecuteKickassDeps {
+  getCurrentHeadSha: (item: PreflightItem) => Promise<string>
+  dispatchRun: (item: PreflightItem) => Promise<void>
+  dispatchMerge: (item: PreflightItem) => Promise<void>
 }
 
 export interface KickassDeps {
-  config?: Config
-  token?: string
-  scan?: (force: boolean) => Promise<KickassScanResult>
-  pick?: (items: KickassPlanItem[]) => Promise<KickassPlanItem[]>
-  confirm?: (items: KickassPlanItem[]) => Promise<boolean>
-  run?: (item: KickassPlanItem, steps: string) => Promise<void>
-  merge?: (item: KickassPlanItem) => Promise<void>
-  getCurrentHead?: (item: KickassPlanItem) => Promise<{ sha: string; headRepo: string | null }>
-  log?: (line: string) => void
+  loadScanResult: (options: { force?: boolean; staleAfterMs: number }) => Promise<ScanResult>
+  pickPRs: (prs: PRStatus[]) => Promise<PRStatus[]>
+  confirm: (message: string) => Promise<boolean>
+  getCurrentHeadSha: (item: PreflightItem) => Promise<string>
+  dispatchRun: (item: PreflightItem) => Promise<void>
+  dispatchMerge: (item: PreflightItem) => Promise<void>
 }
 
-interface CacheEntry {
-  writtenAt: number
-  key: string
-  result: KickassScanResult
+export async function runKickass(opts: KickassOpts = {}): Promise<void> {
+  await runKickassWithDeps(opts, defaultKickassDeps())
 }
 
-interface ParsedAnnotation {
-  type?: string
-  verdict?: 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
-  reviewer?: string
-  sha?: string
-}
-
-let scanCache: CacheEntry | null = null
-
-function prLabel(pr: Pick<KickassScannedPR, 'owner' | 'repo' | 'number'>): string {
-  return `${pr.owner}/${pr.repo}#${pr.number}`
-}
-
-function prUrl(pr: Pick<KickassScannedPR, 'owner' | 'repo' | 'number'>): string {
-  return `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`
-}
-
-function shortSha(sha: string): string {
-  return sha.slice(0, 7)
-}
-
-function normalizeVerdict(value: string | undefined): ParsedAnnotation['verdict'] {
-  if (value === 'APPROVE') return 'APPROVE'
-  if (value === 'NEEDS_WORK' || value === 'NEEDS WORK') return 'NEEDS_WORK'
-  if (value === 'BLOCK') return 'BLOCK'
-  return undefined
-}
-
-function parseAnnotation(body: string): ParsedAnnotation | null {
-  const matches = [...body.matchAll(/<!-- crosscheck: ([^>]+) -->/g)]
-  const last = matches.at(-1)
-  if (!last) return null
-
-  const parsed: ParsedAnnotation = {}
-  const attrs = last[1].trim().split(/\s+/)
-  for (const attr of attrs) {
-    if (!attr.includes('=')) {
-      parsed.type = attr
-      continue
-    }
-    const [key, value] = attr.split('=')
-    if (!key || value === undefined) continue
-    if (key === 'type') parsed.type = value
-    if (key === 'verdict') parsed.verdict = normalizeVerdict(value)
-    if (key === 'reviewer') parsed.reviewer = value
-    if (key === 'sha') parsed.sha = value
-  }
-  return parsed
-}
-
-function isForkPR(pr: Pick<KickassScannedPR, 'owner' | 'repo' | 'headRepo'>): boolean {
-  return pr.headRepo === null || pr.headRepo !== `${pr.owner}/${pr.repo}`
-}
-
-function findLatestFreshReviewComment(pr: KickassScannedPR): FreshReviewComment | null {
-  const comments = [...pr.comments].reverse()
-  for (const comment of comments) {
-    const annotation = parseAnnotation(comment.body)
-    if (!annotation) continue
-    const isReview = annotation.type === 'review'
-      || (annotation.type === undefined && annotation.reviewer !== undefined && annotation.verdict !== undefined)
-    if (!isReview) continue
-    if (annotation.sha !== pr.headSha) continue
-    return { id: comment.id, body: comment.body }
-  }
-  return null
-}
-
-function latestCrosscheckState(pr: KickassScannedPR): ParsedAnnotation | null {
-  const comments = [...pr.comments].reverse()
-  for (const comment of comments) {
-    const annotation = parseAnnotation(comment.body)
-    if (annotation?.type === 'no_diff_change') continue
-    if (annotation) return annotation
-  }
-  return null
-}
-
-function actionForPR(pr: KickassScannedPR, config: Config): Omit<KickassPlanItem, 'key' | 'pr' | 'scannedHeadSha'> {
-  const latest = latestCrosscheckState(pr)
-  if (!latest) {
-    return {
-      action: 'review',
-      transition: 'PR -> CR',
-      reviewer: pr.reviewer ?? undefined,
-    }
-  }
-
-  if (latest.type === 'fix_applied' || latest.type === 'conflict_resolved') {
-    return {
-      action: 'recheck',
-      transition: latest.type === 'fix_applied' ? 'FIX -> Recheck' : 'RECHECK -> Recheck',
-      reviewer: pr.reviewer ?? undefined,
-      reviewComment: findLatestFreshReviewComment(pr) ?? undefined,
-    }
-  }
-
-  if (latest.type === 'fix_failed') {
-    const reviewComment = findLatestFreshReviewComment(pr)
-    if (!reviewComment) {
-      return {
-        action: 'review',
-        transition: 'PR -> CR',
-        reviewer: pr.reviewer ?? undefined,
-        explanation: 'downgraded from Fix: fix_failed marker has no usable review comment for current head SHA',
-      }
-    }
-    return {
-      action: 'fix',
-      transition: 'FIX_FAILED -> Fix',
-      fixer: pr.origin === 'claude' || pr.origin === 'codex' ? pr.origin : 'auto',
-      delivery: config.post_review.auto_fix.delivery.mode,
-      reviewComment,
-    }
-  }
-
-  if ((latest.type === 'review' || latest.type === undefined) && (latest.verdict === 'NEEDS_WORK' || latest.verdict === 'BLOCK')) {
-    const reviewComment = findLatestFreshReviewComment(pr)
-    if (!reviewComment) {
-      return {
-        action: 'review',
-        transition: 'PR -> CR',
-        reviewer: pr.reviewer ?? undefined,
-        explanation: 'downgraded from Fix: no usable review comment for current head SHA',
-      }
-    }
-    return {
-      action: 'fix',
-      transition: `${latest.verdict === 'BLOCK' ? 'BLOCK' : 'NEEDS_WORK'} -> Fix`,
-      fixer: pr.origin === 'claude' || pr.origin === 'codex' ? pr.origin : 'auto',
-      delivery: config.post_review.auto_fix.delivery.mode,
-      reviewComment,
-    }
-  }
-
-  if (latest.sha !== undefined && latest.sha !== pr.headSha) {
-    return {
-      action: 'review',
-      transition: 'PR -> CR',
-      reviewer: pr.reviewer ?? undefined,
-      explanation: `downgraded from ${latest.verdict ?? latest.type ?? 'prior state'}: latest crosscheck annotation is for old head SHA ${shortSha(latest.sha)}`,
-    }
-  }
-
-  if (latest.type === 'recheck' && (latest.verdict === 'NEEDS_WORK' || latest.verdict === 'BLOCK')) {
-    return {
-      action: 'recheck',
-      transition: 'RECHECK -> Recheck',
-      reviewer: pr.reviewer ?? undefined,
-      reviewComment: findLatestFreshReviewComment(pr) ?? undefined,
-    }
-  }
-
-  if ((latest.type === 'review' || latest.type === 'recheck') && latest.verdict === 'APPROVE') {
-    return {
-      action: 'merge',
-      transition: 'APPROVE -> Merge',
-      mergeMethod: 'squash',
-      checks: 'green',
-    }
-  }
-
-  return {
-    action: 'review',
-    transition: 'PR -> CR',
-    reviewer: pr.reviewer ?? undefined,
-  }
-}
-
-export function buildKickassPlan(prs: KickassScannedPR[], config: Config): KickassPlanItem[] {
-  return prs.map(pr => ({
-    key: `${pr.owner}/${pr.repo}#${pr.number}`,
-    pr,
-    scannedHeadSha: pr.headSha,
-    ...actionForPR(pr, config),
-  }))
-}
-
-function pickerItems(items: KickassPlanItem[]): PRPickerItem[] {
-  return items.map(item => ({
-    key: item.key,
-    label: `${prLabel(item.pr)}@${shortSha(item.scannedHeadSha)}`,
-    action: item.action,
-    description: item.explanation ?? item.transition,
-  }))
-}
-
-function groupPreflight(items: KickassPlanItem[]): Map<string, KickassPlanItem[]> {
-  const groups = new Map<string, KickassPlanItem[]>()
-  for (const item of items) {
-    const existing = groups.get(item.transition) ?? []
-    existing.push(item)
-    groups.set(item.transition, existing)
-  }
-  return groups
-}
-
-export function formatPreflightSummary(items: KickassPlanItem[]): string {
-  if (items.length === 0) return 'No PRs selected.'
-
-  const lines: string[] = []
-  for (const [transition, group] of groupPreflight(items)) {
-    lines.push(transition)
-    for (const item of group) {
-      const parts = [`  ${prLabel(item.pr)}@${shortSha(item.scannedHeadSha)}`]
-      if (item.reviewer) parts.push(`reviewer ${item.reviewer}`)
-      if (item.fixer) parts.push(`fixer ${item.fixer}`)
-      if (item.delivery) parts.push(`delivery ${item.delivery}`)
-      if (item.mergeMethod) parts.push(`method ${item.mergeMethod}`)
-      if (item.checks) parts.push(`checks ${item.checks}`)
-      if (item.explanation) parts.push(chalk.dim(item.explanation))
-      lines.push(parts.join('  '))
-    }
-    lines.push('')
-  }
-  return lines.join('\n').trimEnd()
-}
-
-export function formatExecutionSummary(result: KickassExecutionResult): string {
-  const skipped = result.skipped.length
-  if (result.executed === 0 && skipped === 0) return chalk.dim('No mutations performed.')
-  const parts = [`Executed ${result.executed}`]
-  if (skipped > 0) {
-    const reasons = new Map<string, number>()
-    for (const item of result.skipped) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1)
-    const reasonSummary = [...reasons.entries()]
-      .map(([reason, count]) => `${reason}:${count}`)
-      .join(', ')
-    parts.push(`skipped ${skipped} (${reasonSummary})`)
-  } else {
-    parts.push('skipped 0')
-  }
-  return parts.join('; ')
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value)
-}
-
-function cacheKeyForScan(config: Config, token: string): string {
-  return createHash('sha256')
-    .update(stableStringify({ config, tokenHash: createHash('sha256').update(token).digest('hex') }))
-    .digest('hex')
-}
-
-async function defaultConfirm(items: KickassPlanItem[]): Promise<boolean> {
-  if (!process.stdin.isTTY || items.length === 0) return false
-  process.stdout.write(`\nProceed with ${items.length} mutation${items.length === 1 ? '' : 's'}? [y/N] `)
-  return new Promise<boolean>((resolve) => {
-    process.stdin.resume()
-    process.stdin.setEncoding('utf8')
-    process.stdin.once('data', (data: string) => {
-      process.stdin.pause()
-      resolve(data.trim().toLowerCase() === 'y' || data.trim().toLowerCase() === 'yes')
-    })
-  })
-}
-
-async function expandScopes(scopes: BacktraceScope[], token: string): Promise<Array<{ owner: string; repo: string }>> {
-  const nested = await Promise.all(scopes.map(async (scope) => {
-    if ('org' in scope) {
-      try {
-        const repos = await listOrgRepos(scope.org, token)
-        return repos.map(repo => ({ owner: repo.owner, repo: repo.name }))
-      } catch {
-        return []
-      }
-    }
-    return [{ owner: scope.owner, repo: scope.repo }]
-  }))
-  return nested.flat()
-}
-
-export async function scanKickassPRs(config: Config, token: string, force: boolean): Promise<KickassScanResult> {
-  const now = Date.now()
-  const cacheKey = cacheKeyForScan(config, token)
-  if (!force && scanCache && scanCache.key === cacheKey && now - scanCache.writtenAt < SCAN_CACHE_MS) {
-    return scanCache.result
-  }
-
-  const scopes = await buildScopesFromConfig(config, token)
-  const repos = await expandScopes(scopes, token)
-  const perRepo = await Promise.all(repos.map(async ({ owner, repo }) => {
-    try {
-      const prs = await listOpenPRs(owner, repo, token)
-      return prs.map(pr => ({ owner, repo, pr }))
-    } catch {
-      return []
-    }
-  }))
-
-  const scanned = await Promise.all(perRepo.flat().map(async ({ owner, repo, pr }) => {
-    if (!isAuthorAllowed(config.routing.allowed_authors, pr.author)) return null
-    let comments: PRComment[] = []
-    try {
-      comments = await listPRComments(owner, repo, pr.number, token)
-    } catch {
-      return null
-    }
-    const { origin } = await detectOriginFull(
-      pr.body ?? '',
-      pr.headRef,
-      owner,
-      repo,
-      pr.number,
-      config,
-      token,
-      pr.author,
-    )
-    const reviewer = await assignReviewer(origin, config)
-    return {
-      owner,
-      repo,
-      number: pr.number,
-      title: pr.title,
-      author: pr.author,
-      headSha: pr.headSha,
-      headRef: pr.headRef,
-      headRepo: pr.headRepo,
-      baseRef: pr.baseRef,
-      body: pr.body,
-      createdAt: pr.createdAt,
-      comments,
-      origin,
-      reviewer,
-    } satisfies KickassScannedPR
-  }))
-
-  const result: KickassScanResult = { candidates: scanned.filter(pr => pr !== null) }
-  scanCache = { writtenAt: now, key: cacheKey, result }
-  return result
-}
-
-export async function executeKickassPlan(
-  items: KickassPlanItem[],
-  deps: Required<Pick<KickassDeps, 'getCurrentHead' | 'run' | 'merge'>>,
-): Promise<KickassExecutionResult> {
-  const result: KickassExecutionResult = { executed: 0, skipped: [] }
-
-  await items.reduce<Promise<void>>(async (previous, item) => {
-    await previous
-    const current = await deps.getCurrentHead(item)
-    if (current.sha !== item.scannedHeadSha) {
-      result.skipped.push({ pr: prLabel(item.pr), reason: 'stale_signature' })
-      return
-    }
-    if ((item.action === 'fix' || item.action === 'merge') && isForkPR({ ...item.pr, headRepo: current.headRepo })) {
-      result.skipped.push({ pr: prLabel(item.pr), reason: 'fork_pr' })
-      return
-    }
-
-    if (item.action === 'merge') {
-      await deps.merge(item)
-    } else {
-      await deps.run(item, item.action)
-    }
-    result.executed++
-  }, Promise.resolve())
-
-  return result
-}
-
-export function buildKickassRunOpts(item: KickassPlanItem, steps: string, configPath?: string): RunOpts {
-  const opts: RunOpts = { config: configPath, steps, expectedHeadSha: item.scannedHeadSha }
-  if ((item.action === 'fix' || item.action === 'recheck') && item.reviewComment) {
-    opts.initialReviewComment = item.reviewComment
-  }
-  return opts
-}
-
-function defaultRun(item: KickassPlanItem, steps: string, configPath?: string): Promise<void> {
-  return runRun(prUrl(item.pr), buildKickassRunOpts(item, steps, configPath))
-}
-
-async function defaultMerge(item: KickassPlanItem, token: string): Promise<void> {
-  const octokit = createGithubClient(token)
-  await mergePullRequest(octokit, {
-    owner: item.pr.owner,
-    repo: item.pr.repo,
-    pullNumber: item.pr.number,
-    method: item.mergeMethod === 'merge' || item.mergeMethod === 'rebase' ? item.mergeMethod : 'squash',
-    expectedHeadSha: item.scannedHeadSha,
-  })
-}
-
-function defaultGetCurrentHead(token: string): (item: KickassPlanItem) => Promise<{ sha: string; headRepo: string | null }> {
-  return async (item) => {
-    const octokit = createGithubClient(token)
-    const { data } = await octokit.rest.pulls.get({
-      owner: item.pr.owner,
-      repo: item.pr.repo,
-      pull_number: item.pr.number,
-    })
-    return {
-      sha: data.head.sha,
-      headRepo: data.head.repo?.full_name ?? null,
-    }
-  }
-}
-
-export async function runKickass(opts: KickassOpts = {}, deps: KickassDeps = {}): Promise<KickassExecutionResult> {
-  const log = deps.log ?? ((line: string) => console.log(line))
-  const config = deps.config ?? loadConfig(opts.config)
-  initLogger(config.logs)
-  fileLog({ level: 'info', event: 'session_start', command: 'kickass' })
-
-  let token = deps.token ?? ''
-  if (!deps.token) {
-    try {
-      token = getGithubToken()
-    } catch (err) {
-      logError({ command: 'kickass', phase: 'auth' }, err)
-      console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-      process.exit(1)
-    }
-  }
-
-  const scan = deps.scan ?? ((force: boolean) => scanKickassPRs(config, token, force))
-  const scanResult = await scan(opts.force === true)
-  const plan = buildKickassPlan(scanResult.candidates, config)
-
-  if (plan.length === 0) {
-    log(chalk.dim('No actionable PRs found.'))
-    return { executed: 0, skipped: [] }
-  }
-
-  const picker = deps.pick ?? (async (items: KickassPlanItem[]) => {
-    const selectedKeys = await promptPRPicker(pickerItems(items))
-    const selected = new Set(selectedKeys)
-    return items.filter(item => selected.has(item.key))
-  })
-  const selected = await picker(plan)
-  log(formatPreflightSummary(selected))
-
-  if (selected.length === 0) return { executed: 0, skipped: [] }
-  if (opts.dryRun) {
-    const result = {
-      executed: 0,
-      skipped: selected.map(item => ({ pr: prLabel(item.pr), reason: 'dry_run' })),
-    }
-    log(formatExecutionSummary(result))
-    return result
-  }
-
-  const confirm = deps.confirm ?? defaultConfirm
-  if (!await confirm(selected)) {
-    log(chalk.dim('Cancelled. No mutations performed.'))
-    return { executed: 0, skipped: selected.map(item => ({ pr: prLabel(item.pr), reason: 'cancelled' })) }
+export async function runKickassWithDeps(
+  opts: KickassOpts = {},
+  deps: KickassDeps,
+): Promise<void> {
+  let staleAfterMs: number
+  try {
+    staleAfterMs = parseDuration(opts.staleAfter ?? '24h')
+  } catch (err: unknown) {
+    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
+    process.exit(1)
   }
 
   try {
-    const result = await executeKickassPlan(selected, {
-      getCurrentHead: deps.getCurrentHead ?? defaultGetCurrentHead(token),
-      run: deps.run ?? ((item: KickassPlanItem, steps: string) => defaultRun(item, steps, opts.config)),
-      merge: deps.merge ?? ((item: KickassPlanItem) => defaultMerge(item, token)),
-    })
-    log(formatExecutionSummary(result))
-    return result
-  } catch (err) {
-    logError({ command: 'kickass', phase: 'execute' }, err)
-    console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
-    process.exit(2)
+    const scan = await deps.loadScanResult({ force: opts.force, staleAfterMs })
+    const queue = scan.prs.filter(pr => pr.freshness === 'stale' && pr.nextAction !== null)
+
+    if (queue.length === 0) {
+      console.log(chalk.dim('No stale PRs need attention.'))
+      return
+    }
+
+    const selected = await deps.pickPRs(queue)
+    if (selected.length === 0) {
+      console.log(chalk.dim('No PRs selected.'))
+      return
+    }
+
+    const plan = buildPreflightPlan(selected)
+    printPreflight(plan)
+
+    if (opts.dryRun) {
+      console.log(chalk.dim('\ndry-run: no mutations executed'))
+      return
+    }
+
+    const shouldRun = await deps.confirm('Proceed with these mutations?')
+    if (!shouldRun) {
+      console.log(chalk.dim('Canceled.'))
+      return
+    }
+
+    const results = await executeKickassPlan(plan, deps)
+    printExecutionSummary(results)
+    if (results.some(result => result.status === 'failed')) {
+      process.exitCode = 2
+    }
+  } catch (err: unknown) {
+    handleScanError('kickass', err)
   }
+}
+
+export function buildPreflightPlan(prs: PRStatus[]): PreflightItem[] {
+  return prs.map((pr) => {
+    const fork = isForkPR(pr)
+    if (pr.nextAction === 'fix' && fork) {
+      return {
+        pr,
+        action: 'skip',
+        transition: `${pr.reviewState} -> Skip`,
+        details: ['reason fork_pr'],
+        skipReason: 'fork_pr',
+      }
+    }
+
+    if (pr.nextAction === 'fix' && !hasUsableCurrentHeadReview(pr)) {
+      return {
+        pr,
+        action: 'review',
+        transition: 'PR -> CR',
+        details: [`reviewer ${reviewerLabel(pr)}`],
+        explanation: 'no_usable_review_comment',
+      }
+    }
+
+    if (pr.nextAction === 'review') {
+      return {
+        pr,
+        action: 'review',
+        transition: 'PR -> CR',
+        details: [`reviewer ${reviewerLabel(pr)}`],
+      }
+    }
+
+    if (pr.nextAction === 'fix') {
+      return {
+        pr,
+        action: 'fix',
+        transition: `${pr.reviewState} -> Fix`,
+        details: [`fixer ${fixerLabel(pr)}`, 'delivery commit'],
+      }
+    }
+
+    if (pr.nextAction === 'recheck') {
+      return {
+        pr,
+        action: 'recheck',
+        transition: `${pr.reviewState} -> Recheck`,
+        details: ['links latest review'],
+      }
+    }
+
+    return {
+      pr,
+      action: 'merge',
+      transition: 'APPROVE -> Merge',
+      details: ['method squash', `checks ${checksLabel(pr)}`],
+    }
+  })
+}
+
+export async function executeKickassPlan(
+  plan: PreflightItem[],
+  deps: ExecuteKickassDeps,
+): Promise<KickassExecutionResult[]> {
+  const results: KickassExecutionResult[] = []
+
+  for (const item of plan) {
+    if (item.action === 'skip') {
+      console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
+      results.push({ pr: item.pr, status: 'skipped', reason: item.skipReason })
+      continue
+    }
+
+    try {
+      const currentHeadSha = await deps.getCurrentHeadSha(item)
+      if (currentHeadSha !== item.pr.headSha) {
+        console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
+        results.push({ pr: item.pr, status: 'skipped', reason: 'stale_signature' })
+        continue
+      }
+
+      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
+      if (item.action === 'merge') {
+        await deps.dispatchMerge(item)
+      } else {
+        await deps.dispatchRun(item)
+      }
+      results.push({ pr: item.pr, status: 'executed' })
+    } catch (err: unknown) {
+      logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
+      console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      results.push({ pr: item.pr, status: 'failed', reason: 'error' })
+    }
+  }
+
+  return results
+}
+
+export function printPreflight(plan: PreflightItem[]): void {
+  console.log('\nPreflight')
+  const grouped = groupPreflight(plan)
+  for (const [transition, items] of grouped) {
+    console.log(`\n${transition}`)
+    for (const item of items) {
+      const explanation = item.explanation ? `  ${chalk.dim(item.explanation)}` : ''
+      console.log(`  ${formatPRSignature(item.pr)}  ${item.details.join('  ')}${explanation}`)
+    }
+  }
+}
+
+export function summarizeExecutionResults(results: KickassExecutionResult[]): string {
+  const executed = results.filter(result => result.status === 'executed').length
+  const skipped = results.filter(result => result.status === 'skipped').length
+  const failed = results.filter(result => result.status === 'failed').length
+  return `Execution summary: ${executed} executed, ${skipped} skipped, ${failed} failed`
+}
+
+export function printExecutionSummary(results: KickassExecutionResult[]): void {
+  console.log(chalk.dim(`\n${summarizeExecutionResults(results)}`))
+}
+
+export function buildKickassRunArgs(itemOrPR: PreflightItem | PRStatus): string[] {
+  const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
+  if (item.action === 'merge' || item.action === 'skip') return []
+  return [
+    'run',
+    item.pr.url,
+    '--steps',
+    stepForAction(item.action),
+    '--expected-head-sha',
+    item.pr.headSha,
+  ]
+}
+
+export interface CliInvocation {
+  command: string
+  args: string[]
+}
+
+interface ResolveCliInvocationOptions {
+  argvEntry?: string
+  execPath?: string
+  exists?: (path: string) => boolean
+  urlToPath?: (url: URL) => string
+}
+
+export function resolveCliInvocation(options: ResolveCliInvocationOptions = {}): CliInvocation {
+  const exists = options.exists ?? existsSync
+  const urlToPath = options.urlToPath ?? fileURLToPath
+  const execPath = options.execPath ?? process.execPath
+  const argvEntry = options.argvEntry ?? process.argv[1]
+  const localTsx = urlToPath(new URL('../../node_modules/.bin/tsx', import.meta.url))
+
+  if (argvEntry && exists(argvEntry)) {
+    return invocationForEntry(argvEntry, execPath, localTsx, exists)
+  }
+
+  const builtCli = urlToPath(new URL('../cli.js', import.meta.url))
+  if (exists(builtCli)) return { command: execPath, args: [builtCli] }
+
+  const sourceCli = urlToPath(new URL('../cli.ts', import.meta.url))
+  if (exists(sourceCli)) return invocationForEntry(sourceCli, execPath, localTsx, exists)
+
+  throw new Error('Cannot resolve crosscheck CLI entrypoint. Run npm run build before kickass, or run from a source checkout with dev dependencies installed.')
+}
+
+function defaultKickassDeps(): KickassDeps {
+  let cli: CliInvocation | undefined
+  const getCli = (): CliInvocation => {
+    cli ??= resolveCliInvocation()
+    return cli
+  }
+  return {
+    loadScanResult,
+    pickPRs,
+    confirm: confirmMutation,
+    getCurrentHeadSha: async (item) => {
+      const token = getGithubToken()
+      const octokit = createGithubClient(token)
+      const { data } = await octokit.rest.pulls.get({
+        owner: item.pr.owner,
+        repo: item.pr.repo,
+        pull_number: item.pr.number,
+      })
+      return data.head.sha
+    },
+    dispatchRun: async (item) => {
+      const invocation = getCli()
+      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item)], { stdio: 'inherit' })
+    },
+    dispatchMerge: async (item) => {
+      const token = getGithubToken()
+      const octokit = createGithubClient(token)
+      await mergePullRequest(octokit, item.pr.owner, item.pr.repo, item.pr.number, {
+        method: 'squash',
+        expectedHeadSha: item.pr.headSha,
+      })
+    },
+  }
+}
+
+async function confirmMutation(message: string): Promise<boolean> {
+  const rl = createInterface({ input, output })
+  try {
+    const answer = await rl.question(`${message} [y/N] `)
+    return answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes'
+  } finally {
+    rl.close()
+  }
+}
+
+function groupPreflight(plan: PreflightItem[]): Array<[string, PreflightItem[]]> {
+  const groups = new Map<string, PreflightItem[]>()
+  for (const item of plan) {
+    const current = groups.get(item.transition) ?? []
+    current.push(item)
+    groups.set(item.transition, current)
+  }
+  return [...groups.entries()]
+}
+
+function hasUsableCurrentHeadReview(pr: PRStatus): boolean {
+  const annotation = pr.latestAnnotation
+  if (!annotation || annotation.type !== 'review' || !annotation.sha) return false
+  return pr.headSha.startsWith(annotation.sha) || annotation.sha.startsWith(pr.headSha)
+}
+
+function isForkPR(pr: PRStatus): boolean {
+  return pr.headRepo !== undefined
+    && pr.headRepo !== null
+    && pr.headRepo.toLowerCase() !== `${pr.owner}/${pr.repo}`.toLowerCase()
+}
+
+function reviewerLabel(pr: PRStatus): string {
+  return pr.latestAnnotation?.reviewer ?? 'auto'
+}
+
+function fixerLabel(pr: PRStatus): string {
+  return pr.latestAnnotation?.origin ?? 'origin'
+}
+
+function checksLabel(pr: PRStatus): string {
+  if (!pr.merge) return 'unknown'
+  if (pr.merge.mergeStateStatus === 'clean' || pr.merge.mergeStateStatus === 'has_hooks') return 'green'
+  return pr.merge.mergeStateStatus ?? 'unknown'
+}
+
+function stepForAction(action: Exclude<KickassAction, 'merge' | 'skip'>): string {
+  if (action === 'review') return 'review'
+  if (action === 'fix') return 'fix'
+  return 'recheck'
+}
+
+function formatPRSignature(pr: PRStatus): string {
+  return `${pr.owner}/${pr.repo}#${pr.number}@${pr.headSha.slice(0, 7)}`
+}
+
+function invocationForEntry(
+  entry: string,
+  execPath: string,
+  localTsx: string,
+  exists: (path: string) => boolean,
+): CliInvocation {
+  if (!entry.endsWith('.ts')) return { command: execPath, args: [entry] }
+  if (exists(localTsx)) return { command: localTsx, args: [entry] }
+  throw new Error('Cannot run kickass actions from a TypeScript entrypoint without the local tsx dev dependency. Run npm run build first.')
 }

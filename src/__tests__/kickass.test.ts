@@ -1,317 +1,300 @@
-import { describe, it, expect, vi } from 'vitest'
-import { ConfigSchema } from '../config/schema.js'
+import { describe, expect, it } from 'vitest'
 import {
-  buildKickassRunOpts,
-  buildKickassPlan,
+  buildKickassRunArgs,
+  buildPreflightPlan,
   executeKickassPlan,
-  formatExecutionSummary,
-  runKickass,
-  type KickassPlanItem,
-  type KickassScannedPR,
+  resolveCliInvocation,
+  runKickassWithDeps,
+  summarizeExecutionResults,
+  type KickassDeps,
 } from '../commands/kickass.js'
+import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 
-const config = ConfigSchema.parse({
-  post_review: { auto_fix: { delivery: { mode: 'commit' } } },
-})
-
-function makeScannedPR(overrides: Partial<KickassScannedPR> = {}): KickassScannedPR {
+function pr(overrides: Partial<PRStatus> = {}): PRStatus {
+  const nextAction = overrides.nextAction ?? 'review'
   return {
     owner: 'acme',
-    repo: 'api',
-    number: 123,
-    title: 'Add thing',
+    repo: 'web',
+    number: 7,
+    title: 'PR 7',
     author: 'alice',
-    headSha: 'abc1234',
-    headRef: 'feat/thing',
-    headRepo: 'acme/api',
+    url: 'https://github.com/acme/web/pull/7',
+    headSha: 'abc123456789',
+    headRef: 'feature',
+    headRepo: 'acme/web',
     baseRef: 'main',
-    body: '',
-    createdAt: '2026-05-01T00:00:00Z',
-    comments: [],
-    origin: 'claude',
-    reviewer: 'codex',
+    freshness: 'stale',
+    reviewState: nextAction === 'recheck' ? 'RECHECK' : 'PR',
+    nextAction,
+    lastActiveAt: '2026-05-29T00:00:00.000Z',
+    staleAfterMs: 60_000,
+    ageMs: 120_000,
+    verdict: null,
+    latestAnnotation: null,
     ...overrides,
   }
 }
 
-describe('runKickass', () => {
-  it('dry-run scans, picks, and prints preflight without calling mutators', async () => {
-    const selected = buildKickassPlan([makeScannedPR()], config)
-    const lines: string[] = []
-    const scan = vi.fn(async () => ({ candidates: selected.map(item => item.pr) }))
-    const pick = vi.fn(async () => selected)
-    const run = vi.fn(async () => {})
-    const merge = vi.fn(async () => {})
+function scan(prs: PRStatus[]): ScanResult {
+  return {
+    scannedAt: '2026-05-29T00:00:00.000Z',
+    staleAfterMs: 60_000,
+    cached: false,
+    summary: {
+      total: prs.length,
+      stale: prs.length,
+      not_stale: 0,
+      actionable: prs.length,
+    },
+    prs,
+  }
+}
 
-    const result = await runKickass(
-      { dryRun: true },
-      {
-        config,
-        token: 'token',
-        scan,
-        pick,
-        run,
-        merge,
-        log: line => lines.push(line),
-        getCurrentHead: async item => ({ sha: item.scannedHeadSha, headRepo: item.pr.headRepo }),
+describe('buildKickassRunArgs', () => {
+  it('targets only review for stale PRs with no prior verdict', () => {
+    expect(buildKickassRunArgs(pr({ nextAction: 'review' }))).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'review',
+      '--expected-head-sha',
+      'abc123456789',
+    ])
+  })
+
+  it('targets only fix for stale PRs with unresolved findings', () => {
+    expect(buildKickassRunArgs(pr({
+      nextAction: 'fix',
+      reviewState: 'NEEDS_WORK',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+        sha: 'abc1234',
       },
-    )
-
-    expect(result.executed).toBe(0)
-    expect(result.skipped).toEqual([{ pr: 'acme/api#123', reason: 'dry_run' }])
-    expect(scan).toHaveBeenCalledWith(false)
-    expect(pick).toHaveBeenCalledWith(selected)
-    expect(run).not.toHaveBeenCalled()
-    expect(merge).not.toHaveBeenCalled()
-    expect(lines.join('\n')).toContain('PR -> CR')
-    expect(lines.join('\n')).toContain('Executed 0; skipped 1 (dry_run:1)')
-  })
-})
-
-describe('buildKickassPlan', () => {
-  it('downgrades NEEDS_WORK -> Fix to PR -> CR when no fresh review comment matches the current head', () => {
-    const staleReview = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=old9999 -->',
-    ].join('\n')
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [{ id: 10, body: staleReview, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)
-
-    expect(item.action).toBe('review')
-    expect(item.transition).toBe('PR -> CR')
-    expect(item.explanation).toContain('no usable review comment')
-  })
-
-  it('routes a fix_applied marker to recheck', () => {
-    const freshReview = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
-    ].join('\n')
-    const fixApplied = '<!-- crosscheck: fix_applied -->'
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [
-          { id: 10, body: freshReview, createdAt: '2026-05-01T01:00:00Z' },
-          { id: 11, body: fixApplied, createdAt: '2026-05-01T02:00:00Z' },
-        ],
-      }),
-    ], config)
-
-    expect(item.action).toBe('recheck')
-    expect(item.transition).toBe('FIX -> Recheck')
-    expect(item.reviewComment?.id).toBe(10)
-  })
-
-  it('routes NEEDS_WORK to fix when review comment has no type attribute (old annotation format)', () => {
-    const oldFormatReview = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK sha=abc1234 -->',
-    ].join('\n')
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [{ id: 10, body: oldFormatReview, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)
-
-    expect(item.action).toBe('fix')
-    expect(item.reviewComment?.id).toBe(10)
-  })
-
-  it('does not treat untyped annotations without reviewer as review comments', () => {
-    const markerLikeAnnotation = [
-      '<!-- crosscheck: verdict=NEEDS_WORK sha=abc1234 -->',
-    ].join('\n')
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [{ id: 10, body: markerLikeAnnotation, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)
-
-    expect(item.action).toBe('review')
-    expect(item.explanation).toContain('no usable review comment')
-  })
-
-  it('routes fix_failed markers back to fix with the current review comment', () => {
-    const freshReview = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
-    ].join('\n')
-    const fixFailed = '<!-- crosscheck: fix_failed -->'
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [
-          { id: 10, body: freshReview, createdAt: '2026-05-01T01:00:00Z' },
-          { id: 11, body: fixFailed, createdAt: '2026-05-01T02:00:00Z' },
-        ],
-      }),
-    ], config)
-
-    expect(item.action).toBe('fix')
-    expect(item.transition).toBe('FIX_FAILED -> Fix')
-    expect(item.reviewComment?.id).toBe(10)
-  })
-
-  it('ignores no_diff_change markers and keeps the prior actionable state', () => {
-    const freshReview = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
-    ].join('\n')
-    const noDiffChange = '<!-- crosscheck: no_diff_change prev_sha=old9999 sha=abc1234 -->'
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [
-          { id: 10, body: freshReview, createdAt: '2026-05-01T01:00:00Z' },
-          { id: 11, body: noDiffChange, createdAt: '2026-05-01T02:00:00Z' },
-        ],
-      }),
-    ], config)
-
-    expect(item.action).toBe('fix')
-    expect(item.reviewComment?.id).toBe(10)
-  })
-
-  it('downgrades stale APPROVE annotations to review instead of merge', () => {
-    const staleApprove = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=old9999 -->',
-    ].join('\n')
-
-    const [item] = buildKickassPlan([
-      makeScannedPR({
-        comments: [{ id: 40, body: staleApprove, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)
-
-    expect(item.action).toBe('review')
-    expect(item.transition).toBe('PR -> CR')
-    expect(item.explanation).toContain('old head SHA')
-  })
-})
-
-describe('formatExecutionSummary', () => {
-  it('summarizes executed and skipped counts', () => {
-    expect(formatExecutionSummary({
-      executed: 2,
-      skipped: [
-        { pr: 'acme/api#1', reason: 'fork_pr' },
-        { pr: 'acme/api#2', reason: 'fork_pr' },
-        { pr: 'acme/api#3', reason: 'stale_signature' },
-      ],
-    })).toBe('Executed 2; skipped 3 (fork_pr:2, stale_signature:1)')
-  })
-})
-
-describe('buildKickassRunOpts', () => {
-  it('passes the kickass config path and expected head SHA through to run', () => {
-    const [item] = buildKickassPlan([makeScannedPR()], config)
-
-    expect(buildKickassRunOpts(item, 'review', './custom.yml')).toEqual({
-      config: './custom.yml',
-      steps: 'review',
-      expectedHeadSha: 'abc1234',
-    })
-  })
-})
-
-describe('executeKickassPlan', () => {
-  it('skips execution with stale_signature when the PR head changed after scan', async () => {
-    const [item] = buildKickassPlan([makeScannedPR()], config)
-    const run = vi.fn(async () => {})
-
-    const result = await executeKickassPlan([item], {
-      getCurrentHead: async () => ({ sha: 'def5678', headRepo: 'acme/api' }),
-      run,
-      merge: async () => {},
-    })
-
-    expect(result.executed).toBe(0)
-    expect(result.skipped).toEqual([{ pr: 'acme/api#123', reason: 'stale_signature' }])
-    expect(run).not.toHaveBeenCalled()
-  })
-
-  it('allows fork PR review but skips fork fix and merge actions', async () => {
-    const forkReview = buildKickassPlan([
-      makeScannedPR({ number: 1, headRepo: 'alice/api-fork' }),
-    ], config)[0]
-
-    const freshNeedsWork = [
-      '### Code Review by ⚡ Codex',
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
-    ].join('\n\n')
-    const forkFix = buildKickassPlan([
-      makeScannedPR({
-        number: 2,
-        headRepo: 'alice/api-fork',
-        comments: [{ id: 20, body: freshNeedsWork, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)[0]
-
-    const approve = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc1234 -->',
-    ].join('\n')
-    const forkMerge = buildKickassPlan([
-      makeScannedPR({
-        number: 3,
-        headRepo: 'alice/api-fork',
-        comments: [{ id: 30, body: approve, createdAt: '2026-05-01T02:00:00Z' }],
-      }),
-    ], config)[0]
-
-    const items: KickassPlanItem[] = [forkReview, forkFix, forkMerge]
-    const run = vi.fn(async () => {})
-    const merge = vi.fn(async () => {})
-
-    const result = await executeKickassPlan(items, {
-      getCurrentHead: async item => ({ sha: item.scannedHeadSha, headRepo: item.pr.headRepo }),
-      run,
-      merge,
-    })
-
-    expect(result.executed).toBe(1)
-    expect(run).toHaveBeenCalledWith(forkReview, 'review')
-    expect(merge).not.toHaveBeenCalled()
-    expect(result.skipped).toEqual([
-      { pr: 'acme/api#2', reason: 'fork_pr' },
-      { pr: 'acme/api#3', reason: 'fork_pr' },
+    }))).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'fix',
+      '--expected-head-sha',
+      'abc123456789',
     ])
   })
 
-  it('skips direct fix and merge when the current head repo is unavailable', async () => {
-    const freshNeedsWork = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review sha=abc1234 -->',
-    ].join('\n')
-    const fixItem = buildKickassPlan([
-      makeScannedPR({
-        comments: [{ id: 20, body: freshNeedsWork, createdAt: '2026-05-01T01:00:00Z' }],
-      }),
-    ], config)[0]
-    const approve = [
-      '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review sha=abc1234 -->',
-    ].join('\n')
-    const mergeItem = buildKickassPlan([
-      makeScannedPR({
-        number: 124,
-        comments: [{ id: 30, body: approve, createdAt: '2026-05-01T02:00:00Z' }],
-      }),
-    ], config)[0]
-    const run = vi.fn(async () => {})
-    const merge = vi.fn(async () => {})
+  it('targets only recheck for stale PRs after a fix', () => {
+    expect(buildKickassRunArgs(pr({ nextAction: 'recheck' }))).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'recheck',
+      '--expected-head-sha',
+      'abc123456789',
+    ])
+  })
+})
 
-    const result = await executeKickassPlan([fixItem, mergeItem], {
-      getCurrentHead: async item => ({ sha: item.scannedHeadSha, headRepo: null }),
-      run,
-      merge,
+describe('runKickassWithDeps', () => {
+  it('dry-run scans, picks PRs, and prints preflight without mutating', async () => {
+    const selected = pr({
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'BLOCK',
+        type: 'review',
+        sha: 'abc1234',
+      },
+    })
+    const calls: string[] = []
+    const deps: KickassDeps = {
+      loadScanResult: async () => {
+        calls.push('scan')
+        return scan([selected])
+      },
+      pickPRs: async (queue) => {
+        calls.push(`pick:${queue.length}`)
+        return queue
+      },
+      confirm: async () => {
+        calls.push('confirm')
+        return true
+      },
+      dispatchRun: async () => {
+        calls.push('dispatch')
+      },
+      dispatchMerge: async () => {
+        calls.push('merge')
+      },
+      getCurrentHeadSha: async () => {
+        calls.push('head')
+        return selected.headSha
+      },
+    }
+
+    await runKickassWithDeps({ dryRun: true, staleAfter: '1m' }, deps)
+
+    expect(calls).toEqual(['scan', 'pick:1'])
+  })
+
+  it('skips execution when the PR head changed after scan', async () => {
+    const selected = pr({
+      nextAction: 'review',
+      reviewState: 'PR',
+      headSha: 'abc123456789',
+    })
+    const plan = buildPreflightPlan([selected])
+    const dispatched: string[] = []
+
+    const results = await executeKickassPlan(plan, {
+      getCurrentHeadSha: async () => 'def987654321',
+      dispatchRun: async (item) => {
+        dispatched.push(item.pr.url)
+      },
+      dispatchMerge: async () => {
+        dispatched.push('merge')
+      },
     })
 
-    expect(result.executed).toBe(0)
-    expect(run).not.toHaveBeenCalled()
-    expect(merge).not.toHaveBeenCalled()
-    expect(result.skipped).toEqual([
-      { pr: 'acme/api#123', reason: 'fork_pr' },
-      { pr: 'acme/api#124', reason: 'fork_pr' },
+    expect(dispatched).toEqual([])
+    expect(results).toEqual([{
+      pr: selected,
+      status: 'skipped',
+      reason: 'stale_signature',
+    }])
+  })
+
+  it('downgrades NEEDS_WORK fix to CR when no current-head review comment is usable', () => {
+    const selected = pr({
+      reviewState: 'NEEDS_WORK',
+      nextAction: 'fix',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+      },
+    })
+
+    const plan = buildPreflightPlan([selected])
+
+    expect(plan).toHaveLength(1)
+    expect(plan[0].action).toBe('review')
+    expect(plan[0].transition).toBe('PR -> CR')
+    expect(plan[0].explanation).toBe('no_usable_review_comment')
+  })
+
+  it('skips fork fix while allowing fork review and merge actions', async () => {
+    const review = pr({
+      number: 1,
+      nextAction: 'review',
+      reviewState: 'PR',
+      headRepo: 'fork/web',
+    })
+    const fix = pr({
+      number: 2,
+      nextAction: 'fix',
+      reviewState: 'BLOCK',
+      headRepo: 'fork/web',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'BLOCK',
+        type: 'review',
+        sha: 'abc1234',
+      },
+    })
+    const merge = pr({
+      number: 3,
+      nextAction: 'merge',
+      reviewState: 'APPROVE',
+      headRepo: 'fork/web',
+    })
+    const plan = buildPreflightPlan([review, fix, merge])
+    const dispatched: number[] = []
+
+    const results = await executeKickassPlan(plan, {
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+      dispatchMerge: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+    })
+
+    expect(plan.map(item => item.action)).toEqual(['review', 'skip', 'merge'])
+    expect(dispatched).toEqual([1, 3])
+    expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr', undefined])
+  })
+
+  it('continues executing later PRs when one PR throws', async () => {
+    const first = pr({ number: 1, nextAction: 'review' })
+    const second = pr({ number: 2, nextAction: 'review' })
+    const third = pr({ number: 3, nextAction: 'merge' })
+    const dispatched: number[] = []
+
+    const results = await executeKickassPlan(buildPreflightPlan([first, second, third]), {
+      getCurrentHeadSha: async (item) => {
+        if (item.pr.number === 2) throw new Error('api unavailable')
+        return item.pr.headSha
+      },
+      dispatchRun: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+      dispatchMerge: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+    })
+
+    expect(dispatched).toEqual([1, 3])
+    expect(results.map(result => [result.pr.number, result.status, result.reason])).toEqual([
+      [1, 'executed', undefined],
+      [2, 'failed', 'error'],
+      [3, 'executed', undefined],
     ])
+  })
+
+  it('summarizes execution outcomes', () => {
+    expect(summarizeExecutionResults([
+      { pr: pr({ number: 1 }), status: 'executed' },
+      { pr: pr({ number: 2 }), status: 'skipped', reason: 'stale_signature' },
+      { pr: pr({ number: 3 }), status: 'failed', reason: 'error' },
+    ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
+  })
+})
+
+describe('resolveCliInvocation', () => {
+  it('runs built JavaScript through node', () => {
+    expect(resolveCliInvocation({
+      argvEntry: '/repo/dist/cli.js',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/dist/cli.js',
+      urlToPath: url => url.pathname,
+    })).toEqual({
+      command: '/usr/local/bin/node',
+      args: ['/repo/dist/cli.js'],
+    })
+  })
+
+  it('runs TypeScript CLI entries through the local tsx binary', () => {
+    const invocation = resolveCliInvocation({
+      argvEntry: '/repo/src/cli.ts',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/src/cli.ts' || path.endsWith('/node_modules/.bin/tsx'),
+      urlToPath: url => url.pathname,
+    })
+
+    expect(invocation.command.endsWith('/node_modules/.bin/tsx')).toBe(true)
+    expect(invocation.args).toEqual(['/repo/src/cli.ts'])
+  })
+
+  it('throws when only a TypeScript CLI entry is available without tsx', () => {
+    expect(() => resolveCliInvocation({
+      argvEntry: '/repo/src/cli.ts',
+      execPath: '/usr/local/bin/node',
+      exists: path => path === '/repo/src/cli.ts',
+      urlToPath: url => url.pathname,
+    })).toThrow('Cannot run kickass actions from a TypeScript entrypoint')
   })
 })

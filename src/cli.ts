@@ -14,6 +14,7 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -83,15 +84,25 @@ program
   .option('--vendor <vendor>', 'alias for --reviewer')
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
+  .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
+
+program
+  .command('scan')
+  .description('Scan monitored open PRs and show stale crosscheck workflow state')
+  .option('--tidy', 'show only stale PRs that need attention')
+  .option('--force', 'bypass the 1-minute scan cache')
+  .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
+  .option('--json', 'emit raw scan result for scripts')
+  .action((opts: { tidy?: boolean; force?: boolean; staleAfter?: string; json?: boolean }) => void runScan(opts))
 
 program
   .command('kickass')
-  .description('Pick stale PRs and advance each to its next crosscheck action')
-  .option('-c, --config <path>', 'config file path')
-  .option('--force', 'ignore the 60-second scan cache')
-  .option('--dry-run', 'stop after picker and preflight summary; perform no mutations')
-  .action((opts: { config?: string; force?: boolean; dryRun?: boolean }) => void runKickass(opts))
+  .description('Select stale PRs from the operator queue and advance them')
+  .option('--force', 'bypass the 1-minute scan cache')
+  .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
+  .option('--dry-run', 'print selected actions without running them')
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean }) => void runKickass(opts))
 
 program
   .command('status')

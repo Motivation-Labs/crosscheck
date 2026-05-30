@@ -303,7 +303,7 @@ export async function listUserReposForScan(username: string, token: string, isSe
     )
     if (data.length === 0) break
     for (const repo of data) {
-      if (!repo.archived && repo.owner.login === username) results.push({ owner: repo.owner.login, name: repo.name })
+      if (!repo.archived && repo.owner.login.toLowerCase() === username.toLowerCase()) results.push({ owner: repo.owner.login, name: repo.name })
     }
     if (data.length < 100) break
     page++
@@ -318,7 +318,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
     const data = await githubJson<Array<{
       number: number
       title: string
-      user: { login: string }
+      user: { login: string } | null
       head: { sha: string; ref: string; repo: { full_name: string } | null }
       base: { ref: string }
       body: string | null
@@ -335,7 +335,7 @@ export async function listOpenPRsForScan(owner: string, repo: string, token: str
       results.push({
         number: pr.number,
         title: pr.title,
-        author: pr.user.login,
+        author: pr.user?.login ?? 'unknown',
         headSha: pr.head.sha,
         headRef: pr.head.ref,
         headRepo: pr.head.repo?.full_name ?? null,

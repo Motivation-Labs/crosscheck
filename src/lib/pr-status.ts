@@ -262,17 +262,19 @@ export async function scanOpenPRStatuses(
   const limitGithub = createConcurrencyLimiter(GITHUB_SCAN_CONCURRENCY)
 
   const perRepoPRs = await Promise.all(
-    repoScopes.map(async ({ owner, repo }) => {
-      try {
-        const prs = await listOpenPRs(owner, repo, token)
-        return prs
-          .filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
-          .map(pr => ({ owner, repo, pr }))
-      } catch (err: unknown) {
-        logError({ event: 'scan_repo_skipped', owner, repo }, err)
-        return [] as Array<{ owner: string; repo: string; pr: OpenPR }>
-      }
-    }),
+    repoScopes.map(({ owner, repo }) =>
+      limitGithub(async () => {
+        try {
+          const prs = await listOpenPRs(owner, repo, token)
+          return prs
+            .filter(pr => isAuthorAllowed(config.routing.allowed_authors, pr.author))
+            .map(pr => ({ owner, repo, pr }))
+        } catch (err: unknown) {
+          logError({ event: 'scan_repo_skipped', owner, repo }, err)
+          return [] as Array<{ owner: string; repo: string; pr: OpenPR }>
+        }
+      }),
+    ),
   )
 
   const statusResults = await Promise.all(

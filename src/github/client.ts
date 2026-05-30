@@ -251,7 +251,10 @@ export async function listOpenPRs(
       { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
     )
     if (res.status === 404) return results
-    if (!res.ok) throw new Error(`Failed to list open PRs [${res.status}]: ${res.statusText} (GitHub API request failed)`)
+    if (!res.ok) {
+      const message = await readGithubErrorMessage(res)
+      throw new Error(`Failed to list open PRs for ${owner}/${repo} page ${page} [${res.status}]: ${message}`)
+    }
     const data = await res.json() as Array<{
       number: number
       title: string
@@ -905,6 +908,7 @@ export interface ReviewCommentBodyInput {
   model?: string
   stepType?: CrosscheckStepType
   round?: number
+  sha?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -938,6 +942,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     round,
     verdict: input.verdict ?? 'UNKNOWN',
     service: serviceName,
+    ...(input.sha && { sha: input.sha }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -962,6 +967,7 @@ export async function postReviewComment(
   model = 'default',
   stepType?: CrosscheckStepType,
   round = 1,
+  sha?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -979,6 +985,7 @@ export async function postReviewComment(
       model,
       stepType,
       round,
+      sha,
     }),
   })
   return comment.id

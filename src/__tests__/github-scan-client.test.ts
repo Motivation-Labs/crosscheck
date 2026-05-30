@@ -78,7 +78,7 @@ describe('scan GitHub client helpers', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ message: 'rate limited' }, 429))
 
     await expect(listOpenPRs('acme', 'web', 'token'))
-      .rejects.toThrow('GitHub API request failed')
+      .rejects.toThrow('Failed to list open PRs for acme/web page 1 [429]: rate limited')
   })
 
   it('throws for non-404 repo scope list failures', async () => {

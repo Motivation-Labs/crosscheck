@@ -5,6 +5,7 @@ import {
   executeKickassPlan,
   resolveCliInvocation,
   runKickassWithDeps,
+  summarizeExecutionResults,
   type KickassDeps,
 } from '../commands/kickass.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
@@ -56,6 +57,8 @@ describe('buildKickassRunArgs', () => {
       'https://github.com/acme/web/pull/7',
       '--steps',
       'review',
+      '--expected-head-sha',
+      'abc123456789',
     ])
   })
 
@@ -75,6 +78,8 @@ describe('buildKickassRunArgs', () => {
       'https://github.com/acme/web/pull/7',
       '--steps',
       'fix',
+      '--expected-head-sha',
+      'abc123456789',
     ])
   })
 
@@ -84,6 +89,8 @@ describe('buildKickassRunArgs', () => {
       'https://github.com/acme/web/pull/7',
       '--steps',
       'recheck',
+      '--expected-head-sha',
+      'abc123456789',
     ])
   })
 })
@@ -177,7 +184,7 @@ describe('runKickassWithDeps', () => {
     expect(plan[0].explanation).toBe('no_usable_review_comment')
   })
 
-  it('skips fork fix and merge actions while allowing fork review', async () => {
+  it('skips fork fix while allowing fork review and merge actions', async () => {
     const review = pr({
       number: 1,
       nextAction: 'review',
@@ -216,9 +223,44 @@ describe('runKickassWithDeps', () => {
       },
     })
 
-    expect(plan.map(item => item.action)).toEqual(['review', 'skip', 'skip'])
-    expect(dispatched).toEqual([1])
-    expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr', 'fork_pr'])
+    expect(plan.map(item => item.action)).toEqual(['review', 'skip', 'merge'])
+    expect(dispatched).toEqual([1, 3])
+    expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr', undefined])
+  })
+
+  it('continues executing later PRs when one PR throws', async () => {
+    const first = pr({ number: 1, nextAction: 'review' })
+    const second = pr({ number: 2, nextAction: 'review' })
+    const third = pr({ number: 3, nextAction: 'merge' })
+    const dispatched: number[] = []
+
+    const results = await executeKickassPlan(buildPreflightPlan([first, second, third]), {
+      getCurrentHeadSha: async (item) => {
+        if (item.pr.number === 2) throw new Error('api unavailable')
+        return item.pr.headSha
+      },
+      dispatchRun: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+      dispatchMerge: async (item) => {
+        dispatched.push(item.pr.number)
+      },
+    })
+
+    expect(dispatched).toEqual([1, 3])
+    expect(results.map(result => [result.pr.number, result.status, result.reason])).toEqual([
+      [1, 'executed', undefined],
+      [2, 'failed', 'error'],
+      [3, 'executed', undefined],
+    ])
+  })
+
+  it('summarizes execution outcomes', () => {
+    expect(summarizeExecutionResults([
+      { pr: pr({ number: 1 }), status: 'executed' },
+      { pr: pr({ number: 2 }), status: 'skipped', reason: 'stale_signature' },
+      { pr: pr({ number: 3 }), status: 'failed', reason: 'error' },
+    ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
   })
 })
 

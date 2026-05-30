@@ -21,6 +21,7 @@ export interface KickassOpts {
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'merge' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
+export type KickassFailureReason = 'error'
 
 export interface PreflightItem {
   pr: PRStatus
@@ -34,7 +35,7 @@ export interface PreflightItem {
 export interface KickassExecutionResult {
   pr: PRStatus
   status: 'executed' | 'skipped' | 'failed'
-  reason?: KickassSkipReason
+  reason?: KickassSkipReason | KickassFailureReason
 }
 
 export interface ExecuteKickassDeps {
@@ -98,6 +99,7 @@ export async function runKickassWithDeps(
     }
 
     const results = await executeKickassPlan(plan, deps)
+    printExecutionSummary(results)
     if (results.some(result => result.status === 'failed')) {
       process.exitCode = 2
     }
@@ -109,7 +111,7 @@ export async function runKickassWithDeps(
 export function buildPreflightPlan(prs: PRStatus[]): PreflightItem[] {
   return prs.map((pr) => {
     const fork = isForkPR(pr)
-    if ((pr.nextAction === 'fix' || pr.nextAction === 'merge') && fork) {
+    if (pr.nextAction === 'fix' && fork) {
       return {
         pr,
         action: 'skip',
@@ -169,33 +171,38 @@ export async function executeKickassPlan(
   plan: PreflightItem[],
   deps: ExecuteKickassDeps,
 ): Promise<KickassExecutionResult[]> {
-  return plan.reduce<Promise<KickassExecutionResult[]>>(async (previous, item) => {
-    const results = await previous
+  const results: KickassExecutionResult[] = []
+
+  for (const item of plan) {
     if (item.action === 'skip') {
       console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
-      return [...results, { pr: item.pr, status: 'skipped', reason: item.skipReason }]
-    }
-
-    const currentHeadSha = await deps.getCurrentHeadSha(item)
-    if (currentHeadSha !== item.pr.headSha) {
-      console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
-      return [...results, { pr: item.pr, status: 'skipped', reason: 'stale_signature' }]
+      results.push({ pr: item.pr, status: 'skipped', reason: item.skipReason })
+      continue
     }
 
     try {
+      const currentHeadSha = await deps.getCurrentHeadSha(item)
+      if (currentHeadSha !== item.pr.headSha) {
+        console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
+        results.push({ pr: item.pr, status: 'skipped', reason: 'stale_signature' })
+        continue
+      }
+
       console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
       if (item.action === 'merge') {
         await deps.dispatchMerge(item)
       } else {
         await deps.dispatchRun(item)
       }
-      return [...results, { pr: item.pr, status: 'executed' }]
+      results.push({ pr: item.pr, status: 'executed' })
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
       console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      return [...results, { pr: item.pr, status: 'failed' }]
+      results.push({ pr: item.pr, status: 'failed', reason: 'error' })
     }
-  }, Promise.resolve([]))
+  }
+
+  return results
 }
 
 export function printPreflight(plan: PreflightItem[]): void {
@@ -210,6 +217,17 @@ export function printPreflight(plan: PreflightItem[]): void {
   }
 }
 
+export function summarizeExecutionResults(results: KickassExecutionResult[]): string {
+  const executed = results.filter(result => result.status === 'executed').length
+  const skipped = results.filter(result => result.status === 'skipped').length
+  const failed = results.filter(result => result.status === 'failed').length
+  return `Execution summary: ${executed} executed, ${skipped} skipped, ${failed} failed`
+}
+
+export function printExecutionSummary(results: KickassExecutionResult[]): void {
+  console.log(chalk.dim(`\n${summarizeExecutionResults(results)}`))
+}
+
 export function buildKickassRunArgs(itemOrPR: PreflightItem | PRStatus): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'merge' || item.action === 'skip') return []
@@ -218,6 +236,8 @@ export function buildKickassRunArgs(itemOrPR: PreflightItem | PRStatus): string[
     item.pr.url,
     '--steps',
     stepForAction(item.action),
+    '--expected-head-sha',
+    item.pr.headSha,
   ]
 }
 
@@ -282,6 +302,7 @@ function defaultKickassDeps(): KickassDeps {
       const octokit = createGithubClient(token)
       await mergePullRequest(octokit, item.pr.owner, item.pr.repo, item.pr.number, {
         method: 'squash',
+        expectedHeadSha: item.pr.headSha,
       })
     },
   }

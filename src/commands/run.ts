@@ -351,7 +351,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         let loopRound = 1
         let loopSha = sha
 
-        while (loopRound < CRAZY_ROUND_CEILING && !meetsCrazyStopCondition(verdict, mode)) {
+        while (
+          loopRound < CRAZY_ROUND_CEILING &&
+          (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0))
+        ) {
           // No-progress guard: if fix ran but applied nothing, looping is futile
           if (fixAppliedCount === 0) {
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
@@ -379,6 +382,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           if (acquiredLoopLock) {
             loopSha = freshSha
             stopHeartbeat()
+            if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', mode, round: loopRound })
+              console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
+              break
+            }
             rememberLoopLock(loopSha)
             await acquireRemoteLock(octokit, owner, repo, loopSha)
             stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)

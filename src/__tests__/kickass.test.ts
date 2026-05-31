@@ -187,7 +187,11 @@ describe('runKickassWithDeps', () => {
   })
 
   it('skips execution when the PR head changed after scan', async () => {
-    const selected = pr({ nextAction: 'review', reviewState: 'NEEDS_REVIEW', headSha: 'abc123456789' })
+    const selected = pr({
+      nextAction: 'review',
+      reviewState: 'NEEDS_REVIEW',
+      headSha: 'abc123456789',
+    })
     const plan = buildPreflightPlan([selected])
     const dispatched: string[] = []
 
@@ -221,7 +225,12 @@ describe('runKickassWithDeps', () => {
   })
 
   it('skips fork fix while allowing fork review', async () => {
-    const review = pr({ number: 1, nextAction: 'review', reviewState: 'NEEDS_REVIEW', headRepo: 'fork/web' })
+    const review = pr({
+      number: 1,
+      nextAction: 'review',
+      reviewState: 'NEEDS_REVIEW',
+      headRepo: 'fork/web',
+    })
     const fix = pr({
       number: 2, nextAction: 'fix', reviewState: 'NEEDS_FIX', headRepo: 'fork/web',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },

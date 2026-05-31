@@ -186,7 +186,7 @@ export interface WorkflowContext {
   // already scanned the PR and want fix-only runs to avoid reselecting a
   // different comment after dispatch.
   initialReviewComment?: {
-    id: number
+    id?: number
     body: string
   }
   // When set, overrides step.max_rounds for all fix and recheck steps in this
@@ -203,6 +203,13 @@ export interface WorkflowResult {
   // Sum of applied_count across all fix steps; 0 means fix ran but made no
   // changes; undefined means no fix step executed in this run.
   fixAppliedCount?: number
+  // Latest review/recheck comment produced by this workflow. Operator loops
+  // feed this into the next fix round so fixes target the freshest failed
+  // recheck instead of falling back to the original review comment.
+  latestReviewComment?: {
+    id?: number
+    body: string
+  }
 }
 
 function countComments(reviewText: string): number {
@@ -762,7 +769,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     if (r.applied_count === undefined) return acc
     return (acc ?? 0) + r.applied_count
   }, undefined)
-  return { verdict: verdict ?? null, fixAppliedCount }
+  const latestReviewResult = Object.values(results).reverse().find(r => r.commentBody !== undefined)
+  return {
+    verdict: verdict ?? null,
+    fixAppliedCount,
+    ...(latestReviewResult?.commentBody && {
+      latestReviewComment: {
+        body: latestReviewResult.commentBody,
+        ...(latestReviewResult.commentId !== undefined && { id: latestReviewResult.commentId }),
+      },
+    }),
+  }
   } catch (err) {
     workflowFailed = true
     throw err

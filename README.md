@@ -14,26 +14,9 @@
   <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
 </p>
 
-<p align="center">
-  <sub>
-    <b>①</b> Session header — profile, orgs, config path, and registered webhooks at a glance. &nbsp;|&nbsp;
-    <b>②</b> Per-PR event row — origin detection (<code>via=commits</code>), assigned reviewer, and elapsed time. &nbsp;|&nbsp;
-    <b>③</b> Live pipeline stripe — PR size · CR verdict · Fix count · Recheck status, updating in real time.
-  </sub>
-</p>
-
 **Auto Code Review Pipeline — customizable PR → Review → Fix → Recheck loop, single-vendor or cross-vendor, zero new infrastructure.**
 
 Define the review pipeline in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
-
----
-
-## Highlights
-
-- **Configurable pipeline** — compose steps in `workflow.yml`: a `review` step, an optional `fix` step, and an optional `recheck` step. Add per-step `instructions:` and `when:` conditions to control exactly what runs and when.
-- **Single-vendor and cross-vendor modes** — single-vendor uses whatever AI you have enabled. Cross-vendor routes each PR to the rival AI for an independent review (Claude reviews Codex PRs, Codex reviews Claude PRs). Switch with one config line.
-- **Subscription-funded, not token-billed** — runs through the `claude` and `codex` CLIs against your Claude Pro/Max and ChatGPT Plus/Pro plans. No API keys, no per-review cost.
-- **`watch` for personal use, `serve` for your team** — `crosscheck watch` runs on your laptop with an auto-tunnel, ideal for solo use. `crosscheck serve` binds to a fixed port on a shared machine so the whole team is covered.
 
 ---
 
@@ -54,37 +37,6 @@ crosscheck watch        # personal laptop
 crosscheck serve        # always-on team server
 ```
 
-`crosscheck onboard` walks you through repo selection, vendor mode, pipeline steps, and tunnel choice. After that, `watch` or `serve` is all you need.
-
----
-
-## What it looks like
-
-```
-$ crosscheck watch
-
-  "Move fast and review things."
-
-  profile   personal · cross-vendor · balanced
-  pipeline  review → fix → recheck
-  users     your-github-login (5 repos)
-  config    ./crosscheck.config.yml
-
-  ✓ tunnel ready: https://abc123.lhr.life
-  ✓ webhook registered for your-org/your-repo
-  Waiting for PR events — Ctrl+C to stop.
-
-PR #47 opened: add retry logic for flaky network calls
-  origin=claude  reviewer=codex
-  codex reviewing... (12s)       NEEDS WORK   (8.4K)
-  claude fixing...               fixed ✓      (11.2K)
-  codex rechecking... (9s)       APPROVE      (6.1K)
-
-PR #49 opened: implement caching layer
-  origin=codex  reviewer=claude
-  claude reviewing... (18s)      APPROVE      (9.8K)
-```
-
 ---
 
 ## Commands
@@ -95,15 +47,13 @@ crosscheck watch                    # personal use — tunnel + webhook + listen
 crosscheck serve                    # team use — fixed port, register webhook once
 crosscheck review <pr-url>          # one-shot review of a specific PR
 crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
-crosscheck scan                     # show open PR state across monitored repos
+crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
 crosscheck init                     # check prerequisites, write starter config
 crosscheck status                   # auth state, config summary, CLI versions
 ```
 
-`--reviewer` / `--vendor` accepts aliases — `claude`, `claude-code`, `cc`, `anthropic` all route to Claude; `codex`, `openai` route to Codex.
-
-**PR state model**
+**Operator queue (scan + kickass)**
 
 `crosscheck scan` tracks two independent dimensions per PR:
 
@@ -128,6 +78,10 @@ crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
 crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
 ```
 
+`crosscheck run` and `crosscheck review` accept vendor aliases via `--reviewer` / `--vendor`:
+- Claude: `claude`, `claude-code`, `cc`, `anthropic`
+- Codex: `codex`, `openai`
+
 **Continuous improvement** *(experimental)*
 
 ```bash
@@ -139,14 +93,122 @@ crosscheck issue                    # draft and file a bug report from recent er
 
 ---
 
+### `crosscheck onboard`
+
+Interactive setup wizard. Picks repos/orgs to monitor, selects single-vendor or cross-vendor mode, configures the review pipeline, and writes `~/.crosscheck/config.yml` and `workflow.yml`.
+
+```bash
+crosscheck onboard              # guided setup
+crosscheck onboard --personal   # skip persona prompt, go straight to personal mode
+crosscheck onboard --team       # skip persona prompt, go straight to team mode
+crosscheck onboard -y           # accept all defaults non-interactively
+```
+
+---
+
+### `crosscheck watch`
+
+Personal mode. Starts an SSH tunnel (localhost.run), registers GitHub webhooks, and listens for PR events. Everything self-cleans on Ctrl+C.
+
+```bash
+crosscheck watch
+crosscheck watch --no-backtrace       # skip startup scan for unreviewed open PRs
+crosscheck watch --reconfigure        # re-run deployment setup before starting
+```
+
+---
+
+### `crosscheck serve`
+
+Team mode. Binds to a fixed port — register the webhook once, cover the whole team. Designed for a mac-mini or home server.
+
+```bash
+crosscheck serve
+crosscheck serve --no-backtrace       # skip startup scan
+crosscheck serve --personal           # personal scope this session only
+crosscheck serve --reconfigure        # re-run deployment setup
+```
+
+---
+
+### `crosscheck review <pr-url>`
+
+One-shot review of a single PR. Clones, checks out, reviews, and posts the comment.
+
+```bash
+crosscheck review https://github.com/org/repo/pull/42
+crosscheck review <pr-url> --reviewer claude    # force Claude regardless of detection
+crosscheck review <pr-url> --reviewer codex     # force Codex regardless of detection
+crosscheck review <pr-url> --reviewer cc        # alias for Claude
+crosscheck review <pr-url> --reviewer openai    # alias for Codex
+```
+
+---
+
+### `crosscheck run <pr-url>`
+
+Runs the full configured workflow against one PR: review → fix → recheck. Same logic as `watch`/`serve`, but triggered manually.
+
+```bash
+crosscheck run <pr-url>
+crosscheck run <pr-url> --steps review           # only the review step
+crosscheck run <pr-url> --steps fix,recheck      # skip initial review
+crosscheck run <pr-url> --reviewer claude        # override reviewer assignment
+crosscheck run <pr-url> --dry-run                # review without posting or fixing
+```
+
+---
+
+### `crosscheck scan`
+
+Scans every open PR in the configured monitor scope and reports where each one is in the crosscheck workflow. Results are cached for 60 seconds.
+
+States: `NEEDS_REVIEW` · `NEEDS_FIX` · `BLOCK` · `NEEDS_RECHECK` · `APPROVE`
+
+```bash
+crosscheck scan                          # all open PRs, grouped stale/not-stale
+crosscheck scan --tidy                   # stale actionable rows only
+crosscheck scan --stale-after 4h         # custom staleness threshold (default 24h)
+crosscheck scan --force                  # bypass cache
+crosscheck scan --json                   # machine-readable output
+```
+
+---
+
+### `crosscheck kickass`
+
+Selects stale PRs from the operator queue and advances them — runs `scan` first, presents a multi-select picker, shows a preflight summary, then executes after confirmation.
+
+```bash
+crosscheck kickass                       # interactive operator queue
+crosscheck kickass --dry-run             # preflight only — no mutations
+crosscheck kickass --stale-after 2h      # tighter staleness threshold
+crosscheck kickass --force               # bypass scan cache before picking
+```
+
+Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
+
+---
+
 ## Configuration
+
+### Review depth (`quality.tier`)
+
+```yaml
+# crosscheck.config.yml
+quality:
+  tier: balanced    # fast | balanced | thorough
+```
+
+| Tier | Claude model | Codex model | Latency |
+|---|---|---|---|
+| `fast` | Haiku | default | ~10s |
+| `balanced` | Sonnet (default) | default | ~30s |
+| `thorough` | Opus | default | ~60s |
 
 ### Pipeline (`workflow.yml`)
 
-The pipeline lives in `workflow.yml` alongside your config. Compose `review`, `fix`, and `recheck` steps in any order and add per-step instructions and `when:` conditions.
-
 ```yaml
-# workflow.yml — define the review pipeline
 steps:
   - name: review
     type: review
@@ -154,7 +216,7 @@ steps:
 
   - name: fix
     type: fix
-    reviewer: origin        # fix with the same vendor that wrote the PR
+    reviewer: origin
     when: review.verdict != 'APPROVE'
 
   - name: recheck
@@ -163,11 +225,10 @@ steps:
     when: fix.applied_count > 0
 ```
 
-### Config (`crosscheck.config.yml`)
-
-Config lives at `~/.crosscheck/config.yml` — one file covers all your repos. Run `crosscheck init` to generate it, or let `crosscheck onboard` write it for you.
+### Config snapshot
 
 ```yaml
+# ~/.crosscheck/config.yml
 orgs:
   - your-org
 
@@ -184,20 +245,12 @@ vendors:
     enabled: true
 
 quality:
-  tier: balanced            # fast | balanced | thorough
+  tier: balanced
 
 clone_protocol: ssh         # ssh (default) | https
 ```
 
 Full reference: [get-started.md](./get-started.md)
-
----
-
-## Deployment
-
-**Personal (`crosscheck watch`)** — runs on your laptop. An SSH tunnel through `localhost.run` handles GitHub webhook delivery automatically — no port-forwarding, no cloud account needed. Reconnects if the tunnel drops.
-
-**Team (`crosscheck serve`)** — bind to a fixed port on a machine with a public IP or behind a reverse proxy. Register the webhook once; the whole team is covered without anyone's laptop staying on.
 
 ---
 

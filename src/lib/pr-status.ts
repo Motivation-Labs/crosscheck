@@ -18,6 +18,7 @@ import {
 import { getPRMergeSummary } from '../github/merge.js'
 import { isAuthorAllowed } from './filter.js'
 import { getLogDir, logError } from './logger.js'
+import { parseAnnotationFieldsFenced } from './annotation.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
@@ -173,29 +174,17 @@ const WORKFLOW_ACTIVITY_EVENTS = new Set([
 ])
 
 export function parseCrosscheckAnnotation(body: string): CrosscheckAnnotation | null {
-  const matches = [...body.matchAll(/<!--\s*crosscheck:\s*([^>]+?)\s*-->/g)]
-  const last = matches.at(-1)
-  if (!last) return null
+  const fields = parseAnnotationFieldsFenced(body)
+  if (!fields) return null
 
-  const raw = last[1].trim()
-  const parts = raw.split(/\s+/).filter(Boolean)
-  const attrs = new Map<string, string>()
-  for (const part of parts) {
-    const eq = part.indexOf('=')
-    if (eq === -1) continue
-    attrs.set(part.slice(0, eq), part.slice(eq + 1))
-  }
-
-  const first = parts[0]
-  const marker = first && !first.includes('=') ? first : undefined
-  const verdict = normalizeVerdict(attrs.get('verdict'))
+  const verdict = normalizeVerdict(fields.get('verdict'))
   return {
-    ...(marker && { marker }),
-    ...(attrs.has('origin') && { origin: attrs.get('origin') }),
-    ...(attrs.has('reviewer') && { reviewer: attrs.get('reviewer') }),
+    ...(fields.has('__marker__') && { marker: fields.get('__marker__') }),
+    ...(fields.has('origin') && { origin: fields.get('origin') }),
+    ...(fields.has('reviewer') && { reviewer: fields.get('reviewer') }),
     ...(verdict && { verdict }),
-    ...(attrs.has('type') && { type: attrs.get('type') }),
-    ...(attrs.has('sha') && { sha: attrs.get('sha') }),
+    ...(fields.has('type') && { type: fields.get('type') }),
+    ...(fields.has('sha') && { sha: fields.get('sha') }),
   }
 }
 
@@ -691,38 +680,18 @@ function legacyNormalizeVerdict(value: string | undefined): PRVerdict | undefine
   return undefined
 }
 
-function legacyParseAttrs(raw: string): LegacyParsedAnnotation {
+function legacyParseLatestAnnotation(body: string): LegacyParsedAnnotation | null {
+  const fields = parseAnnotationFieldsFenced(body)
+  if (!fields) return null
+
   const attrs: LegacyParsedAnnotation = {}
-  for (const part of raw.trim().split(/\s+/).filter(Boolean)) {
-    const eq = part.indexOf('=')
-    if (eq === -1) {
-      attrs.marker = part
-      continue
-    }
-    const key = part.slice(0, eq)
-    const value = part.slice(eq + 1)
-    if (key === 'type') attrs.type = value
+  for (const [key, value] of fields) {
+    if (key === '__marker__') attrs.marker = value
+    else if (key === 'type') attrs.type = value
     else if (key === 'reviewer') attrs.reviewer = value
     else if (key === 'verdict') attrs.verdict = legacyNormalizeVerdict(value)
   }
   return attrs
-}
-
-function legacyParseLatestAnnotation(body: string): LegacyParsedAnnotation | null {
-  let inFence = false
-  let latest: LegacyParsedAnnotation | null = null
-  for (const line of body.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-      inFence = !inFence
-      continue
-    }
-    if (inFence) continue
-    const match = trimmed.match(/^<!--\s*crosscheck:\s*([^>]*)-->/)
-    if (!match) continue
-    latest = legacyParseAttrs(match[1])
-  }
-  return latest
 }
 
 function legacyCommentCreatedAt(comment: PRStatusComment): Date | null {
@@ -825,15 +794,6 @@ function legacyRelevantLogDate(event: PRStatusLogEvent): Date | null {
   return null
 }
 
-function legacyLatestCrosscheckCommentDate(comments: PRStatusComment[]): Date | null {
-  let latest: Date | null = null
-  for (const comment of comments) {
-    if (!legacyParseLatestAnnotation(comment.body)) continue
-    latest = legacyMaxDate(latest, legacyCommentDate(comment))
-  }
-  return latest
-}
-
 export function computeTokenTotals(logEvents: PRStatusLogEvent[]): TokenTotals {
   const totals: TokenTotals = { byPR: {}, byPRHeadSha: {} }
   for (const event of logEvents) {
@@ -871,7 +831,9 @@ export function computeLastActive(
   let latest = legacyParseDate(pr.updatedAt) ?? legacyParseDate(pr.updated_at)
     ?? legacyParseDate(pr.createdAt) ?? legacyParseDate(pr.created_at)
 
-  latest = legacyMaxDate(latest, legacyLatestCrosscheckCommentDate(comments))
+  for (const comment of comments) {
+    latest = legacyMaxDate(latest, legacyCommentDate(comment))
+  }
 
   for (const event of legacyRelevantLogEvents(pr, logEvents)) {
     latest = legacyMaxDate(latest, legacyRelevantLogDate(event))
@@ -951,6 +913,7 @@ export function buildProgressSummary(status: PRStatus): string {
   let fixCount = 0
   let recheckCount = 0
   let sawCR = false
+  let skipped = 0
 
   for (const step of status.progress) {
     if (step.kind === 'cr') {
@@ -960,7 +923,7 @@ export function buildProgressSummary(status: PRStatus): string {
       continue
     }
     if (step.kind === 'fix') {
-      if (fixCount >= 2) continue
+      if (fixCount >= 2) { skipped++; continue }
       fixCount++
       const count = step.appliedCount ?? 0
       const tokens = legacyFormatTokens(step.tokens)
@@ -968,11 +931,14 @@ export function buildProgressSummary(status: PRStatus): string {
       continue
     }
     if (step.kind === 'recheck') {
-      if (recheckCount >= 2 || !step.verdict) continue
+      if (recheckCount >= 2) { skipped++; continue }
+      if (!step.verdict) continue
       recheckCount++
       parts.push(`Recheck(${step.verdict})`)
     }
   }
+
+  if (skipped > 0) parts.push(`+${skipped} more`)
 
   return parts.join(' -> ')
 }

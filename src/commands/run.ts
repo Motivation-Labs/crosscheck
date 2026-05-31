@@ -9,7 +9,7 @@ import { loadConfig, getGithubToken } from '../config/loader.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
@@ -23,7 +23,7 @@ export interface RunOpts {
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
   initialReviewComment?: {
-    id: number
+    id?: number
     body: string
   }
   expectedHeadSha?: string
@@ -42,6 +42,63 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) return null
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
+}
+
+function pinReviewers(steps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep[] {
+  return steps.map(s =>
+    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
+  )
+}
+
+function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep | null {
+  const reviewStep = allSteps.find(s => s.type === 'review')
+  if (!reviewStep) return null
+  return {
+    ...reviewStep,
+    name: 'recheck',
+    type: 'recheck',
+    reviewer: assignedReviewer,
+    when: undefined,
+    max_rounds: reviewStep.max_rounds,
+    instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+  }
+}
+
+function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): WorkflowStep[] {
+  const lastFix = steps.map(s => s.type).lastIndexOf('fix')
+  if (lastFix === -1) return [...steps, step]
+  return [...steps.slice(0, lastFix + 1), step, ...steps.slice(lastFix + 1)]
+}
+
+function resolveWorkflowSteps(
+  allSteps: WorkflowStep[],
+  stepFilter: string[] | undefined,
+  assignedReviewer: 'claude' | 'codex',
+): WorkflowStep[] {
+  const selected = stepFilter
+    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
+    : allSteps
+  let steps = pinReviewers(selected, assignedReviewer)
+
+  if (stepFilter?.includes('recheck') && !steps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) steps = appendAfterLastFix(steps, synthetic)
+  }
+
+  return steps
+}
+
+function buildFixRecheckSteps(
+  steps: WorkflowStep[],
+  allSteps: WorkflowStep[],
+  assignedReviewer: 'claude' | 'codex',
+): WorkflowStep[] {
+  let fixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
+  if (!fixRecheckSteps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
+  }
+  return fixRecheckSteps
 }
 
 export async function runRun(prUrl: string, opts: RunOpts = {}) {
@@ -124,12 +181,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
   const allSteps = loadWorkflow(process.cwd())
   const stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
-  const filteredSteps = (stepFilter
-    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
-    : allSteps
-  ).map(s =>
-    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
-  )
+  const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer)
 
   if (opts.dryRun) {
     console.log(chalk.dim('  dry-run: review will run but no comment will be posted; fix step skipped'))
@@ -175,6 +227,27 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // but if a signal fires mid-workflow we exit via process.exit and bypass
   // that finally, so the signal handler iterates this array too.
   const pushedShas: string[] = []
+  const loopLockShas: string[] = []
+
+  const rememberLoopLock = (lockSha: string): void => {
+    if (!loopLockShas.includes(lockSha)) loopLockShas.push(lockSha)
+  }
+  const releaseRememberedLoopLock = async (lockSha: string, outcome: 'success' | 'failure'): Promise<void> => {
+    const idx = loopLockShas.indexOf(lockSha)
+    if (idx !== -1) loopLockShas.splice(idx, 1)
+    try {
+      await releaseRemoteLock(octokit, owner, repo, lockSha, outcome)
+    } catch (err) {
+      rememberLoopLock(lockSha)
+      throw err
+    }
+  }
+  const drainLoopLocks = async (outcome: 'success' | 'failure'): Promise<void> => {
+    while (loopLockShas.length > 0) {
+      const s = loopLockShas.shift()!
+      try { await releaseRemoteLock(octokit, owner, repo, s, outcome) } catch { /* best-effort per sha */ }
+    }
+  }
 
   const onSignal = (signal: NodeJS.Signals): void => {
     void (async () => {
@@ -182,6 +255,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         stopHeartbeat()
         if (!opts.dryRun && lockAttemptStarted) {
           await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+          await drainLoopLocks('failure')
           // Drain the shared array via shift() so the runner's finally (which
           // also drains via shift) doesn't double-release. Whichever loop
           // shifts a sha first owns its release; the other sees a shorter
@@ -251,7 +325,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         roundMode: opts.roundMode,
       }
 
-      let { verdict, fixAppliedCount } = await runWorkflow({
+      let workflowResult = await runWorkflow({
         ...sharedCtx,
         pr,
         tmpDir,
@@ -259,11 +333,13 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         steps: filteredSteps,
         initialReviewComment: opts.initialReviewComment,
       })
+      let { verdict, fixAppliedCount } = workflowResult
+      let latestReviewComment = workflowResult.latestReviewComment ?? opts.initialReviewComment
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (opts.roundMode) {
         const mode = opts.roundMode
-        const fixRecheckSteps = filteredSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+        const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer)
         let loopRound = 1
         let loopSha = sha
 
@@ -290,20 +366,24 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           loopSha = freshSha
 
           stopHeartbeat()
+          rememberLoopLock(loopSha)
           await acquireRemoteLock(octokit, owner, repo, loopSha)
           stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
 
           const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
-          ;({ verdict, fixAppliedCount } = await runWorkflow({
+          workflowResult = await runWorkflow({
             ...sharedCtx,
             pr: loopPR,
             tmpDir,
             reviewStart: Date.now(),
             steps: fixRecheckSteps,
+            initialReviewComment: latestReviewComment,
             round: loopRound,
-          }))
+          })
+          ;({ verdict, fixAppliedCount } = workflowResult)
+          latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
 
-          await releaseRemoteLock(octokit, owner, repo, loopSha, 'success')
+          await releaseRememberedLoopLock(loopSha, 'success')
           const done = meetsCrazyStopCondition(verdict, mode)
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
         }
@@ -323,7 +403,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
     } catch (err: unknown) {
       stopHeartbeat()
-      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+      if (!opts.dryRun) {
+        try { await releaseRemoteLock(octokit, owner, repo, sha, 'failure') } catch { /* best-effort */ }
+        await drainLoopLocks('failure')
+      }
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
       console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
       releasePRLock(owner, repo, number, sha)

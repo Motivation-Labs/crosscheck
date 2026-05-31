@@ -29,7 +29,7 @@ function pr(overrides: Partial<PRStatus> = {}): PRStatus {
     lastActiveAt: '2026-05-29T00:00:00.000Z',
     staleAfterMs: 60_000,
     ageMs: 120_000,
-    verdict: null,
+    verdict: 'UNREVIEWED',
     latestAnnotation: null,
     ...overrides,
   }
@@ -51,7 +51,7 @@ function scan(prs: PRStatus[]): ScanResult {
 }
 
 describe('buildKickassRunArgs', () => {
-  it('targets only review for stale PRs with no prior verdict', () => {
+  it('targets review for PRs needing first CR', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'review' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
@@ -62,8 +62,8 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('targets only fix for stale PRs with unresolved findings', () => {
-    expect(buildKickassRunArgs(pr({
+  it('dispatches the fix leg first for commit-delivered fixes', () => {
+    const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
       latestAnnotation: {
@@ -73,7 +73,9 @@ describe('buildKickassRunArgs', () => {
         type: 'review',
         sha: 'abc1234',
       },
-    }))).toEqual([
+    })], undefined, 'commit')
+
+    expect(buildKickassRunArgs(plan[0])).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
       '--steps',
@@ -83,7 +85,30 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('targets only recheck for stale PRs after a fix', () => {
+  it('dispatches fix only when fixes do not land on the PR head', () => {
+    const selected = pr({
+      nextAction: 'fix',
+      reviewState: 'NEEDS_FIX',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+        sha: 'abc1234',
+      },
+    })
+
+    expect(buildKickassRunArgs(selected)).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'fix',
+      '--expected-head-sha',
+      'abc123456789',
+    ])
+  })
+
+  it('targets only recheck when fix was applied externally', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'recheck' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
@@ -92,6 +117,36 @@ describe('buildKickassRunArgs', () => {
       '--expected-head-sha',
       'abc123456789',
     ])
+  })
+
+  it('does not append --crazy to the fix leg of a chained commit fix', () => {
+    const plan = buildPreflightPlan([pr({
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })], 'crazy', 'commit')
+    const args = buildKickassRunArgs(plan[0], 'crazy')
+    expect(args).toContain('fix')
+    expect(args).not.toContain('--crazy')
+  })
+
+  it('appends --halfcrazy to standalone recheck actions', () => {
+    const plan = buildPreflightPlan([pr({
+      nextAction: 'recheck',
+      reviewState: 'NEEDS_RECHECK',
+    })], 'halfcrazy', 'commit')
+    const args = buildKickassRunArgs(plan[0], 'halfcrazy')
+    expect(args).toContain('--halfcrazy')
+    expect(args).not.toContain('--crazy')
+  })
+
+  it('does not append round mode to deferred non-commit fixes', () => {
+    const args = buildKickassRunArgs(pr({
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
+    }), 'crazy')
+    expect(args).toContain('fix')
+    expect(args).not.toContain('fix,recheck')
+    expect(args).not.toContain('--crazy')
   })
 })
 
@@ -123,9 +178,6 @@ describe('runKickassWithDeps', () => {
       dispatchRun: async () => {
         calls.push('dispatch')
       },
-      dispatchMerge: async () => {
-        calls.push('merge')
-      },
       getCurrentHeadSha: async () => {
         calls.push('head')
         return selected.headSha
@@ -135,6 +187,40 @@ describe('runKickassWithDeps', () => {
     await runKickassWithDeps({ dryRun: true, staleAfter: '1m' }, deps)
 
     expect(calls).toEqual(['scan', 'pick:1'])
+  })
+
+  it('includes not-stale actionable PRs in the queue (stale first)', async () => {
+    const stalePR = pr({ number: 1, freshness: 'stale', nextAction: 'review' })
+    const freshPR = pr({ number: 2, freshness: 'not_stale', nextAction: 'recheck' })
+    let queueSeen: PRStatus[] = []
+    const deps: KickassDeps = {
+      loadScanResult: async () => scan([freshPR, stalePR]),
+      pickPRs: async (queue) => { queueSeen = queue; return [] },
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    await runKickassWithDeps({ dryRun: false, staleAfter: '1m' }, deps)
+
+    expect(queueSeen.map(p => p.number)).toEqual([1, 2])  // stale before not-stale
+  })
+
+  it('excludes merge-ready PRs from the picker queue', async () => {
+    const approvePR = pr({ number: 1, nextAction: 'merge', reviewState: 'APPROVED' })
+    const reviewPR = pr({ number: 2, nextAction: 'review' })
+    let queueSeen: PRStatus[] = []
+    const deps: KickassDeps = {
+      loadScanResult: async () => scan([approvePR, reviewPR]),
+      pickPRs: async (queue) => { queueSeen = queue; return [] },
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    await runKickassWithDeps({ dryRun: false, staleAfter: '1m' }, deps)
+
+    expect(queueSeen.map(p => p.number)).toEqual([2])  // merge-ready excluded from picker
   })
 
   it('skips execution when the PR head changed after scan', async () => {
@@ -148,20 +234,11 @@ describe('runKickassWithDeps', () => {
 
     const results = await executeKickassPlan(plan, {
       getCurrentHeadSha: async () => 'def987654321',
-      dispatchRun: async (item) => {
-        dispatched.push(item.pr.url)
-      },
-      dispatchMerge: async () => {
-        dispatched.push('merge')
-      },
+      dispatchRun: async (item) => { dispatched.push(item.pr.url) },
     })
 
     expect(dispatched).toEqual([])
-    expect(results).toEqual([{
-      pr: selected,
-      status: 'skipped',
-      reason: 'stale_signature',
-    }])
+    expect(results).toEqual([{ pr: selected, status: 'skipped', reason: 'stale_signature' }])
   })
 
   it('downgrades NEEDS_WORK fix to CR when no current-head review comment is usable', () => {
@@ -184,7 +261,7 @@ describe('runKickassWithDeps', () => {
     expect(plan[0].explanation).toBe('no_usable_review_comment')
   })
 
-  it('skips fork fix while allowing fork review and merge actions', async () => {
+  it('skips fork fix while allowing fork review', async () => {
     const review = pr({
       number: 1,
       nextAction: 'review',
@@ -192,66 +269,89 @@ describe('runKickassWithDeps', () => {
       headRepo: 'fork/web',
     })
     const fix = pr({
-      number: 2,
-      nextAction: 'fix',
-      reviewState: 'BLOCK',
-      headRepo: 'fork/web',
-      latestAnnotation: {
-        origin: 'claude',
-        reviewer: 'codex',
-        verdict: 'BLOCK',
-        type: 'review',
-        sha: 'abc1234',
-      },
+      number: 2, nextAction: 'fix', reviewState: 'NEEDS_FIX', headRepo: 'fork/web',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     })
-    const merge = pr({
-      number: 3,
-      nextAction: 'merge',
-      reviewState: 'APPROVE',
-      headRepo: 'fork/web',
-    })
-    const plan = buildPreflightPlan([review, fix, merge])
+    const plan = buildPreflightPlan([review, fix])
     const dispatched: number[] = []
 
     const results = await executeKickassPlan(plan, {
       getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async (item) => { dispatched.push(item.pr.number) },
+    })
+
+    expect(plan.map(item => item.action)).toEqual(['review', 'skip'])
+    expect(dispatched).toEqual([1])
+    expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr'])
+  })
+
+  it('splits commit-delivered fix and recheck across a fresh head', async () => {
+    const selected = pr({
+      number: 9,
+      reviewState: 'NEEDS_FIX',
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })
+    const plan = buildPreflightPlan([selected], 'crazy', 'commit')
+    const dispatched: Array<{ action: string; headSha: string; args: string[] }> = []
+    let head = selected.headSha
+
+    const results = await executeKickassPlan(plan, {
+      getCurrentHeadSha: async () => head,
       dispatchRun: async (item) => {
-        dispatched.push(item.pr.number)
-      },
-      dispatchMerge: async (item) => {
-        dispatched.push(item.pr.number)
+        dispatched.push({ action: item.action, headSha: item.pr.headSha, args: buildKickassRunArgs(item, 'crazy') })
+        if (item.action === 'fix') head = 'def987654321'
       },
     })
 
-    expect(plan.map(item => item.action)).toEqual(['review', 'skip', 'merge'])
-    expect(dispatched).toEqual([1, 3])
-    expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr', undefined])
+    expect(results).toEqual([{ pr: selected, status: 'executed' }])
+    expect(dispatched).toEqual([
+      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789'] },
+      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--steps', 'recheck', '--expected-head-sha', 'def987654321', '--crazy'] },
+    ])
+  })
+
+  it('fix plan shows [crazy] badge in transition when roundMode is crazy', () => {
+    const selected = pr({
+      reviewState: 'NEEDS_FIX',
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })
+    const plan = buildPreflightPlan([selected], 'crazy', 'commit')
+    expect(plan[0].transition).toContain('[crazy]')
+    expect(plan[0].transition).toContain('fix→recheck')
+  })
+
+  it('marks non-commit fix plans as recheck deferred', () => {
+    const selected = pr({
+      reviewState: 'NEEDS_FIX',
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })
+    const plan = buildPreflightPlan([selected], 'crazy', 'pull_request')
+    expect(plan[0].transition).toBe('NEEDS_FIX -> fix')
+    expect(plan[0].details).toContain('delivery pull_request')
+    expect(plan[0].details).toContain('recheck deferred')
+    expect(plan[0].chainRecheck).toBe(false)
   })
 
   it('continues executing later PRs when one PR throws', async () => {
     const first = pr({ number: 1, nextAction: 'review' })
     const second = pr({ number: 2, nextAction: 'review' })
-    const third = pr({ number: 3, nextAction: 'merge' })
     const dispatched: number[] = []
 
-    const results = await executeKickassPlan(buildPreflightPlan([first, second, third]), {
+    const results = await executeKickassPlan(buildPreflightPlan([first, second]), {
       getCurrentHeadSha: async (item) => {
         if (item.pr.number === 2) throw new Error('api unavailable')
         return item.pr.headSha
       },
-      dispatchRun: async (item) => {
-        dispatched.push(item.pr.number)
-      },
-      dispatchMerge: async (item) => {
-        dispatched.push(item.pr.number)
-      },
+      dispatchRun: async (item) => { dispatched.push(item.pr.number) },
     })
 
-    expect(dispatched).toEqual([1, 3])
+    expect(dispatched).toEqual([1])
     expect(results.map(result => [result.pr.number, result.status, result.reason])).toEqual([
       [1, 'executed', undefined],
       [2, 'failed', 'error'],
-      [3, 'executed', undefined],
     ])
   })
 

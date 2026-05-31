@@ -9,7 +9,7 @@ import { loadConfig, getGithubToken } from '../config/loader.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
@@ -21,11 +21,21 @@ export interface RunOpts {
   reviewer?: string
   steps?: string
   dryRun?: boolean
+  roundMode?: 'crazy' | 'halfcrazy'
   initialReviewComment?: {
-    id: number
+    id?: number
     body: string
   }
   expectedHeadSha?: string
+}
+
+const CRAZY_ROUND_CEILING = 2
+
+function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcrazy'): boolean {
+  if (verdict === null) return false
+  if (mode === 'crazy') return verdict === 'APPROVE'
+  // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
+  return verdict !== 'BLOCK'
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -34,10 +44,80 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
+function pinReviewers(steps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep[] {
+  return steps.map(s =>
+    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
+  )
+}
+
+function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep | null {
+  const reviewStep = allSteps.find(s => s.type === 'review')
+  if (!reviewStep) return null
+  return {
+    ...reviewStep,
+    name: 'recheck',
+    type: 'recheck',
+    reviewer: assignedReviewer,
+    when: undefined,
+    max_rounds: reviewStep.max_rounds,
+    instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+  }
+}
+
+function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): WorkflowStep[] {
+  const lastFix = steps.map(s => s.type).lastIndexOf('fix')
+  if (lastFix === -1) return [...steps, step]
+  return [...steps.slice(0, lastFix + 1), step, ...steps.slice(lastFix + 1)]
+}
+
+export function resolveWorkflowSteps(
+  allSteps: WorkflowStep[],
+  stepFilter: string[] | undefined,
+  assignedReviewer: 'claude' | 'codex',
+): WorkflowStep[] {
+  const selected = stepFilter
+    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
+    : allSteps
+  let steps = pinReviewers(selected, assignedReviewer)
+
+  if (stepFilter?.includes('recheck') && !steps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) steps = appendAfterLastFix(steps, synthetic)
+  }
+
+  return steps
+}
+
+export function buildFixRecheckSteps(
+  steps: WorkflowStep[],
+  allSteps: WorkflowStep[],
+  assignedReviewer: 'claude' | 'codex',
+): WorkflowStep[] {
+  const selectedFixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
+  const sourceSteps = selectedFixRecheckSteps.length > 0
+    ? selectedFixRecheckSteps
+    : pinReviewers(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer)
+  let fixRecheckSteps = [...sourceSteps]
+  if (!fixRecheckSteps.some(s => s.type === 'fix')) {
+    const fixStep = allSteps.find(s => s.type === 'fix')
+    if (fixStep) fixRecheckSteps = [fixStep, ...fixRecheckSteps]
+  }
+  if (!fixRecheckSteps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
+  }
+  return fixRecheckSteps
+}
+
 export async function runRun(prUrl: string, opts: RunOpts = {}) {
+  if (opts.roundMode && opts.dryRun) {
+    console.error(chalk.red(`✗ --${opts.roundMode} and --dry-run are mutually exclusive`))
+    process.exit(1)
+  }
+
   const config = loadConfig(opts.config)
   initLogger(config.logs)
-  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl })
+  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl, ...(opts.roundMode && { round_mode: opts.roundMode }) })
 
   let token: string
   try {
@@ -109,12 +189,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
   const allSteps = loadWorkflow(process.cwd())
   const stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
-  const filteredSteps = (stepFilter
-    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
-    : allSteps
-  ).map(s =>
-    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
-  )
+  const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer)
 
   if (opts.dryRun) {
     console.log(chalk.dim('  dry-run: review will run but no comment will be posted; fix step skipped'))
@@ -160,6 +235,27 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // but if a signal fires mid-workflow we exit via process.exit and bypass
   // that finally, so the signal handler iterates this array too.
   const pushedShas: string[] = []
+  const loopLockShas: string[] = []
+
+  const rememberLoopLock = (lockSha: string): void => {
+    if (!loopLockShas.includes(lockSha)) loopLockShas.push(lockSha)
+  }
+  const releaseRememberedLoopLock = async (lockSha: string, outcome: 'success' | 'failure'): Promise<void> => {
+    const idx = loopLockShas.indexOf(lockSha)
+    if (idx !== -1) loopLockShas.splice(idx, 1)
+    try {
+      await releaseRemoteLock(octokit, owner, repo, lockSha, outcome)
+    } catch (err) {
+      rememberLoopLock(lockSha)
+      throw err
+    }
+  }
+  const drainLoopLocks = async (outcome: 'success' | 'failure'): Promise<void> => {
+    while (loopLockShas.length > 0) {
+      const s = loopLockShas.shift()!
+      try { await releaseRemoteLock(octokit, owner, repo, s, outcome) } catch { /* best-effort per sha */ }
+    }
+  }
 
   const onSignal = (signal: NodeJS.Signals): void => {
     void (async () => {
@@ -167,6 +263,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         stopHeartbeat()
         if (!opts.dryRun && lockAttemptStarted) {
           await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+          await drainLoopLocks('failure')
           // Drain the shared array via shift() so the runner's finally (which
           // also drains via shift) doesn't double-release. Whichever loop
           // shifts a sha first owns its release; the other sees a shorter
@@ -224,39 +321,114 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
-      const { verdict } = await runWorkflow({
-        owner,
-        repoName: repo,
-        prNumber: number,
-        pr,
-        tmpDir,
-        token,
-        config,
-        origin,
-        reviewStart: Date.now(),
-        log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
-        onPhaseChange: (label) => { activeSpinner.text = label },
-        crosscheckShas: new Set(),
+      const sharedCtx = {
+        owner, repoName: repo, prNumber: number, token, config, origin,
+        log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
+        onPhaseChange: (label: string) => { activeSpinner.text = label },
+        crosscheckShas: new Set<string>(),
         pushedShas,
         dryRun: opts.dryRun,
+        // crazy/halfcrazy bypass per-step max_rounds; the outer ceiling is the only cap
+        overrideMaxRounds: opts.roundMode ? Infinity : undefined,
+        roundMode: opts.roundMode,
+      }
+
+      let workflowResult = await runWorkflow({
+        ...sharedCtx,
+        pr,
+        tmpDir,
+        reviewStart: Date.now(),
         steps: filteredSteps,
         initialReviewComment: opts.initialReviewComment,
       })
+      let { verdict, fixAppliedCount } = workflowResult
+      let latestReviewComment = workflowResult.latestReviewComment ?? opts.initialReviewComment
+
+      // Autonomous fix→recheck loop for --crazy / --halfcrazy
+      if (opts.roundMode) {
+        const mode = opts.roundMode
+        const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer)
+        let loopRound = 1
+        let loopSha = sha
+
+        while (
+          loopRound < CRAZY_ROUND_CEILING &&
+          (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0))
+        ) {
+          // No-progress guard: if fix ran but applied nothing, looping is futile
+          if (fixAppliedCount === 0) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  no progress in round ${loopRound} — stopping`))
+            break
+          }
+
+          loopRound++
+          console.log(chalk.dim(`\n  round ${loopRound}  previous verdict ${verdict ?? '--'} — continuing...`))
+
+          // Refresh head SHA so the remote lock targets the commit fix pushed.
+          // A review-only first round has no fix count and no new head yet; in
+          // that case continue on the existing lock so round 2 can actually run
+          // the synthesized fix/recheck follow-up.
+          const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+          const freshSha = freshPR.head.sha
+          const priorRoundRanFix = fixAppliedCount !== undefined
+          if (freshSha === loopSha && priorRoundRanFix) {
+            // Head didn't advance — fix made no changes despite applied_count > 0 (edge case)
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))
+            break
+          }
+          const acquiredLoopLock = freshSha !== loopSha
+          if (acquiredLoopLock) {
+            loopSha = freshSha
+            stopHeartbeat()
+            if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', mode, round: loopRound })
+              console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
+              break
+            }
+            rememberLoopLock(loopSha)
+            await acquireRemoteLock(octokit, owner, repo, loopSha)
+            stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+          }
+
+          const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
+          workflowResult = await runWorkflow({
+            ...sharedCtx,
+            pr: loopPR,
+            tmpDir,
+            reviewStart: Date.now(),
+            steps: fixRecheckSteps,
+            initialReviewComment: latestReviewComment,
+            round: loopRound,
+          })
+          ;({ verdict, fixAppliedCount } = workflowResult)
+          latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+
+          if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
+          const done = meetsCrazyStopCondition(verdict, mode)
+          console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
+        }
+
+        if (loopRound >= CRAZY_ROUND_CEILING && !meetsCrazyStopCondition(verdict, mode)) {
+          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'crazy_ceiling', mode, round: loopRound })
+          console.log(chalk.yellow(`  ceiling reached (${CRAZY_ROUND_CEILING} rounds) — last verdict: ${verdict ?? '--'}`))
+        }
+      }
 
       activeSpinner.stop()
       console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
 
-      if (!opts.dryRun) {
-        console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
-      } else {
-        console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
-      }
+      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
 
       stopHeartbeat()
       if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
     } catch (err: unknown) {
       stopHeartbeat()
-      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+      if (!opts.dryRun) {
+        try { await releaseRemoteLock(octokit, owner, repo, sha, 'failure') } catch { /* best-effort */ }
+        await drainLoopLocks('failure')
+      }
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
       console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
       releasePRLock(owner, repo, number, sha)

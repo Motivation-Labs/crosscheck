@@ -55,22 +55,30 @@ crosscheck status                   # auth state, config summary, CLI versions
 
 **Operator queue (scan + kickass)**
 
-`crosscheck scan` classifies every open PR by freshness and workflow state:
+`crosscheck scan` tracks two independent dimensions per PR:
 
-| State | Meaning | Next action |
+| Workflow stage (`reviewState`) | Meaning | Next action |
 |---|---|---|
 | `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
-| `NEEDS_FIX` | Reviewed — changes requested | fix |
-| `BLOCK` | Reviewed — hard block, do not merge | fix |
-| `NEEDS_RECHECK` | Fix was applied, recheck pending | recheck |
-| `APPROVE` | Reviewed and approved | merge |
+| `NEEDS_FIX` | Reviewed — fix requested | fix |
+| `NEEDS_RECHECK` | Fix committed, recheck pending | recheck |
+| `APPROVED` | Reviewed and approved | merge |
+
+| Verdict (`verdict`) | Meaning |
+|---|---|
+| `UNREVIEWED` | No review found |
+| `APPROVE` | AI approved |
+| `NEEDS_WORK` | AI requested changes |
+| `BLOCK` | AI hard-blocked merge |
+
+`BLOCK` and `NEEDS_WORK` both map to `NEEDS_FIX` stage — same next action, but the `verdict` field preserves severity so operators can prioritise.
 
 ```bash
 crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
 crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
 ```
 
-`crosscheck run` and `crosscheck review` both accept vendor aliases via `--reviewer`:
+`crosscheck run` and `crosscheck review` accept vendor aliases via `--reviewer` / `--vendor`:
 - Claude: `claude`, `claude-code`, `cc`, `anthropic`
 - Codex: `codex`, `openai`
 

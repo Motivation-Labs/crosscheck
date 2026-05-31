@@ -186,13 +186,30 @@ export interface WorkflowContext {
   // already scanned the PR and want fix-only runs to avoid reselecting a
   // different comment after dispatch.
   initialReviewComment?: {
-    id: number
+    id?: number
     body: string
   }
+  // When set, overrides step.max_rounds for all fix and recheck steps in this
+  // run. Pass Infinity to disable the per-step cap entirely (used by --crazy /
+  // --halfcrazy modes, which apply their own outer ceiling instead).
+  overrideMaxRounds?: number
+  // Loop mode set by --crazy / --halfcrazy. Included in review_complete and
+  // step_skipped log events so operators can filter loop activity in logs.
+  roundMode?: 'crazy' | 'halfcrazy'
 }
 
 export interface WorkflowResult {
   verdict: string | null
+  // Sum of applied_count across all fix steps; 0 means fix ran but made no
+  // changes; undefined means no fix step executed in this run.
+  fixAppliedCount?: number
+  // Latest review/recheck comment produced by this workflow. Operator loops
+  // feed this into the next fix round so fixes target the freshest failed
+  // recheck instead of falling back to the original review comment.
+  latestReviewComment?: {
+    id?: number
+    body: string
+  }
 }
 
 function countComments(reviewText: string): number {
@@ -253,7 +270,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
-    if (exceedsMaxRounds(effectiveType, step.type, step.max_rounds, ctx.round)) {
+    if (exceedsMaxRounds(effectiveType, step.type, ctx.overrideMaxRounds ?? step.max_rounds, ctx.round)) {
       fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'max_rounds' })
       results[step.name] = { skipped: true }
       if (effectiveType === 'fix') onPhaseChange('', { phase: 'fixed', fixCount: 0 })
@@ -282,7 +299,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
-      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
       const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
@@ -308,7 +325,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -748,7 +765,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
 
   const verdict = Object.values(results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
-  return { verdict: verdict ?? null }
+  const fixAppliedCount = Object.values(results).reduce<number | undefined>((acc, r) => {
+    if (r.applied_count === undefined) return acc
+    return (acc ?? 0) + r.applied_count
+  }, undefined)
+  const latestReviewResult = Object.values(results).reverse().find(r => r.commentBody !== undefined)
+  return {
+    verdict: verdict ?? null,
+    fixAppliedCount,
+    ...(latestReviewResult?.commentBody && {
+      latestReviewComment: {
+        body: latestReviewResult.commentBody,
+        ...(latestReviewResult.commentId !== undefined && { id: latestReviewResult.commentId }),
+      },
+    }),
+  }
   } catch (err) {
     workflowFailed = true
     throw err

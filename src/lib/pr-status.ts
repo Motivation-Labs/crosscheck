@@ -22,8 +22,16 @@ import { parseAnnotationFieldsFenced } from './annotation.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
-export type ReviewState = 'NEEDS_REVIEW' | 'APPROVE' | 'NEEDS_FIX' | 'BLOCK' | 'NEEDS_RECHECK'
+
+// Workflow stage — what action is pending on this PR.
+export type ReviewState = 'NEEDS_REVIEW' | 'NEEDS_FIX' | 'NEEDS_RECHECK' | 'APPROVED'
+
 export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
+
+// AI verdict — what the reviewer decided. UNREVIEWED means no review found for current HEAD.
+export type ReviewVerdict = 'UNREVIEWED' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
+
+// Raw annotation vocabulary emitted and parsed from review comments. Unchanged.
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
 export interface CrosscheckAnnotation {
@@ -111,7 +119,7 @@ export interface ScanPRStatus {
   lastActiveAt: string
   staleAfterMs: number
   ageMs: number
-  verdict: CrosscheckVerdict | null
+  verdict: ReviewVerdict
   latestAnnotation: CrosscheckAnnotation | null
   merge?: PRMergeSummary
 }
@@ -218,7 +226,7 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
     lastActiveAt: new Date(lastActiveMs).toISOString(),
     staleAfterMs: options.staleAfterMs,
     ageMs,
-    verdict: latestVerdict?.verdict ?? null,
+    verdict: latestVerdict?.verdict ?? 'UNREVIEWED',
     latestAnnotation: latestAnnotation?.annotation ?? null,
     ...(input.merge && { merge: input.merge }),
   }
@@ -408,8 +416,8 @@ function latestAppliedFixAfter(events: PRWorkflowLogEvent[], after: string | und
 }
 
 function verdictToReviewState(verdict: CrosscheckVerdict): ReviewState {
-  if (verdict === 'NEEDS_WORK') return 'NEEDS_FIX'
-  return verdict
+  if (verdict === 'APPROVE') return 'APPROVED'
+  return 'NEEDS_FIX' // NEEDS_WORK and BLOCK both require a fix; severity is on the verdict field
 }
 
 function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
@@ -421,8 +429,8 @@ function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWor
 function nextActionForState(state: ReviewState): NextAction {
   if (state === 'NEEDS_REVIEW') return 'review'
   if (state === 'NEEDS_RECHECK') return 'recheck'
-  if (state === 'NEEDS_FIX' || state === 'BLOCK') return 'fix'
-  if (state === 'APPROVE') return 'merge'
+  if (state === 'NEEDS_FIX') return 'fix'
+  if (state === 'APPROVED') return 'merge'
   return null
 }
 
@@ -508,7 +516,7 @@ async function buildRepoScopes(config: Config, token: string): Promise<Array<{ o
 // This block preserves the foldPRStatus-based API that was present in staging.
 // The scan command uses the newer derivePRStatus / ScanPRStatus API above.
 
-export type PRReviewState = 'NEEDS_REVIEW' | 'APPROVE' | 'NEEDS_FIX' | 'BLOCK' | 'FIX_IN_PROGRESS' | 'NEEDS_RECHECK'
+export type PRReviewState = 'NEEDS_REVIEW' | 'APPROVED' | 'NEEDS_FIX' | 'FIX_IN_PROGRESS' | 'NEEDS_RECHECK'
 export type PRNextAction = 'review' | 'fix' | 'recheck' | 'none'
 export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
@@ -860,7 +868,7 @@ export function foldPRStatus(
 
   if (latestReview) {
     if (latestReview.verdict === 'APPROVE') {
-      state = 'APPROVE'
+      state = 'APPROVED'
       nextAction = 'none'
     } else if (latestFixAfterReview?.complete) {
       state = 'NEEDS_RECHECK'
@@ -869,7 +877,8 @@ export function foldPRStatus(
       state = 'FIX_IN_PROGRESS'
       nextAction = 'fix'
     } else {
-      state = latestReview.verdict === 'NEEDS_WORK' ? 'NEEDS_FIX' : latestReview.verdict
+      // NEEDS_WORK and BLOCK both land in NEEDS_FIX; severity is preserved in verdict
+      state = 'NEEDS_FIX'
       nextAction = 'fix'
     }
   }

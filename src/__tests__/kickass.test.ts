@@ -62,8 +62,8 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches fix,recheck together for PRs with unresolved findings', () => {
-    expect(buildKickassRunArgs(pr({
+  it('dispatches fix,recheck for commit-delivered fixes', () => {
+    const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
       latestAnnotation: {
@@ -73,11 +73,36 @@ describe('buildKickassRunArgs', () => {
         type: 'review',
         sha: 'abc1234',
       },
-    }))).toEqual([
+    })], undefined, 'commit')
+
+    expect(buildKickassRunArgs(plan[0])).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
       '--steps',
       'fix,recheck',
+      '--expected-head-sha',
+      'abc123456789',
+    ])
+  })
+
+  it('dispatches fix only when fixes do not land on the PR head', () => {
+    const selected = pr({
+      nextAction: 'fix',
+      reviewState: 'NEEDS_FIX',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+        sha: 'abc1234',
+      },
+    })
+
+    expect(buildKickassRunArgs(selected)).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'fix',
       '--expected-head-sha',
       'abc123456789',
     ])
@@ -95,20 +120,32 @@ describe('buildKickassRunArgs', () => {
   })
 
   it('appends --crazy when roundMode is crazy', () => {
-    const args = buildKickassRunArgs(pr({
+    const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
-    }), 'crazy')
+    })], 'crazy', 'commit')
+    const args = buildKickassRunArgs(plan[0], 'crazy')
     expect(args).toContain('--crazy')
     expect(args).toContain('fix,recheck')
   })
 
   it('appends --halfcrazy when roundMode is halfcrazy', () => {
+    const plan = buildPreflightPlan([pr({
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
+    })], 'halfcrazy', 'commit')
+    const args = buildKickassRunArgs(plan[0], 'halfcrazy')
+    expect(args).toContain('--halfcrazy')
+    expect(args).not.toContain('--crazy')
+  })
+
+  it('does not append round mode to deferred non-commit fixes', () => {
     const args = buildKickassRunArgs(pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
-    }), 'halfcrazy')
-    expect(args).toContain('--halfcrazy')
+    }), 'crazy')
+    expect(args).toContain('fix')
+    expect(args).not.toContain('fix,recheck')
     expect(args).not.toContain('--crazy')
   })
 })
@@ -254,9 +291,22 @@ describe('runKickassWithDeps', () => {
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })
-    const plan = buildPreflightPlan([selected], 'crazy')
+    const plan = buildPreflightPlan([selected], 'crazy', 'commit')
     expect(plan[0].transition).toContain('[crazy]')
     expect(plan[0].transition).toContain('fix→recheck')
+  })
+
+  it('marks non-commit fix plans as recheck deferred', () => {
+    const selected = pr({
+      reviewState: 'NEEDS_FIX',
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })
+    const plan = buildPreflightPlan([selected], 'crazy', 'pull_request')
+    expect(plan[0].transition).toBe('NEEDS_FIX -> fix')
+    expect(plan[0].details).toContain('delivery pull_request')
+    expect(plan[0].details).toContain('recheck deferred')
+    expect(plan[0].chainRecheck).toBe(false)
   })
 
   it('continues executing later PRs when one PR throws', async () => {

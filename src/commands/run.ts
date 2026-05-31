@@ -70,7 +70,7 @@ function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): Workflow
   return [...steps.slice(0, lastFix + 1), step, ...steps.slice(lastFix + 1)]
 }
 
-function resolveWorkflowSteps(
+export function resolveWorkflowSteps(
   allSteps: WorkflowStep[],
   stepFilter: string[] | undefined,
   assignedReviewer: 'claude' | 'codex',
@@ -88,12 +88,16 @@ function resolveWorkflowSteps(
   return steps
 }
 
-function buildFixRecheckSteps(
+export function buildFixRecheckSteps(
   steps: WorkflowStep[],
   allSteps: WorkflowStep[],
   assignedReviewer: 'claude' | 'codex',
 ): WorkflowStep[] {
-  let fixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
+  const selectedFixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
+  const sourceSteps = selectedFixRecheckSteps.length > 0
+    ? selectedFixRecheckSteps
+    : pinReviewers(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer)
+  let fixRecheckSteps = [...sourceSteps]
   if (!fixRecheckSteps.some(s => s.type === 'recheck')) {
     const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
     if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
@@ -354,21 +358,27 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           loopRound++
           console.log(chalk.dim(`\n  round ${loopRound}  previous verdict ${verdict ?? '--'} — continuing...`))
 
-          // Refresh head SHA so the remote lock targets the commit fix pushed
+          // Refresh head SHA so the remote lock targets the commit fix pushed.
+          // A review-only first round has no fix count and no new head yet; in
+          // that case continue on the existing lock so round 2 can actually run
+          // the synthesized fix/recheck follow-up.
           const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
           const freshSha = freshPR.head.sha
-          if (freshSha === loopSha) {
+          const priorRoundRanFix = fixAppliedCount !== undefined
+          if (freshSha === loopSha && priorRoundRanFix) {
             // Head didn't advance — fix made no changes despite applied_count > 0 (edge case)
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
             console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))
             break
           }
-          loopSha = freshSha
-
-          stopHeartbeat()
-          rememberLoopLock(loopSha)
-          await acquireRemoteLock(octokit, owner, repo, loopSha)
-          stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+          const acquiredLoopLock = freshSha !== loopSha
+          if (acquiredLoopLock) {
+            loopSha = freshSha
+            stopHeartbeat()
+            rememberLoopLock(loopSha)
+            await acquireRemoteLock(octokit, owner, repo, loopSha)
+            stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+          }
 
           const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
           workflowResult = await runWorkflow({
@@ -383,7 +393,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           ;({ verdict, fixAppliedCount } = workflowResult)
           latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
 
-          await releaseRememberedLoopLock(loopSha, 'success')
+          if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
           const done = meetsCrazyStopCondition(verdict, mode)
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
         }

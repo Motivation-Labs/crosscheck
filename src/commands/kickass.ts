@@ -5,7 +5,8 @@ import { createInterface } from 'readline/promises'
 import { fileURLToPath } from 'url'
 import { execa } from 'execa'
 import { createGithubClient } from '../github/client.js'
-import { getGithubToken } from '../config/loader.js'
+import { getGithubToken, loadConfig } from '../config/loader.js'
+import type { Config } from '../config/schema.js'
 import { parseDuration } from '../lib/durations.js'
 import { logError } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
@@ -22,6 +23,7 @@ export interface KickassOpts {
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
 export type KickassFailureReason = 'error'
+export type FixDeliveryMode = Config['post_review']['auto_fix']['delivery']['mode']
 
 export interface PreflightItem {
   pr: PRStatus
@@ -30,6 +32,7 @@ export interface PreflightItem {
   details: string[]
   explanation?: string
   skipReason?: KickassSkipReason
+  chainRecheck?: boolean
 }
 
 export interface KickassExecutionResult {
@@ -47,6 +50,7 @@ export interface KickassDeps {
   loadScanResult: (options: { force?: boolean; staleAfterMs: number }) => Promise<ScanResult>
   pickPRs: (prs: PRStatus[]) => Promise<PRStatus[]>
   confirm: (message: string) => Promise<boolean>
+  getFixDeliveryMode?: () => FixDeliveryMode | Promise<FixDeliveryMode>
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
   dispatchRun: (item: PreflightItem) => Promise<void>
 }
@@ -97,7 +101,8 @@ export async function runKickassWithDeps(
       return
     }
 
-    const plan = buildPreflightPlan(selected, opts.roundMode)
+    const fixDeliveryMode = deps.getFixDeliveryMode ? await deps.getFixDeliveryMode() : 'pull_request'
+    const plan = buildPreflightPlan(selected, opts.roundMode, fixDeliveryMode)
     printPreflight(plan, mergeReady)
 
     if (opts.dryRun) {
@@ -121,8 +126,13 @@ export async function runKickassWithDeps(
   }
 }
 
-export function buildPreflightPlan(prs: PRStatus[], roundMode?: 'crazy' | 'halfcrazy'): PreflightItem[] {
+export function buildPreflightPlan(
+  prs: PRStatus[],
+  roundMode?: 'crazy' | 'halfcrazy',
+  fixDeliveryMode: FixDeliveryMode = 'pull_request',
+): PreflightItem[] {
   const modeTag = roundMode ? ` [${roundMode}]` : ''
+  const chainRecheck = fixDeliveryMode === 'commit'
   return prs.map((pr) => {
     const fork = isForkPR(pr)
     if (pr.nextAction === 'fix' && fork) {
@@ -158,8 +168,15 @@ export function buildPreflightPlan(prs: PRStatus[], roundMode?: 'crazy' | 'halfc
       return {
         pr,
         action: 'fix',
-        transition: `${pr.reviewState} -> fix→recheck${modeTag}`,
-        details: [`fixer ${fixerLabel(pr)}`, 'delivery commit'],
+        transition: chainRecheck
+          ? `${pr.reviewState} -> fix→recheck${modeTag}`
+          : `${pr.reviewState} -> fix`,
+        details: [
+          `fixer ${fixerLabel(pr)}`,
+          `delivery ${fixDeliveryMode}`,
+          ...(chainRecheck ? [] : ['recheck deferred']),
+        ],
+        chainRecheck,
       }
     }
 
@@ -248,12 +265,14 @@ export function buildKickassRunArgs(
     'run',
     item.pr.url,
     '--steps',
-    stepForAction(item.action),
+    stepsForItem(item),
     '--expected-head-sha',
     item.pr.headSha,
   ]
-  if (roundMode === 'crazy') args.push('--crazy')
-  else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+  if (item.action !== 'fix' || item.chainRecheck === true) {
+    if (roundMode === 'crazy') args.push('--crazy')
+    else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+  }
   return args
 }
 
@@ -299,6 +318,7 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     loadScanResult,
     pickPRs,
     confirm: confirmMutation,
+    getFixDeliveryMode: () => loadConfig().post_review.auto_fix.delivery.mode,
     getCurrentHeadSha: async (item) => {
       const token = getGithubToken()
       const octokit = createGithubClient(token)
@@ -362,9 +382,9 @@ function checksLabel(pr: PRStatus): string {
   return pr.merge.mergeStateStatus ?? 'unknown'
 }
 
-function stepForAction(action: Exclude<KickassAction, 'skip'>): string {
-  if (action === 'review') return 'review'
-  if (action === 'fix') return 'fix,recheck'  // always dispatch full cycle
+function stepsForItem(item: PreflightItem): string {
+  if (item.action === 'review') return 'review'
+  if (item.action === 'fix') return item.chainRecheck === true ? 'fix,recheck' : 'fix'
   return 'recheck'
 }
 

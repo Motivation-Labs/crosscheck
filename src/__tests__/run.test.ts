@@ -60,4 +60,15 @@ describe('buildFixRecheckSteps', () => {
       reviewer: 'codex',
     })
   })
+
+  it('prepends fix for round-mode followups after an initial recheck-only run', () => {
+    const steps = buildFixRecheckSteps([recheckStep], [reviewStep, fixStep, recheckStep], 'claude')
+
+    expect(steps.map(step => step.type)).toEqual(['fix', 'recheck'])
+    expect(steps[1]).toMatchObject({
+      name: 'recheck',
+      instructions: 'custom recheck',
+      reviewer: 'auto',
+    })
+  })
 })

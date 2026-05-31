@@ -62,7 +62,7 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches fix,recheck for commit-delivered fixes', () => {
+  it('dispatches the fix leg first for commit-delivered fixes', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
@@ -79,7 +79,7 @@ describe('buildKickassRunArgs', () => {
       'run',
       'https://github.com/acme/web/pull/7',
       '--steps',
-      'fix,recheck',
+      'fix',
       '--expected-head-sha',
       'abc123456789',
     ])
@@ -119,20 +119,20 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('appends --crazy when roundMode is crazy', () => {
+  it('does not append --crazy to the fix leg of a chained commit fix', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'crazy')
-    expect(args).toContain('--crazy')
-    expect(args).toContain('fix,recheck')
+    expect(args).toContain('fix')
+    expect(args).not.toContain('--crazy')
   })
 
-  it('appends --halfcrazy when roundMode is halfcrazy', () => {
+  it('appends --halfcrazy to standalone recheck actions', () => {
     const plan = buildPreflightPlan([pr({
-      nextAction: 'fix',
-      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
+      nextAction: 'recheck',
+      reviewState: 'NEEDS_RECHECK',
     })], 'halfcrazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'halfcrazy')
     expect(args).toContain('--halfcrazy')
@@ -283,6 +283,32 @@ describe('runKickassWithDeps', () => {
     expect(plan.map(item => item.action)).toEqual(['review', 'skip'])
     expect(dispatched).toEqual([1])
     expect(results.map(result => result.reason)).toEqual([undefined, 'fork_pr'])
+  })
+
+  it('splits commit-delivered fix and recheck across a fresh head', async () => {
+    const selected = pr({
+      number: 9,
+      reviewState: 'NEEDS_FIX',
+      nextAction: 'fix',
+      latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+    })
+    const plan = buildPreflightPlan([selected], 'crazy', 'commit')
+    const dispatched: Array<{ action: string; headSha: string; args: string[] }> = []
+    let head = selected.headSha
+
+    const results = await executeKickassPlan(plan, {
+      getCurrentHeadSha: async () => head,
+      dispatchRun: async (item) => {
+        dispatched.push({ action: item.action, headSha: item.pr.headSha, args: buildKickassRunArgs(item, 'crazy') })
+        if (item.action === 'fix') head = 'def987654321'
+      },
+    })
+
+    expect(results).toEqual([{ pr: selected, status: 'executed' }])
+    expect(dispatched).toEqual([
+      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789'] },
+      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--steps', 'recheck', '--expected-head-sha', 'def987654321', '--crazy'] },
+    ])
   })
 
   it('fix plan shows [crazy] badge in transition when roundMode is crazy', () => {

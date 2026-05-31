@@ -98,6 +98,10 @@ export function buildFixRecheckSteps(
     ? selectedFixRecheckSteps
     : pinReviewers(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer)
   let fixRecheckSteps = [...sourceSteps]
+  if (!fixRecheckSteps.some(s => s.type === 'fix')) {
+    const fixStep = allSteps.find(s => s.type === 'fix')
+    if (fixStep) fixRecheckSteps = [fixStep, ...fixRecheckSteps]
+  }
   if (!fixRecheckSteps.some(s => s.type === 'recheck')) {
     const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
     if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)

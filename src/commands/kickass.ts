@@ -213,6 +213,16 @@ export async function executeKickassPlan(
 
       console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
       await deps.dispatchRun(item)
+      if (item.action === 'fix' && item.chainRecheck === true) {
+        const fixedHeadSha = await deps.getCurrentHeadSha(item)
+        if (fixedHeadSha !== item.pr.headSha) {
+          const recheckItem = buildPostFixRecheckItem(item, fixedHeadSha)
+          console.log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
+          await deps.dispatchRun(recheckItem)
+        } else {
+          console.log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
+        }
+      }
       results.push({ pr: item.pr, status: 'executed' })
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
@@ -222,6 +232,15 @@ export async function executeKickassPlan(
   }
 
   return results
+}
+
+function buildPostFixRecheckItem(item: PreflightItem, headSha: string): PreflightItem {
+  return {
+    pr: { ...item.pr, headSha, nextAction: 'recheck', reviewState: 'NEEDS_RECHECK' },
+    action: 'recheck',
+    transition: 'fix -> Recheck',
+    details: ['links latest review', `head ${headSha.slice(0, 7)}`],
+  }
 }
 
 export function printPreflight(plan: PreflightItem[], mergeReady: PRStatus[] = []): void {
@@ -269,7 +288,7 @@ export function buildKickassRunArgs(
     '--expected-head-sha',
     item.pr.headSha,
   ]
-  if (item.action !== 'fix' || item.chainRecheck === true) {
+  if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
   }
@@ -384,7 +403,7 @@ function checksLabel(pr: PRStatus): string {
 
 function stepsForItem(item: PreflightItem): string {
   if (item.action === 'review') return 'review'
-  if (item.action === 'fix') return item.chainRecheck === true ? 'fix,recheck' : 'fix'
+  if (item.action === 'fix') return 'fix'
   return 'recheck'
 }
 

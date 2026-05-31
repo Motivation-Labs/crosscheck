@@ -193,6 +193,9 @@ export interface WorkflowContext {
   // run. Pass Infinity to disable the per-step cap entirely (used by --crazy /
   // --halfcrazy modes, which apply their own outer ceiling instead).
   overrideMaxRounds?: number
+  // Loop mode set by --crazy / --halfcrazy. Included in review_complete and
+  // step_skipped log events so operators can filter loop activity in logs.
+  roundMode?: 'crazy' | 'halfcrazy'
 }
 
 export interface WorkflowResult {
@@ -289,7 +292,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
-      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
       const startPhase: PRPhase = isRecheck ? 'rechecking' : 'reviewing'
       const donePhase: PRPhase = isRecheck ? 'rechecked' : 'reviewed'
@@ -315,7 +318,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck

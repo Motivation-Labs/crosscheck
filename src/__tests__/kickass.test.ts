@@ -24,12 +24,12 @@ function pr(overrides: Partial<PRStatus> = {}): PRStatus {
     headRepo: 'acme/web',
     baseRef: 'main',
     freshness: 'stale',
-    reviewState: nextAction === 'recheck' ? 'RECHECK' : 'PR',
+    reviewState: nextAction === 'recheck' ? 'NEEDS_RECHECK' : 'NEEDS_REVIEW',
     nextAction,
     lastActiveAt: '2026-05-29T00:00:00.000Z',
     staleAfterMs: 60_000,
     ageMs: 120_000,
-    verdict: null,
+    verdict: 'UNREVIEWED',
     latestAnnotation: null,
     ...overrides,
   }
@@ -65,7 +65,7 @@ describe('buildKickassRunArgs', () => {
   it('dispatches fix,recheck together for PRs with unresolved findings', () => {
     expect(buildKickassRunArgs(pr({
       nextAction: 'fix',
-      reviewState: 'NEEDS_WORK',
+      reviewState: 'NEEDS_FIX',
       latestAnnotation: {
         origin: 'claude',
         reviewer: 'codex',
@@ -170,7 +170,7 @@ describe('runKickassWithDeps', () => {
   })
 
   it('excludes merge-ready PRs from the picker queue', async () => {
-    const approvePR = pr({ number: 1, nextAction: 'merge', reviewState: 'APPROVE' })
+    const approvePR = pr({ number: 1, nextAction: 'merge', reviewState: 'APPROVED' })
     const reviewPR = pr({ number: 2, nextAction: 'review' })
     let queueSeen: PRStatus[] = []
     const deps: KickassDeps = {
@@ -187,7 +187,7 @@ describe('runKickassWithDeps', () => {
   })
 
   it('skips execution when the PR head changed after scan', async () => {
-    const selected = pr({ nextAction: 'review', reviewState: 'PR', headSha: 'abc123456789' })
+    const selected = pr({ nextAction: 'review', reviewState: 'NEEDS_REVIEW', headSha: 'abc123456789' })
     const plan = buildPreflightPlan([selected])
     const dispatched: string[] = []
 
@@ -202,7 +202,7 @@ describe('runKickassWithDeps', () => {
 
   it('downgrades NEEDS_WORK fix to CR when no current-head review comment is usable', () => {
     const selected = pr({
-      reviewState: 'NEEDS_WORK',
+      reviewState: 'NEEDS_FIX',
       nextAction: 'fix',
       latestAnnotation: {
         origin: 'claude',
@@ -221,9 +221,9 @@ describe('runKickassWithDeps', () => {
   })
 
   it('skips fork fix while allowing fork review', async () => {
-    const review = pr({ number: 1, nextAction: 'review', reviewState: 'PR', headRepo: 'fork/web' })
+    const review = pr({ number: 1, nextAction: 'review', reviewState: 'NEEDS_REVIEW', headRepo: 'fork/web' })
     const fix = pr({
-      number: 2, nextAction: 'fix', reviewState: 'BLOCK', headRepo: 'fork/web',
+      number: 2, nextAction: 'fix', reviewState: 'NEEDS_FIX', headRepo: 'fork/web',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     })
     const plan = buildPreflightPlan([review, fix])
@@ -241,7 +241,7 @@ describe('runKickassWithDeps', () => {
 
   it('fix plan shows [crazy] badge in transition when roundMode is crazy', () => {
     const selected = pr({
-      reviewState: 'NEEDS_WORK',
+      reviewState: 'NEEDS_FIX',
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })

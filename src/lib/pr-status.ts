@@ -21,10 +21,16 @@ import { getLogDir, logError } from './logger.js'
 import { dedupScopes, type Scope } from './scopes.js'
 
 export type Freshness = 'stale' | 'not_stale'
-// FIX is reserved for future structured fix annotations; current scans infer
-// post-fix work as RECHECK from workflow logs.
-export type ReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
+
+// Workflow stage — what action is pending on this PR.
+export type ReviewState = 'NEEDS_REVIEW' | 'NEEDS_FIX' | 'NEEDS_RECHECK' | 'APPROVED'
+
 export type NextAction = 'review' | 'fix' | 'recheck' | 'merge' | null
+
+// AI verdict — what the reviewer decided. UNREVIEWED means no review found for current HEAD.
+export type ReviewVerdict = 'UNREVIEWED' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
+
+// Raw annotation vocabulary emitted and parsed from review comments. Unchanged.
 export type CrosscheckVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
 export interface CrosscheckAnnotation {
@@ -112,7 +118,7 @@ export interface ScanPRStatus {
   lastActiveAt: string
   staleAfterMs: number
   ageMs: number
-  verdict: CrosscheckVerdict | null
+  verdict: ReviewVerdict
   latestAnnotation: CrosscheckAnnotation | null
   merge?: PRMergeSummary
 }
@@ -231,7 +237,7 @@ export function derivePRStatus(input: PRStatusInput, options: DeriveStatusOption
     lastActiveAt: new Date(lastActiveMs).toISOString(),
     staleAfterMs: options.staleAfterMs,
     ageMs,
-    verdict: latestVerdict?.verdict ?? null,
+    verdict: latestVerdict?.verdict ?? 'UNREVIEWED',
     latestAnnotation: latestAnnotation?.annotation ?? null,
     ...(input.merge && { merge: input.merge }),
   }
@@ -420,17 +426,22 @@ function latestAppliedFixAfter(events: PRWorkflowLogEvent[], after: string | und
     .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0] ?? null
 }
 
+function verdictToReviewState(verdict: CrosscheckVerdict): ReviewState {
+  if (verdict === 'APPROVE') return 'APPROVED'
+  return 'NEEDS_FIX' // NEEDS_WORK and BLOCK both require a fix; severity is on the verdict field
+}
+
 function computeReviewState(latestVerdict: TimedVerdict | null, latestFix: PRWorkflowLogEvent | null): ReviewState {
-  if (!latestVerdict) return 'PR'
-  if (latestFix) return 'RECHECK'
-  return latestVerdict.verdict
+  if (!latestVerdict) return 'NEEDS_REVIEW'
+  if (latestFix) return 'NEEDS_RECHECK'
+  return verdictToReviewState(latestVerdict.verdict)
 }
 
 function nextActionForState(state: ReviewState): NextAction {
-  if (state === 'PR') return 'review'
-  if (state === 'RECHECK') return 'recheck'
-  if (state === 'NEEDS_WORK' || state === 'BLOCK' || state === 'FIX') return 'fix'
-  if (state === 'APPROVE') return 'merge'
+  if (state === 'NEEDS_REVIEW') return 'review'
+  if (state === 'NEEDS_RECHECK') return 'recheck'
+  if (state === 'NEEDS_FIX') return 'fix'
+  if (state === 'APPROVED') return 'merge'
   return null
 }
 
@@ -516,7 +527,7 @@ async function buildRepoScopes(config: Config, token: string): Promise<Array<{ o
 // This block preserves the foldPRStatus-based API that was present in staging.
 // The scan command uses the newer derivePRStatus / ScanPRStatus API above.
 
-export type PRReviewState = 'PR' | 'APPROVE' | 'NEEDS_WORK' | 'BLOCK' | 'FIX' | 'RECHECK'
+export type PRReviewState = 'NEEDS_REVIEW' | 'APPROVED' | 'NEEDS_FIX' | 'FIX_IN_PROGRESS' | 'NEEDS_RECHECK'
 export type PRNextAction = 'review' | 'fix' | 'recheck' | 'none'
 export type PRVerdict = 'APPROVE' | 'NEEDS_WORK' | 'BLOCK'
 
@@ -889,22 +900,23 @@ export function foldPRStatus(
     ? fixEvents.filter(event => event.at.getTime() > latestReview.at.getTime()).at(-1)
     : undefined
 
-  let state: PRReviewState = 'PR'
+  let state: PRReviewState = 'NEEDS_REVIEW'
   let nextAction: PRNextAction = 'review'
   const verdict = latestReview?.verdict ?? null
 
   if (latestReview) {
     if (latestReview.verdict === 'APPROVE') {
-      state = 'APPROVE'
+      state = 'APPROVED'
       nextAction = 'none'
     } else if (latestFixAfterReview?.complete) {
-      state = 'RECHECK'
+      state = 'NEEDS_RECHECK'
       nextAction = 'recheck'
     } else if (latestFixAfterReview && !latestFixAfterReview.complete) {
-      state = 'FIX'
+      state = 'FIX_IN_PROGRESS'
       nextAction = 'fix'
     } else {
-      state = latestReview.verdict
+      // NEEDS_WORK and BLOCK both land in NEEDS_FIX; severity is preserved in verdict
+      state = 'NEEDS_FIX'
       nextAction = 'fix'
     }
   }

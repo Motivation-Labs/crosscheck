@@ -90,12 +90,42 @@ PR #49 opened: implement caching layer
 ## Commands
 
 ```bash
-crosscheck init                     # check prerequisites, write starter config
 crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
-crosscheck review <pr-url>          # one-shot review of a specific PR
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck scan                     # show open PR state across monitored repos
+crosscheck kickass                  # advance stale PRs from an interactive operator queue
+crosscheck init                     # check prerequisites, write starter config
 crosscheck status                   # auth state, config summary, CLI versions
+```
+
+`--reviewer` / `--vendor` accepts aliases — `claude`, `claude-code`, `cc`, `anthropic` all route to Claude; `codex`, `openai` route to Codex.
+
+**PR state model**
+
+`crosscheck scan` tracks two independent dimensions per PR:
+
+| Workflow stage (`reviewState`) | Meaning | Next action |
+|---|---|---|
+| `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
+| `NEEDS_FIX` | Reviewed — fix requested | fix |
+| `NEEDS_RECHECK` | Fix committed, recheck pending | recheck |
+| `APPROVED` | Reviewed and approved | merge |
+
+| Verdict (`verdict`) | Meaning |
+|---|---|
+| `UNREVIEWED` | No review found |
+| `APPROVE` | AI approved |
+| `NEEDS_WORK` | AI requested changes |
+| `BLOCK` | AI hard-blocked merge |
+
+`BLOCK` and `NEEDS_WORK` both map to `NEEDS_FIX` stage — same next action, but the `verdict` field preserves severity so operators can prioritise.
+
+```bash
+crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
+crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
 ```
 
 **Continuous improvement** *(experimental)*

@@ -46,15 +46,16 @@ describe('parseCrosscheckAnnotation', () => {
 })
 
 describe('derivePRStatus', () => {
-  it('marks untouched PRs as reviewable PR state', () => {
+  it('marks untouched PRs as NEEDS_REVIEW with UNREVIEWED verdict', () => {
     const status = derivePRStatus(input(), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('PR')
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.verdict).toBe('UNREVIEWED')
     expect(status.freshness).toBe('stale')
     expect(status.nextAction).toBe('review')
   })
 
-  it('uses the latest crosscheck verdict annotation as review state', () => {
+  it('moves to APPROVED stage when verdict is APPROVE', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
@@ -63,7 +64,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('APPROVE')
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.verdict).toBe('APPROVE')
     expect(status.nextAction).toBe('merge')
     expect(status.freshness).toBe('stale')
   })
@@ -84,7 +86,8 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('fix')
   })
 
@@ -104,11 +107,12 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
   })
 
-  it('moves a PR with fix activity after review to RECHECK', () => {
+  it('moves to NEEDS_RECHECK when a fix lands after a review', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -124,7 +128,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('recheck')
     expect(status.freshness).toBe('stale')
   })
@@ -146,11 +151,27 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('recheck')
   })
 
-  it('keeps NEEDS_WORK when no fix has landed yet', () => {
+  it('BLOCK verdict lands in NEEDS_FIX stage (severity on verdict field)', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('BLOCK')
+    expect(status.nextAction).toBe('fix')
+    expect(status.freshness).toBe('stale')
+  })
+
+  it('keeps NEEDS_FIX stage when no fix has landed yet', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -159,7 +180,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('fix')
     expect(status.freshness).toBe('stale')
   })

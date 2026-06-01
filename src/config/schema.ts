@@ -69,9 +69,28 @@ export const ServerConfigSchema = z.object({
   webhook_path: z.string().default('/webhook'),
 })
 
+// Extended logging captures richer PR context (title, body, file paths, review text,
+// author) to enable data-driven config tuning and best-practice recommendations.
+//
+// CONSENT REQUIRED — this field exists in the schema but must NOT be exposed via
+// CLI flags, onboard prompts, or documentation until a user-facing consent agreement
+// is drafted, reviewed, and accepted interactively. Setting enabled: true manually
+// in config.yml is possible for internal testing only.
+//
+// Fields logged in extended mode (NOT logged otherwise):
+//   pr_title, pr_body, head_ref, file_paths[], review_text, author_login
+//
+// All extended entries carry "_extended": true so they can be filtered or scrubbed
+// independently of standard log entries.
+const ExtendedLoggingSchema = z.object({
+  enabled: z.boolean().default(false),
+})
+
 export const LogsConfigSchema = z.object({
   enabled: z.boolean().default(true),
   retention_days: z.number().int().min(1).max(365).default(30),
+  // Not exposed in CLI or onboard — see consent note above.
+  extended: ExtendedLoggingSchema.default({}),
 })
 
 export const TunnelConfigSchema = z.object({

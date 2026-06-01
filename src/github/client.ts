@@ -926,8 +926,8 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
 
   const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+    ? '_Reviewed with [Claude Code](https://claude.ai/code) via [crosscheck](https://github.com/Motivation-Labs/crosscheck)_'
+    : '_Reviewed with [OpenAI Codex](https://openai.com/codex) via [crosscheck](https://github.com/Motivation-Labs/crosscheck)_'
   const attribution = brand.reviewer_attribution || defaultAttribution
   const footer = `\n\n---\n${attribution}`
 

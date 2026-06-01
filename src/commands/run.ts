@@ -120,7 +120,7 @@ function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
     console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE (ceiling: 2 rounds)')}\n`)
   } else {
     const label = chalk.bold.yellow('half') + chalk.bold.white.bgRed('-CRAZY') + ' ' + chalk.red.bold('MODE')
-    console.log(`\n ${label} 🔥  ${chalk.dim('fix→recheck until NOT BLOCK (ceiling: 2 rounds)')}\n`)
+    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until NOT BLOCK (ceiling: 2 rounds)')}\n`)
   }
 }
 

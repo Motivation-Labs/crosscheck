@@ -384,6 +384,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         let loopRound = 1
         let loopSha = sha
 
+        // Continue when the verdict hasn't met the stop condition OR when the
+        // initial workflow applied fixes that still need a follow-up recheck.
+        // Without the fixAppliedCount clause, --half-crazy stops after a
+        // NEEDS_WORK review (which is its stop condition) even when the workflow's
+        // fix step already pushed a commit — leaving the new head unrechecked.
         while (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0)) {
           // No-progress guard: if fix ran but applied nothing, looping is futile
           if (fixAppliedCount === 0) {
@@ -445,8 +450,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             break
           }
 
-          const done = meetsCrazyStopCondition(verdict, mode)
-          console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
+          // Explicit stop when the recheck satisfies the condition, so the
+          // fixAppliedCount > 0 clause in the while predicate doesn't cause an
+          // unnecessary extra fix/recheck round against an already-approving verdict.
+          if (meetsCrazyStopCondition(verdict, mode)) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'stop_condition_met', mode, round: loopRound })
+            console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — done`)
+            break
+          }
+          console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — continuing...`)
         }
 
       }

@@ -1,7 +1,8 @@
 import { parseAnnotation, parseAnnotationFields } from './annotation.js'
-import { evaluateWhen, type WorkflowStep } from './workflow.js'
+import { evaluateWhen, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from './workflow.js'
 import type { StepResult } from './workflow.js'
 import { parseVerdict } from './verdict.js'
+import { fetchPRCommentPage, type RawPRComment } from '../github/client.js'
 
 export type StepRecordType = 'review' | 'recheck' | 'fix' | 'conflict-resolve'
 
@@ -94,23 +95,17 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
   }
 }
 
-type GHComment = { id: number; body: string; created_at: string }
-
-function parseLastPage(linkHeader: string): number | null {
-  const m = linkHeader.match(/page=(\d+)>;\s*rel="last"/)
-  return m ? parseInt(m[1], 10) : null
-}
-
 /**
  * Fetch all crosscheck step records from a PR's comment thread in chronological order.
+ * All HTTP calls go through fetchPRCommentPage in github/client.ts.
  *
  * Fast path (new annotations with next_step):
- *   1. Fetch the last page of comments to find the most recent review/recheck annotation.
- *   2. If it carries next_step, fetch only comments posted after it (via ?since=) to
- *      check for trailing fix markers — skipping the entire earlier thread.
+ *   1. Fetch the last page to find the most recent review/recheck annotation.
+ *   2. If it carries next_step, fetch only comments after it (?since=) to check for
+ *      trailing fix markers — skipping the entire earlier thread.
  *
  * Full scan fallback (legacy annotations without next_step):
- *   Read all pages from page 1. Used only when the last review predates the next_step field.
+ *   Read all pages from page 1.
  */
 export async function fetchStepHistory(
   owner: string,
@@ -118,67 +113,46 @@ export async function fetchStepHistory(
   prNumber: number,
   token: string,
 ): Promise<StepRecord[]> {
-  const base = `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`
-  const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
-
   // Fetch the first page to discover total pagination
-  const firstRes = await fetch(`${base}?per_page=100`, { headers })
-  if (!firstRes.ok) return []
-  const firstPage = await firstRes.json() as GHComment[]
+  const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
   if (firstPage.length === 0) return []
 
-  const lastPage = parseLastPage(firstRes.headers.get('link') ?? '')
-
   // ── Fast path ──────────────────────────────────────────────────────────────
-  // When the thread spans multiple pages, jump to the last page and look for
-  // the most recent review/recheck annotation with a next_step hint.
   if (lastPage !== null && lastPage > 1) {
-    const tailRes = await fetch(`${base}?per_page=100&page=${lastPage}`, { headers })
-    if (tailRes.ok) {
-      const tailPage = await tailRes.json() as GHComment[]
-      // Walk tail page in reverse to find the freshest review/recheck annotation
-      const anchor = [...tailPage].reverse().find(c => {
+    const { comments: tailPage } = await fetchPRCommentPage(owner, repo, prNumber, token, { page: lastPage })
+    const anchor = [...tailPage].reverse().find(c => {
+      const r = commentToRecord(c)
+      return r !== null && (r.type === 'review' || r.type === 'recheck') && r.next_step !== undefined
+    })
+    if (anchor) {
+      const anchorRecord = commentToRecord(anchor)!
+      const { comments: sinceComments } = await fetchPRCommentPage(owner, repo, prNumber, token, { since: anchor.created_at })
+      const seen = new Set<number>([anchorRecord.commentId])
+      const trailing: StepRecord[] = []
+      for (const c of sinceComments) {
+        if (seen.has(c.id)) continue
+        seen.add(c.id)
         const r = commentToRecord(c)
-        return r !== null && (r.type === 'review' || r.type === 'recheck') && r.next_step !== undefined
-      })
-      if (anchor) {
-        const anchorRecord = commentToRecord(anchor)!
-        // Fetch only comments posted after the anchor (the few trailing ones)
-        const sinceRes = await fetch(`${base}?per_page=100&since=${anchor.created_at}`, { headers })
-        const sinceComments: GHComment[] = sinceRes.ok ? await sinceRes.json() as GHComment[] : []
-        // sinceComments includes the anchor itself (GitHub's ?since= is inclusive-by-second),
-        // so deduplicate by ID.
-        const seen = new Set<number>([anchorRecord.commentId])
-        const trailing: StepRecord[] = []
-        for (const c of sinceComments) {
-          if (seen.has(c.id)) continue
-          seen.add(c.id)
-          const r = commentToRecord(c)
-          if (r) trailing.push(r)
-        }
-        return [anchorRecord, ...trailing]
+        if (r) trailing.push(r)
       }
+      return [anchorRecord, ...trailing]
     }
   }
 
   // ── Full scan fallback ─────────────────────────────────────────────────────
-  const records: StepRecord[] = []
-  const allPages: GHComment[][] = [firstPage]
+  const allComments: RawPRComment[] = [...firstPage]
   let page = 2
   while (true) {
-    const res = await fetch(`${base}?per_page=100&page=${page}`, { headers })
-    if (!res.ok) break
-    const data = await res.json() as GHComment[]
-    if (data.length === 0) break
-    allPages.push(data)
-    if (data.length < 100) break
+    const { comments } = await fetchPRCommentPage(owner, repo, prNumber, token, { page })
+    if (comments.length === 0) break
+    allComments.push(...comments)
+    if (comments.length < 100) break
     page++
   }
-  for (const batch of allPages) {
-    for (const comment of batch) {
-      const record = commentToRecord(comment)
-      if (record) records.push(record)
-    }
+  const records: StepRecord[] = []
+  for (const comment of allComments) {
+    const record = commentToRecord(comment)
+    if (record) records.push(record)
   }
   return records
 }
@@ -242,13 +216,23 @@ export function identifyNextWorkflowStep(
       const lastFix = historyAfterReview.filter(r => r.type === 'fix').at(-1)
       const fixPushedSha = lastFix?.pushedSha
       if (fixPushedSha !== undefined && fixPushedSha === currentSha) {
-        // currentSha is confirmed to be the fix commit → recheck is appropriate
+        // currentSha is confirmed to be the fix commit → recheck is appropriate.
+        // Use an explicit recheck step from the workflow when present; otherwise
+        // synthesize one from the review step so the fixed commit is not silently
+        // treated as "complete" without any verification.
         const recheckStep = steps.find(s => s.type === 'recheck')
         const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
-        if (recheckStep) {
-          return { step: recheckStep, reviewComment, hasExistingReview: true, round: lastReview.round, history }
-        }
-        return { step: null, hasExistingReview: true, round: lastReview.round, history }
+        const effectiveRecheck: WorkflowStep = recheckStep ?? (() => {
+          const reviewBase = steps.find(s => s.type === 'review')
+          return {
+            ...(reviewBase ?? { reviewer: 'auto' as const, max_rounds: 1 }),
+            name: 'recheck',
+            type: 'recheck' as const,
+            when: undefined,
+            instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+          }
+        })()
+        return { step: effectiveRecheck, reviewComment, hasExistingReview: true, round: lastReview.round, history }
       }
       // pushedSha unknown or doesn't match currentSha — human pushed on top of
       // the fix commit, or fix_applied is a legacy marker without a commit URL.

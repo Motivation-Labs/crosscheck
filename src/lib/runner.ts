@@ -481,9 +481,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const nextStepAnnotation = nextWorkflowStep?.type ?? 'none'
 
+        // Read the actual HEAD from the checkout: after an in-run fix step pushes a
+        // new commit, pr.head.sha is still the pre-fix SHA and would make the recheck
+        // annotation look stale to the step detector on the next run.
+        let annotationSha = pr.head.sha
+        try {
+          annotationSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+        } catch { /* fall back to pr.head.sha if git is unavailable */ }
+
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`

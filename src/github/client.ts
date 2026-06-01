@@ -788,6 +788,37 @@ export async function getLastCrossCheckReviewComment(
   return lastComment
 }
 
+export type RawPRComment = { id: number; body: string; created_at: string }
+
+/**
+ * Fetch one page of PR issue comments. All raw GitHub API calls for PR comments
+ * are routed through this function so auth headers and URL construction stay in
+ * the client layer.
+ *
+ * Returns the comments and the last-page number parsed from the Link header
+ * (null when there is only one page or the header is absent).
+ */
+export async function fetchPRCommentPage(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+  opts: { page?: number; since?: string } = {},
+): Promise<{ comments: RawPRComment[]; lastPage: number | null }> {
+  const params = new URLSearchParams({ per_page: '100' })
+  if (opts.page !== undefined) params.set('page', String(opts.page))
+  if (opts.since !== undefined) params.set('since', opts.since)
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?${params}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return { comments: [], lastPage: null }
+  const comments = await res.json() as RawPRComment[]
+  const link = res.headers.get('link') ?? ''
+  const m = link.match(/page=(\d+)>;\s*rel="last"/)
+  return { comments, lastPage: m ? parseInt(m[1], 10) : null }
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,

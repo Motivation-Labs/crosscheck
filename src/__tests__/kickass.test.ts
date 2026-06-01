@@ -135,7 +135,7 @@ describe('buildKickassRunArgs', () => {
       reviewState: 'NEEDS_RECHECK',
     })], 'halfcrazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'halfcrazy')
-    expect(args).toContain('--halfcrazy')
+    expect(args).toContain('--half-crazy')
     expect(args).not.toContain('--crazy')
   })
 

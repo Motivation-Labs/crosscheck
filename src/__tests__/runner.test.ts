@@ -271,6 +271,19 @@ describe('buildWorkflowCompleteEvent', () => {
     expect('total_tokens' in ev).toBe(false)
   })
 
+  it('omits split fields when no step has input/output token splits', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review: { verdict: 'NEEDS_WORK', tokens_used: 5000, vendor: 'codex' },
+        fix:    { applied_count: 1, tokens_used: 3000, vendor: 'claude' },
+      },
+    })
+    expect(ev.total_tokens).toBe(8000)
+    expect('total_input_tokens' in ev).toBe(false)
+    expect('total_output_tokens' in ev).toBe(false)
+  })
+
   it('collects unique vendors_used across steps', () => {
     const ev = buildWorkflowCompleteEvent({
       ...base,

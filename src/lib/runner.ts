@@ -112,8 +112,11 @@ export function buildWorkflowCompleteEvent(
   const now = inputs.now ?? Date.now()
 
   const totalTokens = stepValues.reduce((s, r) => s + (r.tokens_used ?? 0), 0)
-  const totalInputTokens = stepValues.reduce((s, r) => s + (r.input_tokens ?? 0), 0)
-  const totalOutputTokens = stepValues.reduce((s, r) => s + (r.output_tokens ?? 0), 0)
+  // Only emit split fields when at least one step actually recorded them — avoid
+  // emitting 0/0 for codex-only or fix-only workflows where splits are unavailable.
+  const hasSplits = stepValues.some(r => r.input_tokens !== undefined || r.output_tokens !== undefined)
+  const totalInputTokens = hasSplits ? stepValues.reduce((s, r) => s + (r.input_tokens ?? 0), 0) : undefined
+  const totalOutputTokens = hasSplits ? stepValues.reduce((s, r) => s + (r.output_tokens ?? 0), 0) : undefined
   const vendorsUsed = [...new Set(stepValues.map(r => r.vendor).filter(Boolean))]
 
   return {
@@ -127,7 +130,7 @@ export function buildWorkflowCompleteEvent(
     last_verdict: lastVerdict,
     ended_reason: endedReason,
     total_duration_ms: now - inputs.workflowStart,
-    ...(totalTokens > 0 && { total_tokens: totalTokens, total_input_tokens: totalInputTokens, total_output_tokens: totalOutputTokens }),
+    ...(totalTokens > 0 && { total_tokens: totalTokens, ...(hasSplits && { total_input_tokens: totalInputTokens, total_output_tokens: totalOutputTokens }) }),
     ...(vendorsUsed.length > 0 && { vendors_used: vendorsUsed }),
     ...(inputs.qualityTier !== undefined && { quality_tier: inputs.qualityTier }),
     ...(inputs.round !== undefined && { round: inputs.round }),
@@ -879,7 +882,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'warn', event: 'conflict_resolved_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
       }
 
-      results[step.name] = { applied_count: appliedCount, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }) }
+      results[step.name] = { applied_count: appliedCount, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }), vendor }
     }
   }
 

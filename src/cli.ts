@@ -121,7 +121,7 @@ program
     const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     const concurrent = opts.concurrent === undefined ? undefined
       : opts.concurrent === true ? 0
-      : parseInt(opts.concurrent, 10)
+      : Number(opts.concurrent)
     void runKickass({ ...opts, roundMode, concurrent })
   })
 

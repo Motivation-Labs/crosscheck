@@ -549,7 +549,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec),
           )
         }
         return runFixStep(

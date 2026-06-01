@@ -268,7 +268,7 @@ export async function runCodexFixStep(
   try {
     await execa(
       'codex',
-      ['--full-auto', ...modelArgs, prompt],
+      ['exec', ...modelArgs, prompt],
       {
         cwd: tmpDir,
         timeout: resolvedTimeout,
@@ -283,8 +283,12 @@ export async function runCodexFixStep(
     throw err
   }
 
-  // Count changed files — codex applies edits directly so git diff is the source of truth
+  // Count all files codex touched: modified/deleted (git diff) + newly created (git ls-files --others)
   const changedOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf8' }).trim()
-  const appliedCount = changedOutput ? changedOutput.split('\n').filter(Boolean).length : 0
-  return { appliedCount }
+  const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const changedFiles = [
+    ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
+    ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
+  ]
+  return { appliedCount: changedFiles.length }
 }

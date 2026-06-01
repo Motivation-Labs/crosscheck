@@ -5,6 +5,11 @@ export const VendorConfigSchema = z.object({
   model: z.string().nullable().default(null),
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
   effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+  // Max wall-clock seconds for a single CLI invocation before it is killed.
+  // null = use the reviewer's built-in default (claude: 180s; codex: tier-based,
+  // 300/600/1200s for fast/balanced/thorough). Raise this for large PRs that
+  // legitimately need longer than the default to finish.
+  timeout_sec: z.number().int().positive().nullable().default(null),
 })
 
 // Codex-specific vendor config. The `quality` field is retained for

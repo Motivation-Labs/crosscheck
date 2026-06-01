@@ -127,12 +127,14 @@ program
   .option('--halfcrazy', '(deprecated alias for --half-crazy)')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .option('--concurrent [n]', 'run PRs in parallel; omit n for one agent per selected PR, or set a cap (e.g. --concurrent 3)')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true }) => {
+  .option('--stagger <ms>', 'ms delay between concurrent worker starts; default 2000 when --concurrent is set')
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true; stagger?: string }) => {
     const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     const concurrent = opts.concurrent === undefined ? undefined
       : opts.concurrent === true ? 0
       : Number(opts.concurrent)
-    void runKickass({ ...opts, roundMode, concurrent })
+    const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
+    void runKickass({ ...opts, roundMode, concurrent, staggerMs })
   })
 
 program

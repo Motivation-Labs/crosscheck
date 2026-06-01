@@ -21,6 +21,7 @@ export interface KickassOpts {
   roundMode?: 'crazy' | 'halfcrazy'
   timeout?: string
   concurrent?: number  // parallel agents; 0 = one per selected PR; undefined/1 = sequential
+  staggerMs?: number  // ms delay between concurrent worker starts; default 2000 when concurrent > 1
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
@@ -139,10 +140,11 @@ export async function runKickassWithDeps(
     const resolvedConcurrency = opts.concurrent === 0
       ? selected.length
       : Math.max(1, opts.concurrent ?? 1)
+    const resolvedStagger = resolvedConcurrency > 1 ? (opts.staggerMs ?? 2_000) : 0
     if (resolvedConcurrency > 1) {
-      console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel`))
+      console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel (${resolvedStagger}ms stagger)`))
     }
-    const results = await executeKickassPlan(plan, deps, resolvedConcurrency)
+    const results = await executeKickassPlan(plan, deps, resolvedConcurrency, resolvedStagger)
     printExecutionSummary(results)
     if (results.some(result => result.status === 'failed')) {
       process.exitCode = 2
@@ -226,6 +228,7 @@ export async function executeKickassPlan(
   plan: PreflightItem[],
   deps: ExecuteKickassDeps,
   concurrency = 1,
+  staggerMs = 0,
 ): Promise<KickassExecutionResult[]> {
   const results: KickassExecutionResult[] = new Array(plan.length)
 
@@ -291,16 +294,22 @@ export async function executeKickassPlan(
     for (let i = 0; i < plan.length; i++) await executeItem(plan[i], i)
   } else {
     // Worker-pool: up to `concurrency` PRs run in parallel.
-    // Each worker claims the next index atomically (ptr++ is sync) so there
-    // are no races even though multiple workers share the counter.
+    // staggerMs > 0 delays each worker's start by (workerIdx * staggerMs) to spread
+    // concurrent subprocess startup API calls over time rather than hitting GitHub simultaneously.
     let ptr = 0
-    const worker = async (): Promise<void> => {
+    const makeWorker = (workerIdx: number) => async (): Promise<void> => {
+      if (staggerMs > 0 && workerIdx > 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, workerIdx * staggerMs))
+      }
       while (ptr < plan.length) {
         const i = ptr++
         await executeItem(plan[i], i)
       }
     }
-    await Promise.all(Array.from({ length: Math.min(concurrency, plan.length) }, worker))
+    await Promise.all(Array.from(
+      { length: Math.min(concurrency, plan.length) },
+      (_, idx) => makeWorker(idx)(),
+    ))
   }
 
   // Retry transient failures up to 4 times with escalating delays.

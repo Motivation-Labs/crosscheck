@@ -212,3 +212,83 @@ export async function runFixStep(
 
   return { appliedCount, tokensUsed }
 }
+
+// Codex fix: codex is an agentic tool that edits files directly on disk.
+// We pass the fix context as a prompt, run codex in full-auto mode, then
+// detect how many files changed via git diff rather than parsing edit blocks.
+const CODEX_FIX_PROMPT = `You opened a pull request that received the following code review.
+
+PR title: {PR_TITLE}
+
+Code review comment:
+---
+{REVIEW_COMMENT}
+---
+
+Diff of your changes (base..head):
+---
+{DIFF}
+---
+
+{EXTRA_INSTRUCTIONS}
+
+Please address the issues raised in the review. Rules:
+- Only fix what the review explicitly calls out
+- Do not refactor unrelated code, rename variables, or add tests unless asked
+- If a comment requires deeper understanding of business logic, skip it
+- If there are no actionable code changes, exit immediately without modifying any files`
+
+export async function runCodexFixStep(
+  tmpDir: string,
+  baseRef: string,
+  prTitle: string,
+  reviewComment: string,
+  instructions: string,
+  model = 'default',
+  timeoutMs?: number,
+): Promise<{ appliedCount: number; tokensUsed?: number }> {
+  let diff = ''
+  try {
+    diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
+  } catch {
+    try {
+      diff = execSync('git diff HEAD~1', { cwd: tmpDir, encoding: 'utf8' })
+    } catch { /* proceed with empty diff */ }
+  }
+
+  const prompt = CODEX_FIX_PROMPT
+    .replace('{PR_TITLE}', prTitle)
+    .replace('{REVIEW_COMMENT}', reviewComment.slice(0, 8000))
+    .replace('{DIFF}', diff.slice(0, 16000))
+    .replace('{EXTRA_INSTRUCTIONS}', instructions ? `Additional instructions: ${instructions}` : '')
+
+  const resolvedTimeout = timeoutMs === undefined ? 300_000 : timeoutMs === 0 ? undefined : timeoutMs
+  const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
+
+  try {
+    await execa(
+      'codex',
+      ['exec', ...modelArgs, prompt],
+      {
+        cwd: tmpDir,
+        timeout: resolvedTimeout,
+        env: { ...process.env, CODEX_QUIET_MODE: '1', HOME: process.env.HOME ?? '' },
+      },
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not logged in|auth|credential/i.test(msg)) {
+      throw new Error('codex auth failure during fix step — run: codex login')
+    }
+    throw err
+  }
+
+  // Count all files codex touched: modified/deleted (git diff) + newly created (git ls-files --others)
+  const changedOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: tmpDir, encoding: 'utf8' }).trim()
+  const changedFiles = [
+    ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
+    ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
+  ]
+  return { appliedCount: changedFiles.length }
+}

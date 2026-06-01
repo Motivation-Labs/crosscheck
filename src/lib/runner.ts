@@ -278,10 +278,10 @@ function classifyFile(filePath: string): string {
   const ext = lower.split('.').pop() ?? ''
   if (/\.(test|spec)\.[jt]sx?$/.test(lower) || /(\/__tests__\/|\/test\/|\/spec\/)/.test(lower)) return 'test'
   if (/\.(md|mdx|rst|txt)$/.test(lower)) return 'docs'
-  if (/\.(dockerfile|tf|hcl)$/.test(ext) || lower === 'dockerfile' || /\/(\.github|infra|k8s|docker|ci\/)/.test(lower)) return 'infra'
+  if (/^(dockerfile|tf|hcl)$/.test(ext) || lower === 'dockerfile' || /\/(\.github|infra|k8s|docker|ci\/)/.test(lower)) return 'infra'
   if (/\.(css|scss|sass|less|html|svelte|vue)$/.test(lower) || /\.(tsx|jsx)$/.test(lower)) return 'frontend'
   if (/\/(components|pages|views|ui|client|browser|public|assets|styles)/.test(lower)) return 'frontend'
-  if (/\.(json|yml|yaml|toml|ini|cfg|env|lock)$/.test(ext)) return 'config'
+  if (/^(json|yml|yaml|toml|ini|cfg|env|lock)$/.test(ext)) return 'config'
   if (['ts', 'js', 'mjs', 'cjs', 'py', 'go', 'java', 'rb', 'rs', 'cs', 'cpp', 'cc', 'php', 'kt', 'swift'].includes(ext)) return 'backend'
   return 'other'
 }
@@ -773,7 +773,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (appliedCount === 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
-        results[step.name] = { applied_count: 0 }
+        results[step.name] = { applied_count: 0, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }) }
         continue
       }
 
@@ -879,7 +879,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'warn', event: 'conflict_resolved_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
       }
 
-      results[step.name] = { applied_count: appliedCount }
+      results[step.name] = { applied_count: appliedCount, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }) }
     }
   }
 

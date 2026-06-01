@@ -29,7 +29,7 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
     `Pushed [\`${shortSha}\`](${commitUrl})${backlink}: **${appliedCount} change${plural} applied**.`,
     '',
     '---',
-    '_Applied by crosscheck via Claude Code._',
+    '_Applied by Claude Code via crosscheck._',
     '',
     '<!-- crosscheck: fix_applied -->',
   ].join('\n')
@@ -63,7 +63,7 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
     `Pushed [\`${shortSha}\`](${commitUrl}).`,
     '',
     '---',
-    '_Resolved by crosscheck via Claude Code._',
+    '_Resolved by Claude Code via crosscheck._',
     '',
     '<!-- crosscheck: conflict_resolved -->',
   ].join('\n')

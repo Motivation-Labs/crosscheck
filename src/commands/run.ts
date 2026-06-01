@@ -29,6 +29,7 @@ export interface RunOpts {
   }
   expectedHeadSha?: string
   timeout?: string
+  noTimeout?: boolean
 }
 
 const CRAZY_ROUND_CEILING = 2
@@ -117,10 +118,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     process.exit(1)
   }
 
-  // crazy/halfcrazy lift all constraints including the reviewer timeout (0 = no cap).
+  // crazy/halfcrazy (or --no-timeout) lift all constraints including the reviewer timeout (0 = no cap).
   // Otherwise parse the user-supplied --timeout value; undefined keeps each reviewer's default.
   let reviewerTimeoutMs: number | undefined
-  if (opts.roundMode) {
+  if (opts.roundMode || opts.noTimeout) {
     reviewerTimeoutMs = 0
   } else if (opts.timeout) {
     try {

@@ -88,7 +88,8 @@ program
   .option('--crazy', 'loop fix→recheck until APPROVE (ceiling: 2 rounds); disables all timeout constraints')
   .option('--halfcrazy', 'loop fix→recheck until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfcrazy?: boolean; timeout?: string }) => {
+  .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--halfcrazy; used internally by kickass fix legs)')
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfcrazy?: boolean; timeout?: string; noTimeout?: boolean }) => {
     const roundMode = opts.crazy ? 'crazy' : opts.halfcrazy ? 'halfcrazy' : undefined
     void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode })
   })

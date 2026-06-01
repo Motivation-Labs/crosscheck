@@ -302,8 +302,11 @@ export function buildKickassRunArgs(
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+  } else if (roundMode) {
+    // fix legs don't loop, but still need the no-timeout constraint lifted
+    args.push('--no-timeout')
   }
-  // crazy/halfcrazy lift all timeout constraints; don't forward --timeout in those modes
+  // forward user-specified --timeout for runs that aren't already in a round mode
   if (timeout && !roundMode) args.push('--timeout', timeout)
   return args
 }

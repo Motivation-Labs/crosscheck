@@ -497,14 +497,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        // Set a pending status on the pushed commit so the final release (in the
-        // runner's finally or the crazy/halfcrazy loop) can mark it success/failure.
-        // Without this, branch-protection checks requiring crosscheck/review on HEAD
-        // would leave the pushed commit permanently unreviewed.
+        // Set a pending status on the pushed commit so branch-protection checks
+        // requiring crosscheck/review on HEAD don't leave the commit unreviewed.
+        //
+        // Only enqueue for release if a review/recheck step follows in THIS
+        // workflow invocation. Fix-only runs (e.g. `--steps fix` dispatched by
+        // kickass) must leave the status pending so the separately-dispatched
+        // recheck can claim and release it — releasing as success here would
+        // mark the commit reviewed before any recheck has run.
         try {
           const lockOctokit = createGithubClient(token)
           await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
-          pushedShasNeedingRelease.push(newSha)
+          const currentStepIdx = steps.indexOf(step)
+          const hasRecheckAfterFix = steps.slice(currentStepIdx + 1).some(s => s.type === 'review' || s.type === 'recheck')
+          if (hasRecheckAfterFix) {
+            pushedShasNeedingRelease.push(newSha)
+          }
         } catch (err) {
           fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
         }

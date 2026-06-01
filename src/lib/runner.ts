@@ -497,6 +497,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
+        // Set a pending status on the pushed commit so the final release (in the
+        // runner's finally or the crazy/halfcrazy loop) can mark it success/failure.
+        // Without this, branch-protection checks requiring crosscheck/review on HEAD
+        // would leave the pushed commit permanently unreviewed.
+        try {
+          const lockOctokit = createGithubClient(token)
+          await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
+          pushedShasNeedingRelease.push(newSha)
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
+        }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
 

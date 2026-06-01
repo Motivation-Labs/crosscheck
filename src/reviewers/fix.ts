@@ -79,6 +79,7 @@ export async function runFixStep(
   instructions: string,
   config: Config,
   model = 'default',
+  timeoutMs?: number,
 ): Promise<{ appliedCount: number; tokensUsed?: number }> {
   let diff = ''
   try {
@@ -99,9 +100,10 @@ export async function runFixStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
+    const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
       input: prompt,
-      timeout: 180_000,
+      timeout: resolvedTimeout,
       env: { ...process.env },
     })
     const raw = stdout.trim()

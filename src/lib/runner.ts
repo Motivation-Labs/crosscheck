@@ -426,7 +426,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
@@ -441,7 +441,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
         try {
           ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
           ))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
@@ -645,7 +645,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel,
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)

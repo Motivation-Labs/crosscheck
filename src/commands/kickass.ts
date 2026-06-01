@@ -72,6 +72,15 @@ export async function runKickassWithDeps(
     process.exit(1)
   }
 
+  if (opts.timeout) {
+    try {
+      parseDuration(opts.timeout)
+    } catch {
+      console.error(chalk.red(`✗ Invalid --timeout value "${opts.timeout}". Use a duration like 300s or 10m.`))
+      process.exit(1)
+    }
+  }
+
   try {
     const scan = await deps.loadScanResult({ force: opts.force, staleAfterMs })
 

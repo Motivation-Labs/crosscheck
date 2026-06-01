@@ -284,7 +284,7 @@ describe('scanOpenPRStatuses', () => {
     const result = await scanOpenPRStatuses(scopes, defaultConfig, 'token')
 
     expect(result.statuses).toHaveLength(1)
-    expect(result.statuses[0].state).toBe('APPROVE')
+    expect(result.statuses[0].state).toBe('APPROVED')
     expect(result.statuses[0].lastActive.toISOString()).toBe('2026-01-01T01:05:00.000Z')
     expect(result.failures).toEqual([])
     expect(mockListPRComments).toHaveBeenCalledWith('acme', 'api', 1, 'token')

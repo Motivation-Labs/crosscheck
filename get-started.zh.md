@@ -823,11 +823,13 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: o4-mini          # 仅在 auth: api-key 时生效
+    # timeout_sec: 1200     # 单次 CLI 调用最大秒数；不设 = 按 tier（300/600/1200）
 
   claude:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
+    # timeout_sec: 1200     # 单次 CLI 调用最大秒数；不设 = 180。大 PR 可调高。
 
 # ── 质量 ───────────────────────────────────────────────────────────────────
 quality:

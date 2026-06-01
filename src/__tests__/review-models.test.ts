@@ -13,6 +13,7 @@ const codexVendor = (auth: CodexVendorConfig['auth'], model: string | null = nul
   model,
   effort: 'medium',
   quality: 'medium',
+  timeout_sec: null,
 })
 
 describe('review model resolution', () => {

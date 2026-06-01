@@ -15,10 +15,10 @@ function makeConfig(claudeEnabled: boolean, codexEnabled: boolean): Config {
     quality: { tier: 'balanced', focus: [], custom_prompt: undefined },
     budget: { codex_monthly_usd: null, per_review_usd: 1 },
     vendors: {
-      claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium' },
-      codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium' },
+      claude: { enabled: claudeEnabled, model: null, auth: 'subscription', effort: 'medium', timeout_sec: null },
+      codex: { enabled: codexEnabled, model: null, auth: 'subscription', effort: 'medium', quality: 'medium', timeout_sec: null },
     },
-    logs: { enabled: false, retention_days: 7 },
+    logs: { enabled: false, retention_days: 7, extended: { enabled: false } },
     tunnel: { backend: 'localhost.run', smee_channel: '' },
     impact: { assumed_human_review_minutes: 60, hourly_rate_usd: 150, defect_cost_usd: 150 },
     backtrace: { enabled: false },

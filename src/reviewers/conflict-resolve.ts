@@ -124,6 +124,7 @@ export async function runConflictResolveStep(
   prTitle: string,
   instructions: string,
   model = 'default',
+  timeoutMs?: number,
 ): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
   const conflictedFiles = findConflictedFiles(tmpDir)
   if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
@@ -138,9 +139,10 @@ export async function runConflictResolveStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
+    const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
       input: prompt,
-      timeout: 180_000,
+      timeout: resolvedTimeout,
       env: { ...process.env },
     })
     const raw = stdout.trim()

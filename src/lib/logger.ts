@@ -21,10 +21,14 @@ export type ErrorCategory =
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 
 let _enabled = false
+let _extendedEnabled = false
 let _logFile = ''
 
 export function initLogger(config: LogsConfig): void {
   _enabled = config.enabled
+  // Extended logging requires both logs.enabled AND logs.extended.enabled.
+  // Not exposed via CLI — consent agreement must be in place before activation.
+  _extendedEnabled = _enabled && (config.extended?.enabled ?? false)
   if (!_enabled) return
 
   mkdirSync(LOG_DIR, { recursive: true })
@@ -49,6 +53,26 @@ export function log(entry: LogEntry): void {
   try {
     appendFileSync(_logFile, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n')
   } catch { /* best-effort — never crash the main process */ }
+}
+
+// logExtended emits richer PR context fields (title, body, file paths, review text,
+// author) that are deliberately excluded from standard logs for privacy reasons.
+//
+// Only fires when logs.extended.enabled = true in config. All entries carry
+// "_extended": true so they can be filtered or scrubbed independently.
+//
+// DO NOT call this function without user consent on file. The activation path
+// (consent prompt + config write) has not been implemented yet — this function
+// exists so call sites can be wired up ahead of the consent agreement being drafted.
+export function logExtended(entry: LogEntry): void {
+  if (!_extendedEnabled || !_logFile) return
+  try {
+    appendFileSync(_logFile, JSON.stringify({ ts: new Date().toISOString(), _extended: true, ...entry }) + '\n')
+  } catch { /* best-effort */ }
+}
+
+export function isExtendedLoggingEnabled(): boolean {
+  return _extendedEnabled
 }
 
 export function classifyError(message: string): ErrorCategory {

@@ -2,6 +2,7 @@ import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
+import { CROSSCHECK_REPO_URL } from '../lib/product.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -926,8 +927,8 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
 
   const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+    ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+    : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   const attribution = brand.reviewer_attribution || defaultAttribution
   const footer = `\n\n---\n${attribution}`
 

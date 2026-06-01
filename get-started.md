@@ -478,7 +478,8 @@ crosscheck run https://github.com/owner/repo/pull/123
 crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
 crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
 crosscheck run https://github.com/owner/repo/pull/123 --dry-run
-crosscheck run https://github.com/owner/repo/pull/123 --expected-head-sha abc1234
+crosscheck run https://github.com/owner/repo/pull/123 --crazy   # loop until APPROVE
+crosscheck run https://github.com/owner/repo/pull/123 --halfcrazy
 ```
 
 The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
@@ -489,6 +490,8 @@ The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root
 | `--steps <list>` | Run only the listed step types, comma-separated: `review`, `fix`, `recheck` |
 | `--dry-run` | Run the review but do not post a comment or apply fixes |
 | `--expected-head-sha <sha>` | Skip if the PR head changed since the command was queued |
+| `--crazy` | After the initial run, loop fix→recheck until APPROVE (ceiling: 2 rounds) |
+| `--halfcrazy` | After the initial run, loop until verdict is not BLOCK — stops at NEEDS\_WORK or APPROVE |
 | `-c, --config <path>` | Use a specific config file |
 
 ---
@@ -515,18 +518,24 @@ crosscheck scan --json
 
 ### `crosscheck kickass`
 
-Selects stale PRs from the operator queue and advances each one with the safest next action: review, fix, recheck, or merge. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
+Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
+
+Fix actions dispatch a full fix→recheck cycle in one invocation, honoring the `max_rounds` setting in your `workflow.yml`.
 
 ```bash
 crosscheck kickass --dry-run
 crosscheck kickass --force --stale-after 2h
+crosscheck kickass --crazy        # loop fix→recheck until APPROVE (ceiling: 2 rounds)
+crosscheck kickass --halfcrazy    # loop until verdict is not BLOCK
 ```
 
 | Flag | Description |
 |---|---|
 | `--dry-run` | Print the selected actions without mutating PRs |
 | `--force` | Bypass the short-lived scan cache |
-| `--stale-after <duration>` | Only queue PRs stale for at least this duration |
+| `--stale-after <duration>` | Only show PRs stale for at least this duration |
+| `--crazy` | Autonomous loop: keep running fix→recheck cycles until APPROVE (ceiling: 2 rounds per PR) |
+| `--halfcrazy` | Autonomous loop: keep running until verdict is not BLOCK — NEEDS\_WORK is acceptable |
 
 ---
 
@@ -872,11 +881,13 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: o4-mini          # only used when auth: api-key
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
+    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:

@@ -776,7 +776,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (appliedCount === 0) {
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: resolveTokensUsed })
-        results[step.name] = { applied_count: 0, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }) }
+        results[step.name] = { applied_count: 0, ...(resolveTokensUsed !== undefined && { tokens_used: resolveTokensUsed }), vendor }
         continue
       }
 

@@ -18,6 +18,7 @@ export interface KickassOpts {
   staleAfter?: string
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
+  timeout?: string
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
@@ -277,6 +278,7 @@ export function printExecutionSummary(results: KickassExecutionResult[]): void {
 export function buildKickassRunArgs(
   itemOrPR: PreflightItem | PRStatus,
   roundMode?: 'crazy' | 'halfcrazy',
+  timeout?: string,
 ): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
@@ -292,6 +294,8 @@ export function buildKickassRunArgs(
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
   }
+  // crazy/halfcrazy lift all timeout constraints; don't forward --timeout in those modes
+  if (timeout && !roundMode) args.push('--timeout', timeout)
   return args
 }
 
@@ -350,7 +354,7 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     },
     dispatchRun: async (item) => {
       const invocation = getCli()
-      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode)], { stdio: 'inherit' })
+      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)], { stdio: 'inherit' })
     },
   }
 }

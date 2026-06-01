@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import chalk from 'chalk'
+import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
@@ -27,6 +28,7 @@ export interface RunOpts {
     body: string
   }
   expectedHeadSha?: string
+  timeout?: string
 }
 
 const CRAZY_ROUND_CEILING = 2
@@ -113,6 +115,20 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   if (opts.roundMode && opts.dryRun) {
     console.error(chalk.red(`✗ --${opts.roundMode} and --dry-run are mutually exclusive`))
     process.exit(1)
+  }
+
+  // crazy/halfcrazy lift all constraints including the reviewer timeout (0 = no cap).
+  // Otherwise parse the user-supplied --timeout value; undefined keeps each reviewer's default.
+  let reviewerTimeoutMs: number | undefined
+  if (opts.roundMode) {
+    reviewerTimeoutMs = 0
+  } else if (opts.timeout) {
+    try {
+      reviewerTimeoutMs = parseDuration(opts.timeout)
+    } catch {
+      console.error(chalk.red(`✗ Invalid --timeout value "${opts.timeout}". Use a duration like 300s or 10m.`))
+      process.exit(1)
+    }
   }
 
   const config = loadConfig(opts.config)
@@ -331,6 +347,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         // crazy/halfcrazy bypass per-step max_rounds; the outer ceiling is the only cap
         overrideMaxRounds: opts.roundMode ? Infinity : undefined,
         roundMode: opts.roundMode,
+        overrideTimeoutMs: reviewerTimeoutMs,
       }
 
       let workflowResult = await runWorkflow({

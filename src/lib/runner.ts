@@ -196,6 +196,9 @@ export interface WorkflowContext {
   // Loop mode set by --crazy / --halfcrazy. Included in review_complete and
   // step_skipped log events so operators can filter loop activity in logs.
   roundMode?: 'crazy' | 'halfcrazy'
+  // Reviewer subprocess timeout override. 0 = no cap (crazy/halfcrazy).
+  // When undefined, each reviewer uses its built-in default.
+  overrideTimeoutMs?: number
 }
 
 export interface WorkflowResult {
@@ -312,9 +315,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let tokensUsed: number | undefined
       let model = 'default'
       if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs))
       } else {
-        ;({ review: rawReview, tokensUsed, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions))
+        ;({ review: rawReview, tokensUsed, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -423,7 +426,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
@@ -438,7 +441,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
         try {
           ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config,
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
           ))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
@@ -642,7 +645,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel,
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs,
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)

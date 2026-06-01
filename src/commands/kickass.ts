@@ -18,6 +18,7 @@ export interface KickassOpts {
   staleAfter?: string
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
+  timeout?: string
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
@@ -69,6 +70,15 @@ export async function runKickassWithDeps(
   } catch (err: unknown) {
     console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`))
     process.exit(1)
+  }
+
+  if (opts.timeout) {
+    try {
+      parseDuration(opts.timeout)
+    } catch {
+      console.error(chalk.red(`✗ Invalid --timeout value "${opts.timeout}". Use a duration like 300s or 10m.`))
+      process.exit(1)
+    }
   }
 
   try {
@@ -277,6 +287,7 @@ export function printExecutionSummary(results: KickassExecutionResult[]): void {
 export function buildKickassRunArgs(
   itemOrPR: PreflightItem | PRStatus,
   roundMode?: 'crazy' | 'halfcrazy',
+  timeout?: string,
 ): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
@@ -291,7 +302,12 @@ export function buildKickassRunArgs(
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+  } else if (roundMode) {
+    // fix legs don't loop, but still need the no-timeout constraint lifted
+    args.push('--no-timeout')
   }
+  // forward user-specified --timeout for runs that aren't already in a round mode
+  if (timeout && !roundMode) args.push('--timeout', timeout)
   return args
 }
 
@@ -350,7 +366,7 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     },
     dispatchRun: async (item) => {
       const invocation = getCli()
-      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode)], { stdio: 'inherit' })
+      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)], { stdio: 'inherit' })
     },
   }
 }

@@ -1,4 +1,4 @@
-const DURATION_RE = /^([1-9]\d*)([mhd])$/
+const DURATION_RE = /^([1-9]\d*)(s|sec|m|min|mins|h|d)$/
 const MINUTE_MS = 60 * 1000
 const HOUR_MS = 60 * MINUTE_MS
 const DAY_MS = 24 * HOUR_MS
@@ -6,12 +6,13 @@ const DAY_MS = 24 * HOUR_MS
 export function parseDuration(input: string): number {
   const match = input.trim().match(DURATION_RE)
   if (!match) {
-    throw new Error('Invalid duration. Use a positive duration like 30m, 2h, or 1d.')
+    throw new Error('Invalid duration. Use a positive duration like 300s, 30m, 2h, or 1d.')
   }
 
   const value = Number(match[1])
   const unit = match[2]
-  if (unit === 'm') return value * MINUTE_MS
+  if (unit === 's' || unit === 'sec') return value * 1000
+  if (unit === 'm' || unit === 'min' || unit === 'mins') return value * MINUTE_MS
   if (unit === 'h') return value * HOUR_MS
   return value * DAY_MS
 }

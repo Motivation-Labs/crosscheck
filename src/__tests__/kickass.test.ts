@@ -306,7 +306,7 @@ describe('runKickassWithDeps', () => {
 
     expect(results).toEqual([{ pr: selected, status: 'executed' }])
     expect(dispatched).toEqual([
-      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789'] },
+      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789', '--no-timeout'] },
       { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--steps', 'recheck', '--expected-head-sha', 'def987654321', '--crazy'] },
     ])
   })

@@ -89,9 +89,11 @@ program
   .option('--halfcrazy', 'loop fix→recheck until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--halfcrazy; used internally by kickass fix legs)')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfcrazy?: boolean; timeout?: string; noTimeout?: boolean }) => {
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean }) => {
     const roundMode = opts.crazy ? 'crazy' : opts.halfcrazy ? 'halfcrazy' : undefined
-    void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode })
+    // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
+    const noTimeout = opts.noTimeout || opts.timeout === false
+    void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined })
   })
 
 program

@@ -32,7 +32,6 @@ export interface RunOpts {
   noTimeout?: boolean
 }
 
-const CRAZY_ROUND_CEILING = 2
 
 function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcrazy'): boolean {
   if (verdict === null) return false
@@ -117,10 +116,10 @@ function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
   const RESET = '\x1b[0m'
   if (mode === 'crazy') {
     const label = chalk.bold.white.bgRed(' CRAZY ') + ' ' + chalk.red.bold('MODE')
-    console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE (ceiling: 2 rounds)')}\n`)
+    console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE')}\n`)
   } else {
     const label = chalk.bold.yellow('half') + chalk.bold.white.bgRed('-CRAZY') + ' ' + chalk.red.bold('MODE')
-    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until NOT BLOCK (ceiling: 2 rounds)')}\n`)
+    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until not BLOCK')}\n`)
   }
 }
 
@@ -359,7 +358,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         crosscheckShas: new Set<string>(),
         pushedShas,
         dryRun: opts.dryRun,
-        // crazy/halfcrazy bypass per-step max_rounds; the outer ceiling is the only cap
+        // crazy/halfcrazy bypass per-step max_rounds; loop runs until stop condition or no-progress guard
         overrideMaxRounds: opts.roundMode ? Infinity : undefined,
         roundMode: opts.roundMode,
         overrideTimeoutMs: reviewerTimeoutMs,
@@ -383,10 +382,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         let loopRound = 1
         let loopSha = sha
 
-        while (
-          loopRound < CRAZY_ROUND_CEILING &&
-          (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0))
-        ) {
+        while (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0)) {
           // No-progress guard: if fix ran but applied nothing, looping is futile
           if (fixAppliedCount === 0) {
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
@@ -442,10 +438,6 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
         }
 
-        if (loopRound >= CRAZY_ROUND_CEILING && !meetsCrazyStopCondition(verdict, mode)) {
-          fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'crazy_ceiling', mode, round: loopRound })
-          console.log(chalk.yellow(`  ceiling reached (${CRAZY_ROUND_CEILING} rounds) — last verdict: ${verdict ?? '--'}`))
-        }
       }
 
       activeSpinner.stop()

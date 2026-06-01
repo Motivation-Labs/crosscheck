@@ -85,8 +85,8 @@ program
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
-  .option('--crazy', 'loop fix→recheck until APPROVE (ceiling: 2 rounds); disables all timeout constraints')
-  .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
+  .option('--crazy', 'loop fix→recheck until APPROVE; disables all timeout constraints')
+  .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK; disables all timeout constraints')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy; used internally by kickass fix legs)')
   .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; timeout?: string | false; noTimeout?: boolean }) => {
@@ -111,8 +111,8 @@ program
   .option('--force', 'bypass the 1-minute scan cache')
   .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
   .option('--dry-run', 'print selected actions without running them')
-  .option('--crazy', 'loop fix→recheck per PR until APPROVE (ceiling: 2 rounds); disables all timeout constraints')
-  .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
+  .option('--crazy', 'loop fix→recheck per PR until APPROVE; disables all timeout constraints')
+  .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK; disables all timeout constraints')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; timeout?: string }) => {
     const roundMode = opts.crazy ? 'crazy' : opts.halfCrazy ? 'halfcrazy' : undefined

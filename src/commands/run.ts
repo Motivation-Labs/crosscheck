@@ -116,10 +116,12 @@ function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
   const RESET = '\x1b[0m'
   if (mode === 'crazy') {
     const label = chalk.bold.white.bgRed(' CRAZY ') + ' ' + chalk.red.bold('MODE')
-    console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE')}\n`)
+    console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE')}`)
+    console.log(` ${chalk.yellow('⚠')}  ${chalk.yellow('Token consumption may skyrocket — use with caution.')}\n`)
   } else {
     const label = chalk.bold.yellow('half') + chalk.bold.white.bgRed('-CRAZY') + ' ' + chalk.red.bold('MODE')
-    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until not BLOCK')}\n`)
+    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until not BLOCK')}`)
+    console.log(` ${chalk.yellow('⚠')}  ${chalk.yellow('Token consumption may skyrocket — use with caution.')}\n`)
   }
 }
 

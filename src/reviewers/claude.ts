@@ -13,6 +13,8 @@ const EFFORT_MAP: Record<string, string> = {
 export interface ReviewResult {
   review: string
   tokensUsed?: number
+  inputTokens?: number
+  outputTokens?: number
   model: string
 }
 
@@ -77,12 +79,10 @@ export async function runClaudeReview(
     try {
       const parsed: ClaudeJsonOutput = JSON.parse(raw)
       const review = typeof parsed.result === 'string' ? parsed.result.trim() : raw
-      const inTok = parsed.usage?.input_tokens
-      const outTok = parsed.usage?.output_tokens
-      const tokensUsed = typeof inTok === 'number' && typeof outTok === 'number'
-        ? inTok + outTok
-        : undefined
-      return { review, tokensUsed, model }
+      const inputTokens = typeof parsed.usage?.input_tokens === 'number' ? parsed.usage.input_tokens : undefined
+      const outputTokens = typeof parsed.usage?.output_tokens === 'number' ? parsed.usage.output_tokens : undefined
+      const tokensUsed = inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
+      return { review, tokensUsed, inputTokens, outputTokens, model }
     } catch {
       return { review: raw, model }
     }

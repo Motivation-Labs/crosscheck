@@ -86,6 +86,7 @@ export interface WorkflowCompleteInputs {
   workflowFailed: boolean
   round?: number
   trigger?: WorkflowTrigger
+  qualityTier?: string
   now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
 }
 
@@ -104,10 +105,17 @@ export type WorkflowEndedReason =
 export function buildWorkflowCompleteEvent(
   inputs: WorkflowCompleteInputs,
 ): Record<string, unknown> {
-  const lastVerdict = Object.values(inputs.results).reverse().find(r => r.verdict !== undefined)?.verdict ?? null
+  const stepValues = Object.values(inputs.results)
+  const lastVerdict = stepValues.reverse().find(r => r.verdict !== undefined)?.verdict ?? null
   const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
   const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
   const now = inputs.now ?? Date.now()
+
+  const totalTokens = stepValues.reduce((s, r) => s + (r.tokens_used ?? 0), 0)
+  const totalInputTokens = stepValues.reduce((s, r) => s + (r.input_tokens ?? 0), 0)
+  const totalOutputTokens = stepValues.reduce((s, r) => s + (r.output_tokens ?? 0), 0)
+  const vendorsUsed = [...new Set(stepValues.map(r => r.vendor).filter(Boolean))]
+
   return {
     level: inputs.workflowFailed ? 'warn' : 'info',
     event: 'workflow_complete',
@@ -119,6 +127,9 @@ export function buildWorkflowCompleteEvent(
     last_verdict: lastVerdict,
     ended_reason: endedReason,
     total_duration_ms: now - inputs.workflowStart,
+    ...(totalTokens > 0 && { total_tokens: totalTokens, total_input_tokens: totalInputTokens, total_output_tokens: totalOutputTokens }),
+    ...(vendorsUsed.length > 0 && { vendors_used: vendorsUsed }),
+    ...(inputs.qualityTier !== undefined && { quality_tier: inputs.qualityTier }),
     ...(inputs.round !== undefined && { round: inputs.round }),
     ...(inputs.trigger !== undefined && { trigger: inputs.trigger }),
   }
@@ -253,6 +264,80 @@ function resolveReviewer(
   return null
 }
 
+// ─── pr_complexity helpers ────────────────────────────────────────────────────
+
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+  mjs: 'javascript', cjs: 'javascript', py: 'python', go: 'go', java: 'java',
+  rb: 'ruby', rs: 'rust', cs: 'csharp', cpp: 'cpp', cc: 'cpp', php: 'php',
+  kt: 'kotlin', swift: 'swift',
+}
+
+function classifyFile(filePath: string): string {
+  const lower = filePath.toLowerCase()
+  const ext = lower.split('.').pop() ?? ''
+  if (/\.(test|spec)\.[jt]sx?$/.test(lower) || /(\/__tests__\/|\/test\/|\/spec\/)/.test(lower)) return 'test'
+  if (/\.(md|mdx|rst|txt)$/.test(lower)) return 'docs'
+  if (/\.(dockerfile|tf|hcl)$/.test(ext) || lower === 'dockerfile' || /\/(\.github|infra|k8s|docker|ci\/)/.test(lower)) return 'infra'
+  if (/\.(css|scss|sass|less|html|svelte|vue)$/.test(lower) || /\.(tsx|jsx)$/.test(lower)) return 'frontend'
+  if (/\/(components|pages|views|ui|client|browser|public|assets|styles)/.test(lower)) return 'frontend'
+  if (/\.(json|yml|yaml|toml|ini|cfg|env|lock)$/.test(ext)) return 'config'
+  if (['ts', 'js', 'mjs', 'cjs', 'py', 'go', 'java', 'rb', 'rs', 'cs', 'cpp', 'cc', 'php', 'kt', 'swift'].includes(ext)) return 'backend'
+  return 'other'
+}
+
+function diffBucket(totalLines: number): string {
+  if (totalLines < 50) return 'tiny'
+  if (totalLines < 200) return 'small'
+  if (totalLines < 500) return 'medium'
+  if (totalLines < 2000) return 'large'
+  return 'xlarge'
+}
+
+function emitPRComplexity(ctx: WorkflowContext, triggerField: Record<string, unknown>): void {
+  const { owner, repoName, prNumber, tmpDir, pr, config } = ctx
+  try {
+    const raw = execSync(
+      `git diff --stat origin/${pr.base.ref}...HEAD`,
+      { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    if (!raw) return
+
+    const lines = raw.split('\n')
+    const summary = lines[lines.length - 1]
+    const filesChanged = parseInt(summary.match(/(\d+) files? changed/)?.[1] ?? '0')
+    const insertions = parseInt(summary.match(/(\d+) insertion/)?.[1] ?? '0')
+    const deletions = parseInt(summary.match(/(\d+) deletion/)?.[1] ?? '0')
+
+    const filePaths = lines.slice(0, -1).map(l => l.trim().split('|')[0]?.trim()).filter(Boolean) as string[]
+    const mix: Record<string, number> = { backend: 0, frontend: 0, test: 0, infra: 0, docs: 0, config: 0, other: 0 }
+    const langSet = new Set<string>()
+    for (const fp of filePaths) {
+      const ext = fp.split('.').pop()?.toLowerCase() ?? ''
+      if (EXT_LANG[ext]) langSet.add(EXT_LANG[ext])
+      const cat = classifyFile(fp)
+      mix[cat] = (mix[cat] ?? 0) + 1
+    }
+
+    fileLog({
+      level: 'info',
+      event: 'pr_complexity',
+      repo: `${owner}/${repoName}`,
+      pr: prNumber,
+      files_changed: filesChanged,
+      insertions,
+      deletions,
+      diff_bucket: diffBucket(insertions + deletions),
+      file_mix: mix,
+      languages: [...langSet],
+      quality_tier: config.quality.tier,
+      ...triggerField,
+    })
+  } catch { /* best-effort — never fail the workflow for a logging event */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
   const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
   const triggerField = trigger !== undefined ? { trigger } : {}
@@ -277,6 +362,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const workflowId = randomUUID()
   const workflowStart = Date.now()
   const stepsRun: string[] = []
+
+  emitPRComplexity(ctx, triggerField)
 
   try {
   for (const step of steps) {
@@ -323,11 +410,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const stepStart = Date.now()
       let rawReview: string
       let tokensUsed: number | undefined
+      let inputTokens: number | undefined
+      let outputTokens: number | undefined
       let model = 'default'
       if (reviewer === 'codex') {
         ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs))
       } else {
-        ;({ review: rawReview, tokensUsed, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs))
+        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -338,7 +427,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -348,7 +437,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (ctx.dryRun) {
         onPhaseChange('dry-run — comment not posted', phaseUpdate)
         log(chalk.dim(`\n--- dry-run: comment that would be posted ---\n${commentBody}\n--- end ---`))
-        results[step.name] = { verdict, commentBody }
+        results[step.name] = { verdict, commentBody, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       } else {
         onPhaseChange(isRecheck ? 'posting recheck...' : 'posting comment...', phaseUpdate)
         const octokit = createGithubClient(token)
@@ -368,7 +457,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
-        results[step.name] = { verdict, commentBody, commentUrl, commentId }
+        results[step.name] = { verdict, commentBody, commentUrl, commentId, tokens_used: tokensUsed, input_tokens: inputTokens, output_tokens: outputTokens, vendor: reviewer, model }
       }
 
     } else if (effectiveType === 'fix') {
@@ -541,7 +630,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'warn', event: 'fix_applied_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
         }
 
-        results[step.name] = { applied_count: appliedCount }
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
 
       } else if (deliveryMode === 'pull_request') {
         // Create a fix branch and open a PR targeting the original branch
@@ -585,7 +674,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
-        results[step.name] = { applied_count: appliedCount }
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
 
       } else {
         // comment: post the diff as a suggested-fix comment, no code push needed (works for fork PRs too)
@@ -598,7 +687,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
-        results[step.name] = { applied_count: appliedCount }
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
       }
 
     } else if (effectiveType === 'conflict-resolve') {
@@ -844,6 +933,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       workflowId, workflowStart, stepsRun, results, workflowFailed,
       round: ctx.round,
       trigger: ctx.trigger,
+      qualityTier: config.quality.tier,
     }) as Parameters<typeof fileLog>[0])
   }
 }

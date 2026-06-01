@@ -349,6 +349,7 @@ export function buildKickassRunArgs(
   }
   // forward user-specified --timeout for runs that aren't already in a round mode
   if (timeout && !roundMode) args.push('--timeout', timeout)
+  args.push('--trigger', 'kickass')
   return args
 }
 

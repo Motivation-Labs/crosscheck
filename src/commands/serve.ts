@@ -232,6 +232,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
       isRecheckRun,
       round,
+      trigger: event.action === 'backtrace' ? 'backtrace' : 'serve',
     })
 
     reviewedPRKeys.add(prKey)

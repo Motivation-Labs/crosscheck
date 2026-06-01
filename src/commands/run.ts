@@ -30,6 +30,7 @@ export interface RunOpts {
   expectedHeadSha?: string
   timeout?: string
   noTimeout?: boolean
+  trigger?: import('../lib/runner.js').WorkflowTrigger
 }
 
 
@@ -364,6 +365,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         overrideMaxRounds: opts.roundMode ? Infinity : undefined,
         roundMode: opts.roundMode,
         overrideTimeoutMs: reviewerTimeoutMs,
+        trigger: opts.trigger ?? 'run',
       }
 
       let workflowResult = await runWorkflow({

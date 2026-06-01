@@ -70,6 +70,11 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
 
 // Subset of WorkflowContext + accumulators the workflow_complete event needs.
 // Kept narrow so this can be tested without constructing a full WorkflowContext.
+// How the workflow was triggered. Included in workflow_complete, review_complete,
+// fix_complete, and conflict_resolve_complete so log analysis can segment outcomes
+// by entry point (e.g. kickass vs webhook vs direct run).
+export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace'
+
 export interface WorkflowCompleteInputs {
   owner: string
   repoName: string
@@ -80,6 +85,7 @@ export interface WorkflowCompleteInputs {
   results: Record<string, StepResult>
   workflowFailed: boolean
   round?: number
+  trigger?: WorkflowTrigger
   now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
 }
 
@@ -114,6 +120,7 @@ export function buildWorkflowCompleteEvent(
     ended_reason: endedReason,
     total_duration_ms: now - inputs.workflowStart,
     ...(inputs.round !== undefined && { round: inputs.round }),
+    ...(inputs.trigger !== undefined && { trigger: inputs.trigger }),
   }
 }
 
@@ -199,6 +206,8 @@ export interface WorkflowContext {
   // Reviewer subprocess timeout override. 0 = no cap (crazy/halfcrazy).
   // When undefined, each reviewer uses its built-in default.
   overrideTimeoutMs?: number
+  // How this workflow was triggered — logged in step events for analysis segmentation.
+  trigger?: WorkflowTrigger
 }
 
 export interface WorkflowResult {
@@ -245,7 +254,8 @@ function resolveReviewer(
 }
 
 export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult> {
-  const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange } = ctx
+  const { owner, repoName, prNumber, pr, tmpDir, token, config, origin, log, onPhaseChange, trigger } = ctx
+  const triggerField = trigger !== undefined ? { trigger } : {}
   const steps = ctx.steps ?? loadWorkflow(process.cwd())
   const results: Record<string, StepResult> = {}
   // SHAs the workflow pushed AND set a `crosscheck/review` pending status on.
@@ -328,7 +338,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
       const commentCount = countComments(rawReview)
-      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
+      fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
       // Recheck verdict is stored separately to preserve the original review's commentCount on the board
       const phaseUpdate: PRPhaseData = isRecheck
@@ -515,7 +525,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
 
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
@@ -574,7 +584,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           } catch { /* label may not exist in this repo — skip */ }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: appliedCount }
 
       } else {
@@ -587,7 +597,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
         results[step.name] = { applied_count: appliedCount }
       }
 
@@ -761,7 +771,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
       }
       onPhaseChange('conflicts resolved ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: resolveTokensUsed })
-      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, duration_ms: Date.now() - conflictResolveStepStart })
+      fileLog({ level: 'info', event: 'conflict_resolve_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, conflicts_resolved: conflictedFiles.length, sha: newSha, tokens_used: resolveTokensUsed, duration_ms: Date.now() - conflictResolveStepStart, ...triggerField })
 
       // Post a summary comment so the silent merge-commit push is visible on the
       // timeline as a comment card. Best-effort — a failure here must not fail the run.
@@ -833,6 +843,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       owner, repoName, prNumber,
       workflowId, workflowStart, stepsRun, results, workflowFailed,
       round: ctx.round,
+      trigger: ctx.trigger,
     }) as Parameters<typeof fileLog>[0])
   }
 }

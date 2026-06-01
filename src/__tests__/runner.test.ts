@@ -9,6 +9,7 @@ import {
   exceedsMaxRounds,
   countCrosscheckCommitsForPR,
   buildWorkflowCompleteEvent,
+  resolveFixVendor,
 } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
@@ -302,5 +303,76 @@ describe('buildWorkflowCompleteEvent', () => {
     expect(ev.quality_tier).toBe('thorough')
     const without = buildWorkflowCompleteEvent(base)
     expect('quality_tier' in without).toBe(false)
+  })
+})
+
+describe('resolveFixVendor', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+    },
+    routing: { fallback_reviewer: fallbackReviewer },
+  }) as any
+
+  describe('human-origin fallback — respects routing.fallback_reviewer', () => {
+    it('auto (default): prefers codex when both enabled', () => {
+      // 'auto' mirrors resolveReviewer auto path: codex-first config-enabled check
+      expect(resolveFixVendor('origin', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('auto: falls to claude when codex disabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('explicit claude: uses claude regardless of codex availability', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'claude'))).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('explicit codex: uses codex when enabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'codex'))).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('explicit codex disabled: returns null rather than falling to claude', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false, 'codex'))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('null fallback_reviewer: skips fix (no fallback)', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, null))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('returns null when both vendors disabled regardless of fallback_reviewer', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(false, false))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('scoped to reviewer:origin only', () => {
+    it('reviewer:claude with human origin resolves via resolveReviewer, no fallback', () => {
+      expect(resolveFixVendor('claude', 'human', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+      expect(resolveFixVendor('claude', 'human', cfg(false, true))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('reviewer:auto with human origin uses resolveReviewer auto path, no fallback', () => {
+      expect(resolveFixVendor('auto', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('non-human origins — unchanged behaviour', () => {
+    it('returns codex for codex-origin with reviewer:origin', () => {
+      expect(resolveFixVendor('origin', 'codex', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+
+    it('returns claude for claude-origin with reviewer:origin', () => {
+      expect(resolveFixVendor('origin', 'claude', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+  })
+
+  describe('smartSwitchFallback takes precedence', () => {
+    it('smartSwitchFallback resolves via resolveReviewer before human-origin branch fires', () => {
+      // reviewer:origin + origin:human + smartSwitchFallback='codex' → resolveReviewer returns
+      // 'codex' directly, so usedHumanFallback is false even though origin is human
+      expect(resolveFixVendor('origin', 'human', cfg(false, true), 'codex')).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
   })
 })

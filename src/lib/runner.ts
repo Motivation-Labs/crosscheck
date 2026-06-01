@@ -275,6 +275,36 @@ function resolveReviewer(
   return null
 }
 
+// Extends resolveReviewer with a human-origin fallback for the fix step.
+// Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
+// already encode explicit vendor intent and need no fallback.
+// When origin is 'human' and no vendor resolved, honours routing.fallback_reviewer
+// so the fix step respects the same routing intent as the review step.
+// 'auto' mirrors resolveReviewer's auto path (config-enabled check, codex-first)
+// without async auth calls. null disables the fallback entirely.
+// Exported so callers can detect when the fallback was applied (e.g. for logging).
+export function resolveFixVendor(
+  stepReviewer: string,
+  origin: PROrigin,
+  config: Config,
+  fallback?: 'claude' | 'codex',
+): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
+  const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
+  if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
+    return { vendor, usedHumanFallback: false }
+  }
+  const fb = config.routing.fallback_reviewer
+  let humanFallback: 'claude' | 'codex' | null = null
+  if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
+  else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
+  else if (fb !== null) {
+    // 'auto': prefer codex then claude, same as resolveReviewer's auto path
+    humanFallback = config.vendors.codex.enabled ? 'codex' : config.vendors.claude.enabled ? 'claude' : null
+  }
+  if (!humanFallback) return { vendor: null, usedHumanFallback: false }
+  return { vendor: humanFallback, usedHumanFallback: true }
+}
+
 // ─── pr_complexity helpers ────────────────────────────────────────────────────
 
 const EXT_LANG: Record<string, string> = {
@@ -541,7 +571,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       // Vendor is resolved from the workflow step's reviewer field, same as review/recheck steps.
       // Use 'origin' to fix with the same vendor that authored the PR (recommended default).
-      const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      // resolveFixVendor extends resolveReviewer with a human-origin fallback so human-authored
+      // PRs don't silently skip when no explicit vendor is configured.
+      const { vendor, usedHumanFallback } = resolveFixVendor(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      if (usedHumanFallback && vendor) {
+        fileLog({ level: 'info', event: 'fix_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: 'none', to: vendor, reason: 'human_origin' })
+      }
       if (!vendor) { skipFix('no_vendor'); continue }
 
       const claudeFixModel = resolveClaudeModel(config.quality)

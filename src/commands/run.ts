@@ -384,7 +384,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         let loopRound = 1
         let loopSha = sha
 
-        while (!meetsCrazyStopCondition(verdict, mode)) {
+        while (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0)) {
           // No-progress guard: if fix ran but applied nothing, looping is futile
           if (fixAppliedCount === 0) {
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })

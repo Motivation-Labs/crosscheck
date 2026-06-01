@@ -488,47 +488,41 @@ describe('runKickassWithDeps', () => {
     ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
   })
 
-  describe('codex_fix_unsupported guard', () => {
-    it('skips codex-origin fix PRs when fix step uses origin reviewer', () => {
-      const codexPR = pr({
-        nextAction: 'fix',
-        reviewState: 'NEEDS_FIX',
-        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
-      })
-      const plan = buildPreflightPlan([codexPR], undefined, 'pull_request', 'origin')
-      expect(plan[0].action).toBe('skip')
-      expect(plan[0].skipReason).toBe('codex_fix_unsupported')
+  describe('stagger', () => {
+    it('sequential mode ignores staggerMs — item still executes', async () => {
+      const selected = pr({ nextAction: 'review', freshness: 'stale' })
+      let dispatched = false
+      const results = await executeKickassPlan(
+        buildPreflightPlan([selected]),
+        {
+          getCurrentHeadSha: async (item) => item.pr.headSha,
+          dispatchRun: async () => { dispatched = true },
+        },
+        1,    // sequential
+        9999, // staggerMs — must be ignored in sequential mode
+      )
+      expect(results[0].status).toBe('executed')
+      expect(dispatched).toBe(true)
     })
 
-    it('does not skip codex-origin fix PRs when fix step uses explicit claude reviewer', () => {
-      const codexPR = pr({
-        nextAction: 'fix',
-        reviewState: 'NEEDS_FIX',
-        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
-      })
-      const plan = buildPreflightPlan([codexPR], undefined, 'pull_request', 'claude')
-      expect(plan[0].action).toBe('fix')
-    })
-
-    it('does not skip claude-origin fix PRs with origin reviewer (claude fix is supported)', () => {
-      const claudePR = pr({
-        nextAction: 'fix',
-        reviewState: 'NEEDS_FIX',
-        latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
-      })
-      const plan = buildPreflightPlan([claudePR], undefined, 'pull_request', 'origin')
-      expect(plan[0].action).toBe('fix')
-    })
-
-    it('preserves existing behavior when fixStepReviewer is undefined (no 4th arg)', () => {
-      const codexPR = pr({
-        nextAction: 'fix',
-        reviewState: 'NEEDS_FIX',
-        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
-      })
-      const plan = buildPreflightPlan([codexPR])
-      // Without fixStepReviewer, no guard fires — backward-compatible
-      expect(plan[0].action).toBe('fix')
+    it('concurrent mode with staggerMs=0 processes all items', async () => {
+      const prs = [
+        pr({ nextAction: 'review', number: 1, headSha: 'aaa111', url: 'https://github.com/acme/web/pull/1' }),
+        pr({ nextAction: 'review', number: 2, headSha: 'bbb222', url: 'https://github.com/acme/web/pull/2' }),
+      ]
+      const dispatched: number[] = []
+      const results = await executeKickassPlan(
+        buildPreflightPlan(prs),
+        {
+          getCurrentHeadSha: async (item) => item.pr.headSha,
+          dispatchRun: async (item) => { dispatched.push(item.pr.number); return '' },
+        },
+        2, // concurrency
+        0, // staggerMs = 0 → no stagger
+      )
+      expect(results).toHaveLength(2)
+      expect(results.every(r => r.status === 'executed')).toBe(true)
+      expect(dispatched.sort()).toEqual([1, 2])
     })
   })
 })

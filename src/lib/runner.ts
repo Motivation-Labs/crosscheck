@@ -8,14 +8,14 @@ import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
-import { runFixStep } from '../reviewers/fix.js'
+import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
-import { resolveClaudeModel } from '../lib/review-models.js'
+import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
@@ -524,9 +524,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      // Codex fix not yet implemented — skip gracefully
-      if (vendor === 'codex') { skipFix('codex_fix_unsupported'); continue }
-      const fixModel = resolveClaudeModel(config.quality)
+      const claudeFixModel = resolveClaudeModel(config.quality)
+      const codexFixModel = resolveCodexModel(config.quality, config.vendors.codex)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
@@ -540,20 +539,46 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
-      // Per-step start timestamp covers attempt + retry + retry-delay wall time
-      // (the user perceives the whole interval as "the fix step").
       const fixStepStart = Date.now()
       let appliedCount = 0
       let fixTokensUsed: number | undefined
       let fixErr: unknown = undefined
+      let activeVendor = vendor
+
+      const runFix = async (v: 'claude' | 'codex') => {
+        if (v === 'codex') {
+          return runCodexFixStep(
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+          )
+        }
+        return runFixStep(
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
+          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+        )
+      }
 
       try {
-        ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
-        ))
+        ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(vendor))
       } catch (err) {
-        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
-        fixErr = err
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor }, err)
+        // Fallback: codex → claude on any retryable failure (claude → codex deferred until codex fix matures)
+        const fallbackVendor: 'claude' | 'codex' | null = vendor === 'codex' && config.vendors.claude.enabled
+          ? 'claude'
+          : null
+        if (fallbackVendor !== null && isRetryableFixError(err)) {
+          log(chalk.yellow(`⚠  ${vendor} fix failed — falling back to ${fallbackVendor}...`))
+          fileLog({ level: 'warn', event: 'fix_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: vendor, to: fallbackVendor })
+          try {
+            ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(fallbackVendor))
+            activeVendor = fallbackVendor
+          } catch (fallbackErr) {
+            logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
+            fixErr = fallbackErr
+          }
+        } else {
+          fixErr = err
+        }
       }
 
       if (fixErr !== undefined && isRetryableFixError(fixErr)) {
@@ -561,11 +586,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange('fix retry in 2 min...', { phase: 'fixing' })
         fileLog({ level: 'info', event: 'fix_retry_scheduled', repo: `${owner}/${repoName}`, pr: prNumber })
         await new Promise<void>(resolve => setTimeout(resolve, FIX_RETRY_DELAY_MS))
-        onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
+        onPhaseChange(`${activeVendor} fixing (retry)...`, { phase: 'fixing' })
         try {
-          ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
-          ))
+          ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(activeVendor))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
         } catch (retryErr) {
@@ -602,6 +625,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const deliveryMode = config.post_review.auto_fix.delivery.mode
 
       if (deliveryMode === 'commit') {
+        const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
         execSync('git add -A', { cwd: tmpDir })
         execFileSync(
           'git',
@@ -610,7 +634,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             '-m',
             `[crosscheck] fix: apply ${appliedCount} fix${appliedCount !== 1 ? 'es' : ''} from code review — by Claude Code`,
             '-m',
-            buildCommitTrailers({ reviewer: vendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
           ],
           { cwd: tmpDir },
         )
@@ -639,7 +663,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
 
         // Post a summary comment so the silent commit push is visible on the timeline
         // as a comment card. Best-effort — a failure here must not fail the run.
@@ -655,9 +679,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           fileLog({ level: 'warn', event: 'fix_applied_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: err instanceof Error ? err.message : String(err) })
         }
 
-        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
       } else if (deliveryMode === 'pull_request') {
+        const fixModel = activeVendor === 'codex' ? codexFixModel : claudeFixModel
         // Create a fix branch and open a PR targeting the original branch
         const fixBranch = `fix/cr-${prNumber}-review-issues`
         execSync(`git checkout -b ${fixBranch}`, { cwd: tmpDir })
@@ -669,7 +694,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             '-m',
             `[crosscheck] fix: apply CR fixes from review of PR #${prNumber} — by Claude Code`,
             '-m',
-            buildCommitTrailers({ reviewer: vendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
+            buildCommitTrailers({ reviewer: activeVendor, model: fixModel, step: 'fix', service: 'crosscheck' }),
           ],
           { cwd: tmpDir },
         )
@@ -698,8 +723,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           } catch { /* label may not exist in this repo — skip */ }
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
-        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, sha: newSha, delivery: 'pull_request', fix_pr: fixPr.number, tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
 
       } else {
         // comment: post the diff as a suggested-fix comment, no code push needed (works for fork PRs too)
@@ -711,8 +736,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
-        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
-        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor }
+        fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor: activeVendor, applied_count: appliedCount, delivery: 'comment', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart, ...triggerField })
+        results[step.name] = { applied_count: appliedCount, tokens_used: fixTokensUsed, vendor: activeVendor }
       }
 
     } else if (effectiveType === 'conflict-resolve') {

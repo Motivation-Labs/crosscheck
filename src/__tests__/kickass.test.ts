@@ -250,7 +250,7 @@ describe('runKickassWithDeps', () => {
     expect(dispatched).toEqual([1, 3])
     expect(results.map(result => [result.pr.number, result.status, result.reason])).toEqual([
       [1, 'executed', undefined],
-      [2, 'failed', 'error'],
+      [2, 'failed', 'unknown'],
       [3, 'executed', undefined],
     ])
   })

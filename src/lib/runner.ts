@@ -259,6 +259,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
+  // When a fix commits and a structural review/recheck step follows, we acquire
+  // the remote lock on the pushed SHA. Track it here so the finally can detect
+  // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
+  // release the SHA as `failure` rather than `success` in that case.
+  let fixPushedShaRequiresRecheck: string | null = null
 
   // workflow_complete event accumulators. Each step the runner dispatches is
   // recorded in stepsRun (including ones that get logged as step_skipped —
@@ -301,6 +306,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
+      // The recheck step is confirmed to run — clear the pending-recheck guard
+      // so the finally doesn't release the fix-pushed SHA as failure.
+      fixPushedShaRequiresRecheck = null
       const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
       fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
@@ -510,6 +518,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             const lockOctokit = createGithubClient(token)
             await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
             pushedShasNeedingRelease.push(newSha)
+            fixPushedShaRequiresRecheck = newSha
           } catch (err) {
             fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
           }
@@ -804,9 +813,28 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     workflowFailed = true
     throw err
   } finally {
-    if (pushedShasNeedingRelease.length > 0) {
+    if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
       const lockOctokit = createGithubClient(token)
       const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
+
+      // A recheck step was expected after the fix but was skipped (by `when`,
+      // no_reviewer, max_rounds, etc.). The fix-pushed SHA is in
+      // pushedShasNeedingRelease but no recheck ran to confirm the commit, so
+      // releasing it as `success` would mislead branch protection. Release it
+      // as `failure` instead so the commit remains unreviewed until the recheck
+      // runs in a subsequent invocation (e.g. via `crosscheck run --steps recheck`).
+      if (fixPushedShaRequiresRecheck !== null) {
+        const unrecheckedSha = fixPushedShaRequiresRecheck
+        fixPushedShaRequiresRecheck = null
+        const idx = pushedShasNeedingRelease.indexOf(unrecheckedSha)
+        if (idx !== -1) pushedShasNeedingRelease.splice(idx, 1)
+        try {
+          await releaseRemoteLock(lockOctokit, owner, repoName, unrecheckedSha, 'failure')
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'pushed_sha_release_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: unrecheckedSha, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+
       // Drain via shift() so each released sha is synchronously removed from
       // the shared array. The command-layer SIGINT/SIGTERM handler iterates
       // the same array — if a late signal arrives after this finally has

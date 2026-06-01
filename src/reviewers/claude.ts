@@ -36,6 +36,7 @@ export async function runClaudeReview(
   stepInstructions?: string,
   onLog?: (msg: string) => void,
   timeoutMs?: number,
+  noBudgetCap?: boolean,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -56,8 +57,8 @@ export async function runClaudeReview(
 
   // Omit --max-budget-usd when:
   // 1. No ANTHROPIC_API_KEY → subscription mode (claude.ai plan, budget limits don't apply)
-  // 2. timeoutMs === 0 → crazy/halfcrazy mode (explicitly uncapped run)
-  const applyBudgetCap = !!process.env.ANTHROPIC_API_KEY && timeoutMs !== 0
+  // 2. noBudgetCap → crazy/halfcrazy mode (explicitly uncapped run; NOT set by --no-timeout alone)
+  const applyBudgetCap = !!process.env.ANTHROPIC_API_KEY && !noBudgetCap
 
   const args = [
     '--print',

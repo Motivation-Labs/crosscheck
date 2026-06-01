@@ -5,6 +5,7 @@ import chalk from 'chalk'
 import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
+import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
@@ -232,7 +233,36 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // Resolve steps — filter from workflow.yml by type if --steps is specified, then pin the
   // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
   const allSteps = loadWorkflow(process.cwd())
-  const stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
+  let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
+  let initialReviewComment = opts.initialReviewComment
+
+  // When running without an explicit --steps flag, traverse the PR comment
+  // history to determine which workflow step to run next — skipping steps that
+  // have already completed for the current HEAD SHA.
+  if (!opts.steps) {
+    try {
+      const history = await fetchStepHistory(owner, repo, number, token)
+      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
+      if (nextResult.step === null) {
+        // Workflow already complete for this SHA
+        console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
+        return
+      }
+      if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
+        // Resume from the identified step. Look up by type (not name) so synthesized
+        // steps (e.g. a recheck not present in allSteps) still route correctly.
+        // When the step isn't in allSteps at all, use [step.type] so resolveWorkflowSteps
+        // can synthesize it (e.g. synthesizeRecheckStep for the 'recheck' type).
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        stepFilter = nextStepIdx >= 0
+          ? allSteps.slice(nextStepIdx).map(s => s.name)
+          : [nextResult.step.type]
+        initialReviewComment = nextResult.reviewComment
+        console.log(chalk.dim(`  existing review found — resuming from ${nextResult.step.type} step`))
+      }
+    } catch { /* best-effort — fall through to normal review flow on API error */ }
+  }
+
   const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer)
 
   if (opts.dryRun) {
@@ -388,10 +418,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         tmpDir,
         reviewStart: Date.now(),
         steps: filteredSteps,
-        initialReviewComment: opts.initialReviewComment,
+        initialReviewComment,
       })
       let { verdict, fixAppliedCount } = workflowResult
-      let latestReviewComment = workflowResult.latestReviewComment ?? opts.initialReviewComment
+      let latestReviewComment = workflowResult.latestReviewComment ?? initialReviewComment
 
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (opts.roundMode) {

@@ -11,6 +11,8 @@ export interface CrosscheckAnnotationInput {
   round: number
   service: string
   sha?: string
+  /** Pre-computed next workflow step; lets readers skip full comment scans. */
+  next_step?: string
 }
 
 export interface CrosscheckCommitTrailerInput {
@@ -29,7 +31,8 @@ const STEP_TYPES = new Set<CrosscheckStepType>(['review', 'recheck', 'fix', 'con
 
 export function buildAnnotation(input: CrosscheckAnnotationInput): string {
   const sha = input.sha ? ` sha=${fieldValue(input.sha)}` : ''
-  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)}${sha} -->`
+  const nextStep = input.next_step ? ` next_step=${fieldValue(input.next_step)}` : ''
+  return `<!-- crosscheck: origin=${fieldValue(input.origin)} reviewer=${fieldValue(input.reviewer)} model=${fieldValue(input.model)} type=${fieldValue(input.type)} round=${input.round} verdict=${fieldValue(input.verdict)} service=${fieldValue(input.service)}${sha}${nextStep} -->`
 }
 
 export function parseAnnotation(body: string): CrosscheckAnnotationInput | null {
@@ -51,6 +54,7 @@ export function parseAnnotation(body: string): CrosscheckAnnotationInput | null 
     verdict: fields.get('verdict') ?? 'UNKNOWN',
     service: fields.get('service') ?? DEFAULT_SERVICE,
     ...(fields.has('sha') && { sha: fields.get('sha') }),
+    ...(fields.has('next_step') && { next_step: fields.get('next_step') }),
   }
 }
 

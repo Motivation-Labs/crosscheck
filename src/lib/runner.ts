@@ -435,7 +435,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (reviewer === 'codex') {
         ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
       } else {
-        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec)))
+        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -470,9 +470,29 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
           }
         }
+        // Pre-compute next_step for the annotation so readers can skip full
+        // comment scans: find the first remaining step whose when-condition holds.
+        const currentStepIdx = steps.indexOf(step)
+        const syntheticResultsForNext: Record<string, import('./workflow.js').StepResult> = {
+          review: { verdict }, [step.name]: { verdict },
+        }
+        const nextWorkflowStep = steps.slice(currentStepIdx + 1).find(s =>
+          !s.when || evaluateWhen(s.when, syntheticResultsForNext),
+        )
+        const nextStepAnnotation = nextWorkflowStep?.type ?? 'none'
+
+        // Read the actual HEAD from the checkout: after an in-run fix step pushes a
+        // new commit, pr.head.sha is still the pre-fix SHA and would make the recheck
+        // annotation look stale to the step detector on the next run.
+        let annotationSha = pr.head.sha
+        try {
+          annotationSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+        } catch { /* fall back to pr.head.sha if git is unavailable */ }
+
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
-          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
+          origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
+          nextStepAnnotation,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })
@@ -587,7 +607,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       if (appliedCount === 0) {
         onPhaseChange('', { phase: 'fixed', fixCount: 0, fixTokens: fixTokensUsed })
-        results[step.name] = { applied_count: 0 }
+        results[step.name] = { applied_count: 0, ...(fixTokensUsed !== undefined && { tokens_used: fixTokensUsed }), vendor }
         continue
       }
 

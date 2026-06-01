@@ -54,12 +54,17 @@ export async function runClaudeReview(
     behaviorInstructions,
   ].filter(Boolean).join('\n')
 
+  // Omit --max-budget-usd when:
+  // 1. No ANTHROPIC_API_KEY → subscription mode (claude.ai plan, budget limits don't apply)
+  // 2. timeoutMs === 0 → crazy/halfcrazy mode (explicitly uncapped run)
+  const applyBudgetCap = !!process.env.ANTHROPIC_API_KEY && timeoutMs !== 0
+
   const args = [
     '--print',
     '--output-format', 'json',
     '--model', model,
     '--effort', effort,
-    '--max-budget-usd', String(perReviewBudget),
+    ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
     '--allowedTools', 'Bash(git diff),Bash(git log)',
   ]
 

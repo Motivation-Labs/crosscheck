@@ -302,7 +302,13 @@ export async function executeKickassPlan(
     console.log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
     await new Promise(resolve => setTimeout(resolve, delayMs))
     for (const { i } of retryItems) {
+      const priorResult = results[i]
       await executeItem(plan[i], i, attempt)
+      // If the stale-signature guard fired, the fix already advanced the head but
+      // the recheck never ran — preserve the failure instead of reporting skipped.
+      if (results[i].status === 'skipped' && results[i].reason === 'stale_signature') {
+        results[i] = priorResult
+      }
     }
   }
 

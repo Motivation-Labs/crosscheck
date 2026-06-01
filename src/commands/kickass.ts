@@ -264,7 +264,25 @@ export async function executeKickassPlan(
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
       console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      const category = classifyError(err instanceof Error ? err.message : String(err))
+      // Classify execa errors using structured fields, not the raw message.
+      // The raw message includes the full CLI invocation (e.g. "Command failed with exit
+      // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
+      // `message` would misclassify ordinary subprocess failures as 'timeout' whenever the
+      // command contains a --timeout flag.
+      const maybeExeca = err as Record<string, unknown>
+      let msgForClassify: string
+      if (maybeExeca.timedOut === true) {
+        // execa's structured timeout flag — reliable; bypass message matching entirely.
+        msgForClassify = 'timed out'
+      } else if (typeof maybeExeca.exitCode === 'number') {
+        // Subprocess failure: prefer stderr (actual error output) over the message which
+        // includes the full command string.  Strip the command suffix when stderr is absent.
+        const stderr = typeof maybeExeca.stderr === 'string' ? maybeExeca.stderr.trim() : ''
+        msgForClassify = stderr || (err instanceof Error ? err.message.replace(/:\s*\S.*$/, '') : String(err))
+      } else {
+        msgForClassify = err instanceof Error ? err.message : String(err)
+      }
+      const category = classifyError(msgForClassify)
       results[index] = { pr: item.pr, status: 'failed', reason: category }
     }
   }
@@ -304,10 +322,18 @@ export async function executeKickassPlan(
     for (const { i } of retryItems) {
       const priorResult = results[i]
       await executeItem(plan[i], i, attempt)
-      // If the stale-signature guard fired, the fix already advanced the head but
-      // the recheck never ran — preserve the failure instead of reporting skipped.
+      // Stale-signature means the fix already committed in a prior attempt but the
+      // chained recheck failed transiently.  Instead of reporting that failure as
+      // final, fetch the current head and run a bare recheck to actually retry it.
       if (results[i].status === 'skipped' && results[i].reason === 'stale_signature') {
-        results[i] = priorResult
+        try {
+          const currentHead = await deps.getCurrentHeadSha(plan[i])
+          const recheckItem = buildPostFixRecheckItem(plan[i], currentHead)
+          await executeItem(recheckItem, i, attempt)
+        } catch {
+          // If we cannot fetch the head (network failure), preserve the original failure.
+          results[i] = priorResult
+        }
       }
     }
   }

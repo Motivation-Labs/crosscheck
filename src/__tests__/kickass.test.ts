@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildKickassRunArgs,
   buildPreflightPlan,
@@ -341,6 +341,84 @@ describe('runKickassWithDeps', () => {
     expect(plan[0].details).toContain('delivery pull_request')
     expect(plan[0].details).toContain('recheck deferred')
     expect(plan[0].chainRecheck).toBe(false)
+  })
+
+  it('does not classify --timeout CLI flag in subprocess failure message as timeout', async () => {
+    // An ordinary subprocess failure whose command string contains --timeout should
+    // produce reason 'subprocess' (non-retryable), not 'timeout' (retryable).
+    const selected = pr({ number: 1, nextAction: 'review' })
+    const cmdErr = Object.assign(
+      new Error('Command failed with exit code 1: node crosscheck run --timeout 300s --no-timeout'),
+      { timedOut: false, exitCode: 1 },
+    )
+    const results = await executeKickassPlan(buildPreflightPlan([selected]), {
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async () => { throw cmdErr },
+    })
+    // 'subprocess' is not retryable — no sleep, result is immediate
+    expect(results[0]).toMatchObject({ status: 'failed', reason: 'subprocess' })
+  })
+
+  it('classifies execa timedOut=true as retryable timeout and retries successfully', async () => {
+    vi.useFakeTimers()
+    try {
+      const selected = pr({ number: 1, nextAction: 'review' })
+      let callCount = 0
+      const resultsPromise = executeKickassPlan(buildPreflightPlan([selected]), {
+        getCurrentHeadSha: async (item) => item.pr.headSha,
+        dispatchRun: async () => {
+          callCount++
+          if (callCount === 1) {
+            throw Object.assign(new Error('Command timed out after 30000ms'), { timedOut: true, exitCode: null })
+          }
+          // Second call (retry) succeeds
+        },
+      })
+      await vi.runAllTimersAsync()
+      const results = await resultsPromise
+      expect(callCount).toBeGreaterThan(1)  // retry ran — error was classified as retryable
+      expect(results[0].status).toBe('executed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries the chained recheck with current head when stale_signature fires on retry', async () => {
+    // Scenario: fix commits (advancing head), but a transient network failure causes
+    // executeItem to throw.  On retry the stale-signature guard fires; the new code
+    // fetches the current head and runs a bare recheck instead of restoring the failure.
+    vi.useFakeTimers()
+    try {
+      const selected = pr({
+        number: 5,
+        reviewState: 'NEEDS_FIX',
+        nextAction: 'fix',
+        latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+      })
+      const plan = buildPreflightPlan([selected], 'crazy', 'commit')
+      let headAdvanced = false
+      const dispatched: string[] = []
+
+      const resultsPromise = executeKickassPlan(plan, {
+        getCurrentHeadSha: async (item) => headAdvanced ? 'newhead0000000' : item.pr.headSha,
+        dispatchRun: async (item) => {
+          dispatched.push(item.action)
+          if (item.action === 'fix') {
+            headAdvanced = true
+            throw Object.assign(new Error('fetch failed'), { timedOut: false })
+          }
+          // recheck dispatch (from retry path) succeeds
+        },
+      })
+
+      await vi.runAllTimersAsync()
+      const results = await resultsPromise
+
+      expect(dispatched).toEqual(['fix', 'recheck'])
+      expect(results[0].status).toBe('executed')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('continues executing later PRs when one PR throws', async () => {

@@ -325,7 +325,8 @@ export async function executeKickassPlan(
       // Stale-signature means the fix already committed in a prior attempt but the
       // chained recheck failed transiently.  Instead of reporting that failure as
       // final, fetch the current head and run a bare recheck to actually retry it.
-      if (results[i].status === 'skipped' && results[i].reason === 'stale_signature') {
+      if (results[i].status === 'skipped' && results[i].reason === 'stale_signature'
+          && plan[i].action === 'fix' && plan[i].chainRecheck === true) {
         try {
           const currentHead = await deps.getCurrentHeadSha(plan[i])
           const recheckItem = buildPostFixRecheckItem(plan[i], currentHead)

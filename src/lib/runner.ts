@@ -286,7 +286,8 @@ export function resolveFixVendor(
   fallback?: 'claude' | 'codex',
 ): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
-  if (vendor !== null || origin !== 'human') return { vendor, usedHumanFallback: false }
+  if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') return { vendor, usedHumanFallback: false }
+  if (fallback && config.vendors[fallback].enabled) return { vendor: fallback, usedHumanFallback: true }
   if (config.vendors.claude.enabled) return { vendor: 'claude', usedHumanFallback: true }
   if (config.vendors.codex.enabled) return { vendor: 'codex', usedHumanFallback: true }
   return { vendor: null, usedHumanFallback: false }

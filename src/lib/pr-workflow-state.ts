@@ -11,6 +11,8 @@ export interface StepRecord {
   verdict?: string
   /** PR head SHA when this step ran (review/recheck only; absent on older comments) */
   sha?: string
+  /** SHA the fix commit pushed to (fix records only; parsed from the commit URL in the body) */
+  pushedSha?: string
   round: number
   commentId: number
   commentBody: string
@@ -59,7 +61,11 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
   // Bareword markers: fix_applied and conflict_resolved have no origin/reviewer fields
   const marker = fields.get('__marker__')
   if (marker === 'fix_applied') {
-    return { type: 'fix', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at }
+    // The fix comment body embeds the pushed SHA as a full commit URL — extract it
+    // so identifyNextWorkflowStep can verify the fix commit before routing to recheck.
+    const shaMatch = comment.body.match(/\/commit\/([0-9a-f]{40})/i)
+    const pushedSha = shaMatch ? shaMatch[1] : undefined
+    return { type: 'fix', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at, ...(pushedSha !== undefined && { pushedSha }) }
   }
   if (marker === 'conflict_resolved') {
     return { type: 'conflict-resolve', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at }
@@ -224,13 +230,32 @@ export function identifyNextWorkflowStep(
     if (fixStepDef && fixStepDef.name !== 'fix') syntheticResults[fixStepDef.name] = { applied_count: 1 }
   }
 
-  // Legacy comments have no sha field — treat as not reviewed so new commits
-  // always get a fresh review rather than inheriting an old approval.
+  // P1 fix: legacy comments have no sha field — treat as not reviewed so new pushes
+  // always get a fresh review rather than inheriting an old approval or being silently skipped.
   const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
 
   if (!reviewedCurrentSha) {
-    // Human pushed a new commit, or fix_applied has no SHA to verify against —
-    // in either case we can't confirm currentSha is the fix commit, so require a fresh review.
+    if (fixAfterReview) {
+      // P2 fix: a fix ran since the last review. Only route to recheck when we can
+      // verify that currentSha IS the commit the fix pushed — the pushed SHA is
+      // extracted from the commit URL in the fix_applied comment body.
+      const lastFix = historyAfterReview.filter(r => r.type === 'fix').at(-1)
+      const fixPushedSha = lastFix?.pushedSha
+      if (fixPushedSha !== undefined && fixPushedSha === currentSha) {
+        // currentSha is confirmed to be the fix commit → recheck is appropriate
+        const recheckStep = steps.find(s => s.type === 'recheck')
+        const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
+        if (recheckStep) {
+          return { step: recheckStep, reviewComment, hasExistingReview: true, round: lastReview.round, history }
+        }
+        return { step: null, hasExistingReview: true, round: lastReview.round, history }
+      }
+      // pushedSha unknown or doesn't match currentSha — human pushed on top of
+      // the fix commit, or fix_applied is a legacy marker without a commit URL.
+      // Fall through to fresh review so the new diff is not silently skipped.
+    }
+    // No fix ran, or the fix's push sha doesn't match — human pushed a new commit.
+    // Require a fresh review rather than routing to recheck with stale context.
     const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
     return { step: reviewStep, hasExistingReview: true, round: lastReview.round + 1, history }
   }

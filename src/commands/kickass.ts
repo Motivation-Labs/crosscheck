@@ -211,7 +211,7 @@ export async function executeKickassPlan(
 
   // Retry transient failures up to 4 times with escalating delays.
   // Auth and permission failures are operator issues that won't self-heal.
-  const RETRYABLE = new Set<string>(['network', 'subprocess', 'timeout'])
+  const RETRYABLE = new Set<string>(['network', 'timeout'])
   const RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 600_000]
 
   for (let attempt = 2; attempt <= RETRY_DELAYS_MS.length + 1; attempt++) {

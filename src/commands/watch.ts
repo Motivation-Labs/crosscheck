@@ -362,6 +362,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
           isRecheckRun,
           round,
+          trigger: params.action === 'backtrace' ? 'backtrace' : 'watch',
         })
 
         void verdict

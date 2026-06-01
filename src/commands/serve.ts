@@ -29,6 +29,7 @@ import { clonePRForReview } from '../lib/clone.js'
 import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+import { CROSSCHECK_ISSUES_URL } from '../lib/product.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -232,6 +233,7 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
       isRecheckRun,
       round,
+      trigger: event.action === 'backtrace' ? 'backtrace' : 'serve',
     })
 
     reviewedPRKeys.add(prKey)
@@ -365,7 +367,7 @@ export async function runServe(opts: ServeOpts = {}) {
     const webhookUrl = `http://${hostname()}:${effectivePort}${config.server.webhook_path}`
     console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
     console.log(chalk.bold('crosscheck serving\n'))
-    console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
+    console.log(chalk.yellow(`  ⚠  serve is in beta — report issues at ${CROSSCHECK_ISSUES_URL}\n`))
     if (effectiveDeployment) {
       const label = sessionOnly
         ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)

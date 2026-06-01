@@ -251,4 +251,56 @@ describe('buildWorkflowCompleteEvent', () => {
     })
     expect(ev.steps_run).toEqual(['custom-review', 'gate-check', 'apply-fixes', 'final-pass'])
   })
+
+  it('aggregates total_tokens and splits when steps carry token data', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review:  { verdict: 'NEEDS_WORK', tokens_used: 5000, input_tokens: 4000, output_tokens: 1000, vendor: 'codex' },
+        fix:     { applied_count: 2, tokens_used: 8000, vendor: 'claude' },
+        recheck: { verdict: 'APPROVE', tokens_used: 3000, input_tokens: 2500, output_tokens: 500, vendor: 'codex' },
+      },
+    })
+    expect(ev.total_tokens).toBe(16000)
+    expect(ev.total_input_tokens).toBe(6500)
+    expect(ev.total_output_tokens).toBe(1500)
+  })
+
+  it('omits total_tokens when no step has token data', () => {
+    const ev = buildWorkflowCompleteEvent(base)
+    expect('total_tokens' in ev).toBe(false)
+  })
+
+  it('omits split fields when no step has input/output token splits', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review: { verdict: 'NEEDS_WORK', tokens_used: 5000, vendor: 'codex' },
+        fix:    { applied_count: 1, tokens_used: 3000, vendor: 'claude' },
+      },
+    })
+    expect(ev.total_tokens).toBe(8000)
+    expect('total_input_tokens' in ev).toBe(false)
+    expect('total_output_tokens' in ev).toBe(false)
+  })
+
+  it('collects unique vendors_used across steps', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review:  { verdict: 'NEEDS_WORK', vendor: 'codex' },
+        fix:     { applied_count: 1, vendor: 'claude' },
+        recheck: { verdict: 'APPROVE', vendor: 'codex' },
+      },
+    })
+    expect(ev.vendors_used).toEqual(expect.arrayContaining(['codex', 'claude']))
+    expect((ev.vendors_used as string[]).length).toBe(2)
+  })
+
+  it('includes quality_tier when provided', () => {
+    const ev = buildWorkflowCompleteEvent({ ...base, qualityTier: 'thorough' })
+    expect(ev.quality_tier).toBe('thorough')
+    const without = buildWorkflowCompleteEvent(base)
+    expect('quality_tier' in without).toBe(false)
+  })
 })

@@ -190,7 +190,7 @@ post_review:
 # Each line is a JSON object: { ts, level, event, ...context }
 logs:
   enabled: true
-  retention_days: 7   # delete files older than N days (min: 1, max: 30)
+  retention_days: 30  # delete files older than N days (min: 1, max: 365)
 
 # ─── Display ─────────────────────────────────────────────────────────────────
 # Terminal output theme for crosscheck watch.

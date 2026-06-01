@@ -1,10 +1,13 @@
 import type { Octokit } from 'octokit'
 
 const CONTEXT = 'crosscheck/review'
-const STALE_MS = 15 * 60 * 1000
-// Heartbeat keeps the pending status fresh so long-running reviews (codex
-// thorough + fix can exceed 20 min) are not mistaken as abandoned.
-const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000
+// Lock is stale when the process hasn't heartbeated within this window.
+// Shorter = faster self-heal after a crash; must exceed HEARTBEAT_INTERVAL_MS
+// by enough margin to survive a slow GitHub API round-trip.
+const STALE_MS = 5 * 60 * 1000
+// Heartbeat keeps the pending status fresh so long-running reviews don't look
+// abandoned. Must be well under STALE_MS so a live review never goes stale.
+const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000
 
 export async function checkRemoteLock(
   octokit: Octokit,

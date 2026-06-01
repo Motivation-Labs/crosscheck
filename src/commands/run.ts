@@ -30,6 +30,7 @@ export interface RunOpts {
   expectedHeadSha?: string
   timeout?: string
   noTimeout?: boolean
+  trigger?: import('../lib/runner.js').WorkflowTrigger
 }
 
 
@@ -178,6 +179,17 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   spinner.succeed(`PR #${number}: ${prData.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: prData.head.sha })
 
+  // Early signal handler: covers the window between pr_received and the full
+  // onSignal handler installed below (after acquirePRLock + acquireRemoteLock).
+  // Without this, a SIGINT/SIGTERM during origin detection or step resolution
+  // exits Node silently with no fileLog event.
+  const earlySignalHandler = (signal: NodeJS.Signals): void => {
+    fileLog({ level: 'info', event: 'session_killed', repo: `${owner}/${repo}`, pr: number, phase: 'setup', signal })
+    process.exit(signal === 'SIGTERM' ? 143 : 130)
+  }
+  process.once('SIGINT', earlySignalHandler)
+  process.once('SIGTERM', earlySignalHandler)
+
   // Resolve origin and reviewer
   const normalizedReviewer = normalizeVendor(opts.reviewer)
   if (opts.reviewer !== undefined && normalizedReviewer === null) {
@@ -314,6 +326,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       process.exit(signal === 'SIGTERM' ? 143 : 130)
     })()
   }
+  process.removeListener('SIGINT', earlySignalHandler)
+  process.removeListener('SIGTERM', earlySignalHandler)
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
 
@@ -342,6 +356,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     acquiredTmpDir = tmpDir
     const cloneSpinner = ora('Cloning repo...').start()
 
+    let workflowError: unknown
     try {
       clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
@@ -364,6 +379,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         overrideMaxRounds: opts.roundMode ? Infinity : undefined,
         roundMode: opts.roundMode,
         overrideTimeoutMs: reviewerTimeoutMs,
+        trigger: opts.trigger ?? 'run',
       }
 
       let workflowResult = await runWorkflow({
@@ -467,25 +483,23 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
 
       console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
-
-      stopHeartbeat()
-      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
     } catch (err: unknown) {
-      stopHeartbeat()
-      if (!opts.dryRun) {
-        try { await releaseRemoteLock(octokit, owner, repo, sha, 'failure') } catch { /* best-effort */ }
-        await drainLoopLocks('failure')
-      }
+      workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
       console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-      releasePRLock(owner, repo, number, sha)
-      if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
-      process.exit(2)
     } finally {
+      stopHeartbeat()
+      if (!opts.dryRun && lockAttemptStarted) {
+        try { await releaseRemoteLock(octokit, owner, repo, sha, workflowError ? 'failure' : 'success') } catch { /* best-effort */ }
+        await drainLoopLocks(workflowError ? 'failure' : 'success')
+      }
       releasePRLock(owner, repo, number, sha)
       if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
+    if (workflowError) process.exit(2)
   } finally {
+    process.removeListener('SIGINT', earlySignalHandler)
+    process.removeListener('SIGTERM', earlySignalHandler)
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
   }

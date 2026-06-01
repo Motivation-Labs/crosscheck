@@ -2,6 +2,7 @@
 // conflict-resolve) so the timeline shows a card instead of just a "X pushed
 // N commits" line. Pure functions — kept here so they can be unit-tested
 // without exercising the runner.
+import { CROSSCHECK_REPO_URL } from './product.js'
 
 // Cap the file list at this length to keep comment bodies readable when a
 // resolve touches many files.
@@ -29,7 +30,7 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
     `Pushed [\`${shortSha}\`](${commitUrl})${backlink}: **${appliedCount} change${plural} applied**.`,
     '',
     '---',
-    '_Applied by crosscheck via Claude Code._',
+    `_Applied by Claude Code via [Crosscheck](${CROSSCHECK_REPO_URL})._`,
     '',
     '<!-- crosscheck: fix_applied -->',
   ].join('\n')
@@ -63,7 +64,7 @@ export function buildConflictResolvedCommentBody(input: ConflictResolvedCommentI
     `Pushed [\`${shortSha}\`](${commitUrl}).`,
     '',
     '---',
-    '_Resolved by crosscheck via Claude Code._',
+    `_Resolved by Claude Code via [Crosscheck](${CROSSCHECK_REPO_URL})._`,
     '',
     '<!-- crosscheck: conflict_resolved -->',
   ].join('\n')

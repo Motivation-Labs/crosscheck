@@ -181,6 +181,8 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   // Fast-path: if the PR was reviewed in this session, skip the API call.
   let isRecheckRun = reviewedPRKeys.has(prKey)
   let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+  let resolvedSteps: WorkflowStep[] | undefined
+  let detectedReviewComment: { id?: number; body: string } | undefined
 
   if (!isRecheckRun) {
     try {
@@ -197,6 +199,9 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       if (nextResult.hasExistingReview) {
         isRecheckRun = nextResult.step.type !== 'review'
         round = nextResult.round
+        detectedReviewComment = nextResult.reviewComment
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        if (nextStepIdx >= 0) resolvedSteps = allSteps.slice(nextStepIdx)
       }
     } catch { /* best-effort — fall back to session-based detection */ }
   }
@@ -255,6 +260,8 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+      ...(resolvedSteps !== undefined && { steps: resolvedSteps }),
+      ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
       isRecheckRun,
       round,
       trigger: event.action === 'backtrace' ? 'backtrace' : 'serve',

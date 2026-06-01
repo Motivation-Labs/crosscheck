@@ -30,7 +30,7 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
@@ -305,6 +305,8 @@ export async function runWatch(opts: WatchOpts = {}) {
       // Fast-path: if the PR was reviewed in this session, skip the API call.
       let isRecheckRun = reviewedPRKeys.has(prKey)
       let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+      let resolvedSteps: WorkflowStep[] | undefined
+      let detectedReviewComment: { id?: number; body: string } | undefined
 
       if (!isRecheckRun) {
         try {
@@ -322,6 +324,12 @@ export async function runWatch(opts: WatchOpts = {}) {
           if (nextResult.hasExistingReview) {
             isRecheckRun = nextResult.step.type !== 'review'
             round = nextResult.round
+            detectedReviewComment = nextResult.reviewComment
+            // Slice allSteps to start from the detected next step so runWorkflow
+            // runs the correct operations (fix, recheck, etc.) rather than starting
+            // from review and relying solely on isRecheckRun coercion.
+            const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+            if (nextStepIdx >= 0) resolvedSteps = allSteps.slice(nextStepIdx)
           }
         } catch { /* best-effort — fall back to session-based detection */ }
       }
@@ -385,6 +393,8 @@ export async function runWatch(opts: WatchOpts = {}) {
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+          ...(resolvedSteps !== undefined && { steps: resolvedSteps }),
+          ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
           isRecheckRun,
           round,
           trigger: params.action === 'backtrace' ? 'backtrace' : 'watch',

@@ -8,7 +8,8 @@ import { createGithubClient } from '../github/client.js'
 import { getGithubToken, loadConfig } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
 import { parseDuration } from '../lib/durations.js'
-import { logError } from '../lib/logger.js'
+import { classifyError, logError } from '../lib/logger.js'
+import type { ErrorCategory } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
@@ -24,7 +25,7 @@ export interface KickassOpts {
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
-export type KickassFailureReason = 'error'
+export type KickassFailureReason = ErrorCategory
 export type FixDeliveryMode = Config['post_review']['auto_fix']['delivery']['mode']
 
 export interface PreflightItem {
@@ -228,7 +229,7 @@ export async function executeKickassPlan(
 ): Promise<KickassExecutionResult[]> {
   const results: KickassExecutionResult[] = new Array(plan.length)
 
-  const executeItem = async (item: PreflightItem, index: number): Promise<void> => {
+  const executeItem = async (item: PreflightItem, index: number, attempt = 1): Promise<void> => {
     if (item.action === 'skip') {
       console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
       results[index] = { pr: item.pr, status: 'skipped', reason: item.skipReason }
@@ -243,7 +244,8 @@ export async function executeKickassPlan(
         return
       }
 
-      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
+      const attemptLabel = attempt > 1 ? ` (retry ${attempt - 1})` : ''
+      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
       const output = await deps.dispatchRun(item)
       if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output)
 
@@ -260,9 +262,28 @@ export async function executeKickassPlan(
       }
       results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
-      logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
+      logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
       console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      results[index] = { pr: item.pr, status: 'failed', reason: 'error' }
+      // Classify execa errors using structured fields, not the raw message.
+      // The raw message includes the full CLI invocation (e.g. "Command failed with exit
+      // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
+      // `message` would misclassify ordinary subprocess failures as 'timeout' whenever the
+      // command contains a --timeout flag.
+      const maybeExeca = err as Record<string, unknown>
+      let msgForClassify: string
+      if (maybeExeca.timedOut === true) {
+        // execa's structured timeout flag — reliable; bypass message matching entirely.
+        msgForClassify = 'timed out'
+      } else if (typeof maybeExeca.exitCode === 'number') {
+        // Subprocess failure: prefer stderr (actual error output) over the message which
+        // includes the full command string.  Strip the command suffix when stderr is absent.
+        const stderr = typeof maybeExeca.stderr === 'string' ? maybeExeca.stderr.trim() : ''
+        msgForClassify = stderr || (err instanceof Error ? err.message.replace(/:\s*\S.*$/, '') : String(err))
+      } else {
+        msgForClassify = err instanceof Error ? err.message : String(err)
+      }
+      const category = classifyError(msgForClassify)
+      results[index] = { pr: item.pr, status: 'failed', reason: category }
     }
   }
 
@@ -280,6 +301,42 @@ export async function executeKickassPlan(
       }
     }
     await Promise.all(Array.from({ length: Math.min(concurrency, plan.length) }, worker))
+  }
+
+  // Retry transient failures up to 4 times with escalating delays.
+  // Auth and permission failures are operator issues that won't self-heal.
+  const RETRYABLE = new Set<string>(['network', 'timeout'])
+  const RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 600_000]
+
+  for (let attempt = 2; attempt <= RETRY_DELAYS_MS.length + 1; attempt++) {
+    const delayMs = RETRY_DELAYS_MS[attempt - 2]
+    const retryItems = results
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => r.status === 'failed' && RETRYABLE.has(r.reason as string))
+    if (retryItems.length === 0) break
+
+    const delaySec = delayMs / 1000
+    const delayLabel = delaySec >= 60 ? `${delaySec / 60}m` : `${delaySec}s`
+    console.log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
+    await new Promise(resolve => setTimeout(resolve, delayMs))
+    for (const { i } of retryItems) {
+      const priorResult = results[i]
+      await executeItem(plan[i], i, attempt)
+      // Stale-signature means the fix already committed in a prior attempt but the
+      // chained recheck failed transiently.  Instead of reporting that failure as
+      // final, fetch the current head and run a bare recheck to actually retry it.
+      if (results[i].status === 'skipped' && results[i].reason === 'stale_signature'
+          && plan[i].action === 'fix' && plan[i].chainRecheck === true) {
+        try {
+          const currentHead = await deps.getCurrentHeadSha(plan[i])
+          const recheckItem = buildPostFixRecheckItem(plan[i], currentHead)
+          await executeItem(recheckItem, i, attempt)
+        } catch {
+          // If we cannot fetch the head (network failure), preserve the original failure.
+          results[i] = priorResult
+        }
+      }
+    }
   }
 
   return results

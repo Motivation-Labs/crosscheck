@@ -75,13 +75,15 @@ export function isExtendedLoggingEnabled(): boolean {
   return _extendedEnabled
 }
 
-function classifyError(message: string): ErrorCategory {
+export function classifyError(message: string): ErrorCategory {
   const m = message.toLowerCase()
   if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'
   if (/rate limit|secondary rate|429/.test(m)) return 'rate_limit'
+  // Network check must precede timeout: subprocess stderr containing 'fetch failed'
+  // would otherwise be shadowed by '--no-timeout' in the CLI command string.
+  if (/fetch failed|econnrefused|enotfound|network error|socket hang|socket timeout/.test(m)) return 'network'
   if (/timeout|timed out|etimedout|deadline/.test(m)) return 'timeout'
-  if (/econnrefused|enotfound|network|socket hang|socket timeout/.test(m)) return 'network'
   if (/exited with code|exit code [^0]|subprocess|command failed/.test(m)) return 'subprocess'
   return 'unknown'
 }

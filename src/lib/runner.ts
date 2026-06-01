@@ -24,6 +24,14 @@ import type { PRPhase } from '../lib/board.js'
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
 
+// Per-vendor configured timeout (seconds) → execa milliseconds, or undefined when
+// unset so the reviewer falls back to its built-in default. A per-run override
+// (ctx.overrideTimeoutMs, set by --timeout / --crazy / --halfcrazy) always wins
+// over this; 0 from that override means "no cap" and is preserved by `??`.
+function vendorTimeoutMs(timeoutSec: number | null): number | undefined {
+  return timeoutSec == null ? undefined : timeoutSec * 1000
+}
+
 // Auth failures are operator issues that won't self-heal — everything else is worth a retry.
 export function isRetryableFixError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
@@ -357,6 +365,11 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
+  // When a fix commits and a structural review/recheck step follows, we acquire
+  // the remote lock on the pushed SHA. Track it here so the finally can detect
+  // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
+  // release the SHA as `failure` rather than `success` in that case.
+  let fixPushedShaRequiresRecheck: string | null = null
 
   // workflow_complete event accumulators. Each step the runner dispatches is
   // recorded in stepsRun (including ones that get logged as step_skipped —
@@ -401,6 +414,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         continue
       }
 
+      // The recheck step is confirmed to run — clear the pending-recheck guard
+      // so the finally doesn't release the fix-pushed SHA as failure.
+      fixPushedShaRequiresRecheck = null
       const stepIdentity = buildStepIdentityFields(effectiveType, step.name)
       fileLog({ level: 'info', event: 'review_started', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }) })
 
@@ -417,9 +433,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let outputTokens: number | undefined
       let model = 'default'
       if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs))
+        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
       } else {
-        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs))
+        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec)))
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -528,7 +544,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
+          tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1 }, err)
@@ -543,7 +559,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         onPhaseChange(`${vendor} fixing (retry)...`, { phase: 'fixing' })
         try {
           ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFixStep(
-            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs,
+            tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '', config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
           ))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
@@ -612,6 +628,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             const lockOctokit = createGithubClient(token)
             await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
             pushedShasNeedingRelease.push(newSha)
+            fixPushedShaRequiresRecheck = newSha
           } catch (err) {
             fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
           }
@@ -764,7 +781,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
       try {
         ;({ appliedCount, resolvedPaths, tokensUsed: resolveTokensUsed } = await runConflictResolveStep(
-          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs,
+          tmpDir, pr.title, step.instructions ?? '', conflictResolveModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
         ))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
@@ -906,9 +923,28 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     workflowFailed = true
     throw err
   } finally {
-    if (pushedShasNeedingRelease.length > 0) {
+    if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
       const lockOctokit = createGithubClient(token)
       const outcome: 'success' | 'failure' = workflowFailed ? 'failure' : 'success'
+
+      // A recheck step was expected after the fix but was skipped (by `when`,
+      // no_reviewer, max_rounds, etc.). The fix-pushed SHA is in
+      // pushedShasNeedingRelease but no recheck ran to confirm the commit, so
+      // releasing it as `success` would mislead branch protection. Release it
+      // as `failure` instead so the commit remains unreviewed until the recheck
+      // runs in a subsequent invocation (e.g. via `crosscheck run --steps recheck`).
+      if (fixPushedShaRequiresRecheck !== null) {
+        const unrecheckedSha = fixPushedShaRequiresRecheck
+        fixPushedShaRequiresRecheck = null
+        const idx = pushedShasNeedingRelease.indexOf(unrecheckedSha)
+        if (idx !== -1) pushedShasNeedingRelease.splice(idx, 1)
+        try {
+          await releaseRemoteLock(lockOctokit, owner, repoName, unrecheckedSha, 'failure')
+        } catch (err) {
+          fileLog({ level: 'warn', event: 'pushed_sha_release_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: unrecheckedSha, error: err instanceof Error ? err.message : String(err) })
+        }
+      }
+
       // Drain via shift() so each released sha is synchronously removed from
       // the shared array. The command-layer SIGINT/SIGTERM handler iterates
       // the same array — if a late signal arrives after this finally has

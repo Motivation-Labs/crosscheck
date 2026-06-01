@@ -82,15 +82,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: production          # ← requires approval from beingzy before running
     permissions:
-      contents: write   # push git tag
-      id-token: write   # npm provenance
-      actions: write    # dispatch publish.yml for staging @beta
+      contents: write        # push git tag and version-bump commit
+      id-token: write        # npm provenance
+      actions: write         # dispatch publish.yml for staging @beta
+      pull-requests: write   # open staging sync PR
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - uses: actions/setup-node@v4
         with:
@@ -110,7 +111,6 @@ jobs:
             npm version "${{ needs.compute.outputs.new_version }}" --no-git-tag-version
             git add package.json package-lock.json
             git commit -m "chore: release ${{ needs.compute.outputs.new_tag }}"
-            git push origin HEAD:main
           fi
           if git rev-parse "${{ needs.compute.outputs.new_tag }}" >/dev/null 2>&1; then
             echo "Tag ${{ needs.compute.outputs.new_tag }} already exists — skipping."
@@ -120,7 +120,13 @@ jobs:
           fi
 
       - name: Publish to npm @latest
-        run: npm publish --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+            echo "Version ${VERSION} already on npm — skipping publish."
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -154,6 +160,13 @@ jobs:
             ${{ needs.compute.outputs.changelog }}
 
       - name: Sync release version to staging
+        # Staging is a protected branch — a direct push is never permitted.
+        # Open a PR instead; enable auto-merge so it lands without manual work
+        # when no required checks block it. The step is non-fatal: @beta must
+        # publish even if the version-sync PR can't be created for any reason.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git fetch origin staging
           git fetch --tags
@@ -161,10 +174,19 @@ jobs:
           git checkout "${{ needs.compute.outputs.new_tag }}" -- package.json package-lock.json
           if git diff --cached --quiet; then
             echo "staging already at ${{ needs.compute.outputs.new_tag }} — nothing to sync"
-          else
-            git commit -m "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging"
-            git push origin staging
+            exit 0
           fi
+          SYNC_BRANCH="ci/sync-${{ needs.compute.outputs.new_tag }}-to-staging"
+          git checkout -b "$SYNC_BRANCH"
+          git commit -m "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging"
+          git push origin "$SYNC_BRANCH"
+          gh pr create \
+            --base staging \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync ${{ needs.compute.outputs.new_tag }} version to staging" \
+            --body "Automated version sync from release ${{ needs.compute.outputs.new_tag }}."
+          gh pr merge "$SYNC_BRANCH" --merge --auto \
+            || echo "auto-merge not available — PR opened, merge manually or enable auto-merge in repo settings"
 
       - name: Trigger @beta publish on staging
         uses: actions/github-script@v7

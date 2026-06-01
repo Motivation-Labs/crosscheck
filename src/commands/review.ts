@@ -101,6 +101,10 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     reviewSpinner = ora(`Running ${reviewer} review...`).start()
     const elapsedTimer = setInterval(() => { elapsed++; reviewSpinner!.text = `Running ${reviewer} review... (${elapsed}s)` }, 1000)
 
+    // Honor a per-vendor configured timeout; unset (null) → reviewer's built-in default.
+    const codexTimeoutMs = config.vendors.codex.timeout_sec == null ? undefined : config.vendors.codex.timeout_sec * 1000
+    const claudeTimeoutMs = config.vendors.claude.timeout_sec == null ? undefined : config.vendors.claude.timeout_sec * 1000
+
     try {
       if (reviewer === 'codex') {
         ;({ review: reviewText, tokensUsed, model } = await runCodexReview(
@@ -111,6 +115,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.vendors.codex,
           undefined,
           msg => { reviewSpinner!.text = msg },
+          codexTimeoutMs,
         ))
       } else {
         ;({ review: reviewText, tokensUsed, model } = await runClaudeReview(
@@ -122,6 +127,7 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
           config.budget.per_review_usd,
           undefined,
           msg => { reviewSpinner!.text = msg },
+          claudeTimeoutMs,
         ))
       }
     } finally {

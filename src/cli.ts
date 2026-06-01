@@ -87,10 +87,11 @@ program
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
   .option('--crazy', 'loop fix→recheck until APPROVE (ceiling: 2 rounds); disables all timeout constraints')
   .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
+  .option('--halfcrazy', '(deprecated alias for --half-crazy)')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy; used internally by kickass fix legs)')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; timeout?: string | false; noTimeout?: boolean }) => {
-    const roundMode = opts.crazy ? 'crazy' : opts.halfCrazy ? 'halfcrazy' : undefined
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean }) => {
+    const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
     const noTimeout = opts.noTimeout || opts.timeout === false
     void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined })
@@ -113,9 +114,10 @@ program
   .option('--dry-run', 'print selected actions without running them')
   .option('--crazy', 'loop fix→recheck per PR until APPROVE (ceiling: 2 rounds); disables all timeout constraints')
   .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK (ceiling: 2 rounds); disables all timeout constraints')
+  .option('--halfcrazy', '(deprecated alias for --half-crazy)')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; timeout?: string }) => {
-    const roundMode = opts.crazy ? 'crazy' : opts.halfCrazy ? 'halfcrazy' : undefined
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string }) => {
+    const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     void runKickass({ ...opts, roundMode })
   })
 

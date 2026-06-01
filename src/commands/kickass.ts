@@ -390,7 +390,9 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     cli ??= resolveCliInvocation()
     return cli
   }
-  const isParallel = (opts.concurrent ?? 0) !== 0
+  // opts.concurrent = 0 means "one per PR" (fully parallel); undefined means sequential.
+  // Any explicit --concurrent value uses buffered stdio; sequential streams inline.
+  const isParallel = opts.concurrent !== undefined
   return {
     loadScanResult,
     pickPRs,

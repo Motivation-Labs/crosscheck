@@ -497,24 +497,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           env: { ...process.env, GITHUB_TOKEN: token, GH_TOKEN: token },
         })
         ctx.crosscheckShas.add(newSha)
-        // Set a pending status on the pushed commit so branch-protection checks
-        // requiring crosscheck/review on HEAD don't leave the commit unreviewed.
-        //
-        // Only enqueue for release if a review/recheck step follows in THIS
-        // workflow invocation. Fix-only runs (e.g. `--steps fix` dispatched by
-        // kickass) must leave the status pending so the separately-dispatched
-        // recheck can claim and release it — releasing as success here would
-        // mark the commit reviewed before any recheck has run.
-        try {
-          const lockOctokit = createGithubClient(token)
-          await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
-          const currentStepIdx = steps.indexOf(step)
-          const hasRecheckAfterFix = steps.slice(currentStepIdx + 1).some(s => s.type === 'review' || s.type === 'recheck')
-          if (hasRecheckAfterFix) {
+        // Set a pending status on the pushed commit only when a review/recheck
+        // step follows in THIS workflow invocation — that step will release it.
+        // Fix-only runs (kickass `--steps fix`) must NOT acquire the lock here:
+        // doing so leaves a PENDING status that the separately-dispatched recheck
+        // (`--steps recheck`) sees as "in-progress" via checkRemoteLock and skips,
+        // permanently orphaning the PENDING status.
+        const currentStepIdx = steps.indexOf(step)
+        const hasRecheckAfterFix = steps.slice(currentStepIdx + 1).some(s => s.type === 'review' || s.type === 'recheck')
+        if (hasRecheckAfterFix) {
+          try {
+            const lockOctokit = createGithubClient(token)
+            await acquireRemoteLock(lockOctokit, owner, repoName, newSha)
             pushedShasNeedingRelease.push(newSha)
+          } catch (err) {
+            fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
           }
-        } catch (err) {
-          fileLog({ level: 'warn', event: 'remote_lock_refresh_failed', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha, error: err instanceof Error ? err.message : String(err) })
         }
         onPhaseChange('fixed ✓', { fixCount: appliedCount, phase: 'fixed', fixTokens: fixTokensUsed })
         fileLog({ level: 'info', event: 'fix_complete', repo: `${owner}/${repoName}`, pr: prNumber, vendor, applied_count: appliedCount, sha: newSha, delivery: 'commit', tokens_used: fixTokensUsed, duration_ms: Date.now() - fixStepStart })

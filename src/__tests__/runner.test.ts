@@ -9,6 +9,7 @@ import {
   exceedsMaxRounds,
   countCrosscheckCommitsForPR,
   buildWorkflowCompleteEvent,
+  resolveFixVendor,
 } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
@@ -302,5 +303,58 @@ describe('buildWorkflowCompleteEvent', () => {
     expect(ev.quality_tier).toBe('thorough')
     const without = buildWorkflowCompleteEvent(base)
     expect('quality_tier' in without).toBe(false)
+  })
+})
+
+describe('resolveFixVendor', () => {
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean) => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+    },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any
+
+  describe('human-origin fallback', () => {
+    it('returns claude when reviewer:origin, origin:human, claude enabled', () => {
+      const result = resolveFixVendor('origin', 'human', cfg(true, true))
+      expect(result).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('returns codex when reviewer:origin, origin:human, claude disabled', () => {
+      const result = resolveFixVendor('origin', 'human', cfg(false, true))
+      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('returns null when reviewer:origin, origin:human, both vendors disabled', () => {
+      const result = resolveFixVendor('origin', 'human', cfg(false, false))
+      expect(result).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('non-human origins — unchanged behaviour', () => {
+    it('returns codex for codex-origin with reviewer:origin', () => {
+      const result = resolveFixVendor('origin', 'codex', cfg(true, true))
+      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+
+    it('returns claude for claude-origin with reviewer:origin', () => {
+      const result = resolveFixVendor('origin', 'claude', cfg(true, true))
+      expect(result).toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+
+    it('returns claude for reviewer:claude regardless of origin', () => {
+      expect(resolveFixVendor('claude', 'human', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+      expect(resolveFixVendor('claude', 'codex', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+  })
+
+  describe('fallback parameter respected', () => {
+    it('prefers explicit fallback over human-origin fallback for reviewer:origin', () => {
+      // smartSwitchFallback='codex' passed to resolveFixVendor — resolveReviewer uses it
+      // before we even reach the human-origin branch, so usedHumanFallback is false.
+      const result = resolveFixVendor('origin', 'human', cfg(false, true), 'codex')
+      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
   })
 })

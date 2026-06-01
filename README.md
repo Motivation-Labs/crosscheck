@@ -155,6 +155,9 @@ crosscheck run <pr-url> --steps review           # only the review step
 crosscheck run <pr-url> --steps fix,recheck      # skip initial review
 crosscheck run <pr-url> --reviewer claude        # override reviewer assignment
 crosscheck run <pr-url> --dry-run                # review without posting or fixing
+crosscheck run <pr-url> --crazy                  # 🔥🔥 loop until APPROVE
+crosscheck run <pr-url> --half-crazy             # 🔥  loop until not BLOCK
+crosscheck run <pr-url> --timeout 10m            # custom reviewer timeout
 ```
 
 ---
@@ -184,9 +187,33 @@ crosscheck kickass                       # interactive operator queue
 crosscheck kickass --dry-run             # preflight only — no mutations
 crosscheck kickass --stale-after 2h      # tighter staleness threshold
 crosscheck kickass --force               # bypass scan cache before picking
+crosscheck kickass --crazy               # 🔥🔥 auto loop until APPROVE
+crosscheck kickass --half-crazy          # 🔥  auto loop until not BLOCK
 ```
 
 Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
+
+**Autonomous loop modes**
+
+`--crazy` and `--half-crazy` turn `run` and `kickass` into autonomous fix→recheck loops that keep going until the verdict improves — no manual re-runs needed.
+
+| Flag | Stops when | Max rounds | Timeout |
+|---|---|---|---|
+| `--crazy` 🔥🔥 | verdict = `APPROVE` | 2 | none |
+| `--half-crazy` 🔥 | verdict ≠ `BLOCK` | 2 | none |
+
+Both flags disable all reviewer subprocess timeout constraints — long fixes on large PRs won't be cut short. Use `--timeout <duration>` (e.g. `--timeout 10m`) without these flags to set a custom cap.
+
+```bash
+# Run full workflow and keep looping until approved
+crosscheck run <pr-url> --crazy
+
+# Advance every stale PR until it's no longer blocked
+crosscheck kickass --half-crazy
+
+# Custom timeout without looping
+crosscheck run <pr-url> --timeout 10m
+```
 
 ---
 

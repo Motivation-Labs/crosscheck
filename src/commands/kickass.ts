@@ -301,7 +301,7 @@ export function buildKickassRunArgs(
   ]
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
-    else if (roundMode === 'halfcrazy') args.push('--halfcrazy')
+    else if (roundMode === 'halfcrazy') args.push('--half-crazy')
   } else if (roundMode) {
     // fix legs don't loop, but still need the no-timeout constraint lifted
     args.push('--no-timeout')

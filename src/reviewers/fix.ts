@@ -3,7 +3,6 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
-import { DEFAULT_CLAUDE_TIMEOUT_SEC } from './claude.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -80,6 +79,7 @@ export async function runFixStep(
   instructions: string,
   config: Config,
   model = 'default',
+  timeoutMs?: number,
 ): Promise<{ appliedCount: number; tokensUsed?: number }> {
   let diff = ''
   try {
@@ -100,9 +100,10 @@ export async function runFixStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
+    const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
       input: prompt,
-      timeout: (config.vendors.claude.timeout_sec ?? DEFAULT_CLAUDE_TIMEOUT_SEC) * 1000,
+      timeout: resolvedTimeout,
       env: { ...process.env },
     })
     const raw = stdout.trim()

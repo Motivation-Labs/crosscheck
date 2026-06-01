@@ -64,6 +64,13 @@ describe('exceedsMaxRounds', () => {
   it('never skips a plain review step', () => {
     expect(exceedsMaxRounds('review', 'review', 1, 2)).toBe(false)
   })
+
+  it('never skips when overrideMaxRounds is Infinity (crazy/halfcrazy mode)', () => {
+    // --crazy / --halfcrazy pass Infinity as the effective maxRounds; step.max_rounds is ignored
+    expect(exceedsMaxRounds('fix', 'fix', Infinity, 99)).toBe(false)
+    expect(exceedsMaxRounds('recheck', 'recheck', Infinity, 99)).toBe(false)
+    expect(exceedsMaxRounds('fix', 'fix', Infinity, 1)).toBe(false)
+  })
 })
 
 describe('countCrosscheckCommitsForPR', () => {

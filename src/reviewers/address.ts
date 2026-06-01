@@ -2,7 +2,6 @@ import { execSync, execFileSync } from 'child_process'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
 import type { Config } from '../config/schema.js'
-import { DEFAULT_CLAUDE_TIMEOUT_SEC } from './claude.js'
 
 const PROMPT_TEMPLATE = `You opened a pull request that received the following code review.
 
@@ -63,7 +62,7 @@ export async function runAddressStep(
     output = execFileSync('claude', ['--print', '--output-format', 'text'], {
       input: prompt,
       encoding: 'utf8',
-      timeout: (config.vendors.claude.timeout_sec ?? DEFAULT_CLAUDE_TIMEOUT_SEC) * 1000,
+      timeout: 180_000,
       env: { ...process.env },
       maxBuffer: 10 * 1024 * 1024,
     }).trim()

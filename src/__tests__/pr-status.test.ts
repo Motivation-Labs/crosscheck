@@ -101,15 +101,16 @@ describe('parseCrosscheckAnnotation', () => {
 })
 
 describe('derivePRStatus', () => {
-  it('marks untouched PRs as reviewable PR state', () => {
+  it('marks untouched PRs as NEEDS_REVIEW with UNREVIEWED verdict', () => {
     const status = derivePRStatus(input(), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('PR')
+    expect(status.reviewState).toBe('NEEDS_REVIEW')
+    expect(status.verdict).toBe('UNREVIEWED')
     expect(status.freshness).toBe('stale')
     expect(status.nextAction).toBe('review')
   })
 
-  it('uses the latest crosscheck verdict annotation as review state', () => {
+  it('moves to APPROVED stage when verdict is APPROVE', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=APPROVE type=review -->',
@@ -118,7 +119,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('APPROVE')
+    expect(status.reviewState).toBe('APPROVED')
+    expect(status.verdict).toBe('APPROVE')
     expect(status.nextAction).toBe('merge')
     expect(status.freshness).toBe('stale')
   })
@@ -139,7 +141,8 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('fix')
   })
 
@@ -159,11 +162,12 @@ describe('derivePRStatus', () => {
       ],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.lastActiveAt).toBe('2026-05-29T11:30:00.000Z')
   })
 
-  it('moves a PR with fix activity after review to RECHECK', () => {
+  it('moves to NEEDS_RECHECK when a fix lands after a review', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -179,7 +183,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('recheck')
     expect(status.freshness).toBe('stale')
   })
@@ -201,11 +206,27 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('RECHECK')
+    expect(status.reviewState).toBe('NEEDS_RECHECK')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('recheck')
   })
 
-  it('keeps NEEDS_WORK when no fix has landed yet', () => {
+  it('BLOCK verdict lands in NEEDS_FIX stage (severity on verdict field)', () => {
+    const status = derivePRStatus(input({
+      comments: [{
+        body: '<!-- crosscheck: origin=claude reviewer=codex verdict=BLOCK type=review -->',
+        createdAt: '2026-05-27T11:00:00.000Z',
+        updatedAt: '2026-05-27T11:00:00.000Z',
+      }],
+    }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
+
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('BLOCK')
+    expect(status.nextAction).toBe('fix')
+    expect(status.freshness).toBe('stale')
+  })
+
+  it('keeps NEEDS_FIX stage when no fix has landed yet', () => {
     const status = derivePRStatus(input({
       comments: [{
         body: '<!-- crosscheck: origin=claude reviewer=codex verdict=NEEDS_WORK type=review -->',
@@ -214,7 +235,8 @@ describe('derivePRStatus', () => {
       }],
     }), { nowMs: NOW, staleAfterMs: 24 * 60 * 60 * 1000 })
 
-    expect(status.reviewState).toBe('NEEDS_WORK')
+    expect(status.reviewState).toBe('NEEDS_FIX')
+    expect(status.verdict).toBe('NEEDS_WORK')
     expect(status.nextAction).toBe('fix')
     expect(status.freshness).toBe('stale')
   })
@@ -264,26 +286,26 @@ describe('derivePRStatus', () => {
 })
 
 describe('foldPRStatus', () => {
-  it('returns PR when there is no crosscheck comment', () => {
+  it('returns NEEDS_REVIEW when there is no crosscheck comment', () => {
     const status = foldPRStatus(BASE_PR, [], [])
 
-    expect(status.state).toBe('PR')
+    expect(status.state).toBe('NEEDS_REVIEW')
     expect(status.nextAction).toBe('review')
     expect(status.verdict).toBeNull()
   })
 
-  it('returns APPROVE from the latest crosscheck annotation', () => {
+  it('returns APPROVED from the latest crosscheck annotation', () => {
     const status = foldPRStatus(BASE_PR, [
       reviewComment('NEEDS_WORK', '2026-01-01T01:00:00Z'),
       reviewComment('APPROVE', '2026-01-01T02:00:00Z', 'recheck'),
     ], [])
 
-    expect(status.state).toBe('APPROVE')
+    expect(status.state).toBe('APPROVED')
     expect(status.nextAction).toBe('none')
     expect(status.verdict).toBe('APPROVE')
   })
 
-  it('returns RECHECK when NEEDS_WORK has a later fix but no later recheck', () => {
+  it('returns NEEDS_RECHECK when NEEDS_WORK has a later fix but no later recheck', () => {
     const logs: PRStatusLogEvent[] = [
       {
         ts: '2026-01-01T03:00:00Z',
@@ -301,18 +323,19 @@ describe('foldPRStatus', () => {
       reviewComment('NEEDS_WORK', '2026-01-01T02:00:00Z'),
     ], logs)
 
-    expect(status.state).toBe('RECHECK')
+    expect(status.state).toBe('NEEDS_RECHECK')
     expect(status.nextAction).toBe('recheck')
     expect(buildProgressSummary(status)).toBe('PR -> CR(NEEDS_WORK) -> Fix(3, 8.4K)')
   })
 
-  it('maps BLOCK to next action fix', () => {
+  it('maps BLOCK verdict to NEEDS_FIX with next action fix', () => {
     const status = foldPRStatus(BASE_PR, [
       reviewComment('BLOCK', '2026-01-01T02:00:00Z'),
     ], [])
 
-    expect(status.state).toBe('BLOCK')
+    expect(status.state).toBe('NEEDS_FIX')
     expect(status.nextAction).toBe('fix')
+    expect(status.verdict).toBe('BLOCK')
   })
 
   it('ignores quoted annotations and uses the footer annotation', () => {
@@ -332,7 +355,7 @@ describe('foldPRStatus', () => {
       ),
     ], [])
 
-    expect(status.state).toBe('BLOCK')
+    expect(status.state).toBe('NEEDS_FIX')
     expect(status.verdict).toBe('BLOCK')
   })
 

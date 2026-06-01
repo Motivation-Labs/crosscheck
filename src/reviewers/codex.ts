@@ -45,9 +45,13 @@ export async function runCodexReview(
   vendor: CodexVendorConfig,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
+  timeoutMs?: number,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
+  const tierTimeout = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
+  // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
+  const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
 
   // --base and [PROMPT] are mutually exclusive in codex review;
   // inject focus instructions via a .codex/instructions file instead
@@ -65,11 +69,6 @@ export async function runCodexReview(
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(instructionsPath, instructionsNote)
 
-  // Explicit vendor override wins; otherwise fall back to the tier-based default.
-  const timeoutMs = vendor.timeout_sec != null
-    ? vendor.timeout_sec * 1000
-    : (TIER_TIMEOUT_MS[quality.tier] ?? 600_000)
-
   try {
     const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
     onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
@@ -79,7 +78,7 @@ export async function runCodexReview(
       ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
       {
         cwd: repoDir,
-        timeout: timeoutMs,
+        timeout: resolvedTimeout,
         env: {
           ...process.env,
           // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
@@ -100,9 +99,8 @@ export async function runCodexReview(
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''
-    const timeoutSec = timeoutMs / 1000
     const summary = execa.timedOut
-      ? `timed out after ${timeoutSec}s — PR diff may be too large (tier: ${quality.tier})`
+      ? `timed out after ${resolvedTimeout !== undefined ? resolvedTimeout / 1000 : '?'}s — PR diff may be too large (tier: ${quality.tier})`
       : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
     const thrown = Object.assign(new Error(`codex: ${summary}`), {
       exitCode: execa.exitCode,

@@ -15,12 +15,12 @@ function pr(number: number): PRStatus {
     headRepo: 'acme/web',
     baseRef: 'main',
     freshness: 'stale',
-    reviewState: 'PR',
+    reviewState: 'NEEDS_REVIEW',
     nextAction: 'review',
     lastActiveAt: '2026-05-29T00:00:00.000Z',
     staleAfterMs: 60_000,
     ageMs: 120_000,
-    verdict: null,
+    verdict: 'UNREVIEWED',
     latestAnnotation: null,
   }
 }
@@ -49,10 +49,10 @@ describe('parseSelection', () => {
 describe('picker grouping', () => {
   it('orders actionable PRs by next action group', () => {
     const ordered = sortPRsForPicker([
-      { ...pr(4), nextAction: 'merge', reviewState: 'APPROVE' },
-      { ...pr(2), nextAction: 'fix', reviewState: 'NEEDS_WORK' },
-      { ...pr(3), nextAction: 'recheck', reviewState: 'RECHECK' },
-      { ...pr(1), nextAction: 'review', reviewState: 'PR' },
+      { ...pr(4), nextAction: 'merge', reviewState: 'APPROVED' },
+      { ...pr(2), nextAction: 'fix', reviewState: 'NEEDS_FIX' },
+      { ...pr(3), nextAction: 'recheck', reviewState: 'NEEDS_RECHECK' },
+      { ...pr(1), nextAction: 'review', reviewState: 'NEEDS_REVIEW' },
     ])
 
     expect(ordered.map(item => item.number)).toEqual([1, 2, 3, 4])

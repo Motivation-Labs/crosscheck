@@ -186,7 +186,11 @@ export function identifyNextWorkflowStep(
   const lastReview = reviewHistory[reviewHistory.length - 1]
   const lastReviewIdx = history.lastIndexOf(lastReview)
   const historyAfterReview = history.slice(lastReviewIdx + 1)
+  // A recheck implies fix already ran (it's what produced the commit being rechecked).
+  // Include this so the walk loop doesn't treat fix as pending after a completed
+  // review→fix→recheck cycle where historyAfterReview is empty.
   const fixAfterReview = historyAfterReview.some(r => r.type === 'fix' || r.type === 'conflict-resolve')
+    || lastReview.type === 'recheck'
 
   // Build synthetic results so evaluateWhen works correctly for downstream steps.
   // Always populate under the literal key 'review' so conditions like

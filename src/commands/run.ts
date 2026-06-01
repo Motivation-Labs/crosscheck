@@ -249,10 +249,14 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         return
       }
       if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
-        // Resume from the identified step rather than re-running review
-        stepFilter = allSteps
-          .slice(allSteps.findIndex(s => s.name === nextResult.step!.name))
-          .map(s => s.name)
+        // Resume from the identified step. Look up by type (not name) so synthesized
+        // steps (e.g. a recheck not present in allSteps) still route correctly.
+        // When the step isn't in allSteps at all, use [step.type] so resolveWorkflowSteps
+        // can synthesize it (e.g. synthesizeRecheckStep for the 'recheck' type).
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        stepFilter = nextStepIdx >= 0
+          ? allSteps.slice(nextStepIdx).map(s => s.name)
+          : [nextResult.step.type]
         initialReviewComment = nextResult.reviewComment
         console.log(chalk.dim(`  existing review found — resuming from ${nextResult.step.type} step`))
       }

@@ -355,6 +355,45 @@ describe('runKickassWithDeps', () => {
     ])
   })
 
+  it('runs all PRs concurrently when concurrency > 1', async () => {
+    const prs = [1, 2, 3].map(n => pr({ number: n, nextAction: 'review' }))
+    const plan = buildPreflightPlan(prs)
+    const startTimes: number[] = []
+    const dispatched: number[] = []
+
+    await executeKickassPlan(plan, {
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async (item) => {
+        startTimes.push(Date.now())
+        await new Promise(r => setTimeout(r, 20))
+        dispatched.push(item.pr.number)
+      },
+    }, 3)
+
+    // All 3 started within a short window (concurrent, not sequential)
+    expect(startTimes[2] - startTimes[0]).toBeLessThan(15)
+    expect(dispatched.sort()).toEqual([1, 2, 3])
+  })
+
+  it('respects concurrency cap — runs at most n PRs at a time', async () => {
+    const prs = [1, 2, 3, 4].map(n => pr({ number: n, nextAction: 'review' }))
+    const plan = buildPreflightPlan(prs)
+    let active = 0
+    let maxActive = 0
+
+    await executeKickassPlan(plan, {
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 20))
+        active--
+      },
+    }, 2)
+
+    expect(maxActive).toBeLessThanOrEqual(2)
+  })
+
   it('summarizes execution outcomes', () => {
     expect(summarizeExecutionResults([
       { pr: pr({ number: 1 }), status: 'executed' },

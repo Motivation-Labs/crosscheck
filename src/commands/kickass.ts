@@ -19,6 +19,7 @@ export interface KickassOpts {
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
   timeout?: string
+  concurrent?: number  // parallel agents; 0 = one per selected PR; undefined/1 = sequential
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
@@ -44,7 +45,9 @@ export interface KickassExecutionResult {
 
 export interface ExecuteKickassDeps {
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
-  dispatchRun: (item: PreflightItem) => Promise<void>
+  // Returns buffered output string in concurrent mode (caller prints it);
+  // returns void in sequential mode (output streams inline via stdio inherit).
+  dispatchRun: (item: PreflightItem) => Promise<string | void>
 }
 
 export interface KickassDeps {
@@ -53,7 +56,7 @@ export interface KickassDeps {
   confirm: (message: string) => Promise<boolean>
   getFixDeliveryMode?: () => FixDeliveryMode | Promise<FixDeliveryMode>
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
-  dispatchRun: (item: PreflightItem) => Promise<void>
+  dispatchRun: (item: PreflightItem) => Promise<string | void>
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
@@ -79,6 +82,11 @@ export async function runKickassWithDeps(
       console.error(chalk.red(`✗ Invalid --timeout value "${opts.timeout}". Use a duration like 300s or 10m.`))
       process.exit(1)
     }
+  }
+
+  if (opts.concurrent !== undefined && (opts.concurrent < 0 || !Number.isInteger(opts.concurrent))) {
+    console.error(chalk.red('✗ --concurrent must be a non-negative integer (0 = one agent per selected PR)'))
+    process.exit(1)
   }
 
   try {
@@ -126,7 +134,14 @@ export async function runKickassWithDeps(
       return
     }
 
-    const results = await executeKickassPlan(plan, deps)
+    // 0 = one agent per selected PR; undefined/1 = sequential
+    const resolvedConcurrency = opts.concurrent === 0
+      ? selected.length
+      : Math.max(1, opts.concurrent ?? 1)
+    if (resolvedConcurrency > 1) {
+      console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel`))
+    }
+    const results = await executeKickassPlan(plan, deps, resolvedConcurrency)
     printExecutionSummary(results)
     if (results.some(result => result.status === 'failed')) {
       process.exitCode = 2
@@ -200,45 +215,71 @@ export function buildPreflightPlan(
   })
 }
 
+function printCapturedOutput(label: string, output: string): void {
+  const lines = output.trimEnd().split('\n')
+  console.log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
+  for (const line of lines) console.log(`  ${line}`)
+}
+
 export async function executeKickassPlan(
   plan: PreflightItem[],
   deps: ExecuteKickassDeps,
+  concurrency = 1,
 ): Promise<KickassExecutionResult[]> {
-  const results: KickassExecutionResult[] = []
+  const results: KickassExecutionResult[] = new Array(plan.length)
 
-  for (const item of plan) {
+  const executeItem = async (item: PreflightItem, index: number): Promise<void> => {
     if (item.action === 'skip') {
       console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
-      results.push({ pr: item.pr, status: 'skipped', reason: item.skipReason })
-      continue
+      results[index] = { pr: item.pr, status: 'skipped', reason: item.skipReason }
+      return
     }
 
     try {
       const currentHeadSha = await deps.getCurrentHeadSha(item)
       if (currentHeadSha !== item.pr.headSha) {
         console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
-        results.push({ pr: item.pr, status: 'skipped', reason: 'stale_signature' })
-        continue
+        results[index] = { pr: item.pr, status: 'skipped', reason: 'stale_signature' }
+        return
       }
 
       console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
-      await deps.dispatchRun(item)
+      const output = await deps.dispatchRun(item)
+      if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output)
+
       if (item.action === 'fix' && item.chainRecheck === true) {
         const fixedHeadSha = await deps.getCurrentHeadSha(item)
         if (fixedHeadSha !== item.pr.headSha) {
           const recheckItem = buildPostFixRecheckItem(item, fixedHeadSha)
           console.log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
-          await deps.dispatchRun(recheckItem)
+          const recheckOutput = await deps.dispatchRun(recheckItem)
+          if (typeof recheckOutput === 'string' && recheckOutput) printCapturedOutput(formatPRSignature(recheckItem.pr), recheckOutput)
         } else {
           console.log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
         }
       }
-      results.push({ pr: item.pr, status: 'executed' })
+      results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
       console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      results.push({ pr: item.pr, status: 'failed', reason: 'error' })
+      results[index] = { pr: item.pr, status: 'failed', reason: 'error' }
     }
+  }
+
+  if (concurrency <= 1) {
+    for (let i = 0; i < plan.length; i++) await executeItem(plan[i], i)
+  } else {
+    // Worker-pool: up to `concurrency` PRs run in parallel.
+    // Each worker claims the next index atomically (ptr++ is sync) so there
+    // are no races even though multiple workers share the counter.
+    let ptr = 0
+    const worker = async (): Promise<void> => {
+      while (ptr < plan.length) {
+        const i = ptr++
+        await executeItem(plan[i], i)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, plan.length) }, worker))
   }
 
   return results
@@ -349,6 +390,9 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     cli ??= resolveCliInvocation()
     return cli
   }
+  // opts.concurrent = 0 means "one per PR" (fully parallel); undefined means sequential.
+  // Any explicit --concurrent value uses buffered stdio; sequential streams inline.
+  const isParallel = opts.concurrent !== undefined
   return {
     loadScanResult,
     pickPRs,
@@ -366,7 +410,12 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
     },
     dispatchRun: async (item) => {
       const invocation = getCli()
-      await execa(invocation.command, [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)], { stdio: 'inherit' })
+      const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)]
+      if (isParallel) {
+        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+        return result.all ?? ''
+      }
+      await execa(invocation.command, args, { stdio: 'inherit' })
     },
   }
 }

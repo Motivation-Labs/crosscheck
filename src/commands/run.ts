@@ -112,11 +112,25 @@ export function buildFixRecheckSteps(
   return fixRecheckSteps
 }
 
+function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
+  const BLINK = '\x1b[5m'
+  const RESET = '\x1b[0m'
+  if (mode === 'crazy') {
+    const label = chalk.bold.white.bgRed(' CRAZY ') + ' ' + chalk.red.bold('MODE')
+    console.log(`\n ${BLINK}🔥${RESET} ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE (ceiling: 2 rounds)')}\n`)
+  } else {
+    const label = chalk.bold.yellow('half') + chalk.bold.white.bgRed('-CRAZY') + ' ' + chalk.red.bold('MODE')
+    console.log(`\n 🔥 ${label}  ${chalk.dim('fix→recheck until NOT BLOCK (ceiling: 2 rounds)')}\n`)
+  }
+}
+
 export async function runRun(prUrl: string, opts: RunOpts = {}) {
   if (opts.roundMode && opts.dryRun) {
     console.error(chalk.red(`✗ --${opts.roundMode} and --dry-run are mutually exclusive`))
     process.exit(1)
   }
+
+  if (opts.roundMode) printRoundModeBanner(opts.roundMode)
 
   // crazy/halfcrazy (or --no-timeout) lift all constraints including the reviewer timeout (0 = no cap).
   // Otherwise parse the user-supplied --timeout value; undefined keeps each reviewer's default.

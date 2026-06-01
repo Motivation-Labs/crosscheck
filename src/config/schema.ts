@@ -71,7 +71,7 @@ export const ServerConfigSchema = z.object({
 
 export const LogsConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  retention_days: z.number().int().min(1).max(30).default(7),
+  retention_days: z.number().int().min(1).max(365).default(30),
 })
 
 export const TunnelConfigSchema = z.object({

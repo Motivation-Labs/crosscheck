@@ -436,6 +436,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
 
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
+
+          // Fix step was structurally skipped (unsupported vendor, fork PR, commit limit, etc.) —
+          // the head won't advance so looping cannot make progress.
+          if (fixAppliedCount === undefined) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', mode, round: loopRound })
+            console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
+            break
+          }
+
           const done = meetsCrazyStopCondition(verdict, mode)
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'}${done ? ' — done' : ' — continuing...'}`)
         }

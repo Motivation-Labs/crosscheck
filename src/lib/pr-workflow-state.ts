@@ -224,21 +224,13 @@ export function identifyNextWorkflowStep(
     if (fixStepDef && fixStepDef.name !== 'fix') syntheticResults[fixStepDef.name] = { applied_count: 1 }
   }
 
-  // Legacy comments have no sha field — treat as if they match any SHA so we
-  // don't force a re-review when sha tracking is absent.
-  const reviewedCurrentSha = lastReview.sha === undefined || lastReview.sha === currentSha
+  // Legacy comments have no sha field — treat as not reviewed so new commits
+  // always get a fresh review rather than inheriting an old approval.
+  const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
 
   if (!reviewedCurrentSha) {
-    if (fixAfterReview) {
-      // Fix pushed a new commit whose SHA is currentSha → recheck is next
-      const recheckStep = steps.find(s => s.type === 'recheck')
-      const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
-      if (recheckStep) {
-        return { step: recheckStep, reviewComment, hasExistingReview: true, round: lastReview.round, history }
-      }
-      return { step: null, hasExistingReview: true, round: lastReview.round, history }
-    }
-    // Human pushed a new commit without a fix → fresh review
+    // Human pushed a new commit, or fix_applied has no SHA to verify against —
+    // in either case we can't confirm currentSha is the fix commit, so require a fresh review.
     const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
     return { step: reviewStep, hasExistingReview: true, round: lastReview.round + 1, history }
   }

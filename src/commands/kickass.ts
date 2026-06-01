@@ -332,14 +332,14 @@ export function buildKickassRunArgs(
 ): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
-  const args = [
-    'run',
-    item.pr.url,
-    '--steps',
-    stepsForItem(item),
-    '--expected-head-sha',
-    item.pr.headSha,
-  ]
+  const args = ['run', item.pr.url]
+  // For an explicit review action, always force --steps review so run.ts doesn't
+  // skip it based on existing history.
+  // For fix/recheck, omit --steps and let run.ts detect the correct next step
+  // from live comment history — the scan cache can be stale by the time kickass
+  // dispatches, and identifyNextWorkflowStep reflects the actual PR state.
+  if (item.action === 'review') args.push('--steps', 'review')
+  args.push('--expected-head-sha', item.pr.headSha)
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
     else if (roundMode === 'halfcrazy') args.push('--half-crazy')

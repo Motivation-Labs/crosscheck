@@ -454,9 +454,21 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             priorReviewId = await getLastCrossCheckCommentId(owner, repoName, prNumber, token)
           }
         }
+        // Pre-compute next_step for the annotation so readers can skip full
+        // comment scans: find the first remaining step whose when-condition holds.
+        const currentStepIdx = steps.indexOf(step)
+        const syntheticResultsForNext: Record<string, import('./workflow.js').StepResult> = {
+          review: { verdict }, [step.name]: { verdict },
+        }
+        const nextWorkflowStep = steps.slice(currentStepIdx + 1).find(s =>
+          !s.when || evaluateWhen(s.when, syntheticResultsForNext),
+        )
+        const nextStepAnnotation = nextWorkflowStep?.type ?? 'none'
+
         const commentId = await postReviewComment(
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, pr.head.sha,
+          nextStepAnnotation,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })

@@ -910,6 +910,8 @@ export interface ReviewCommentBodyInput {
   stepType?: CrosscheckStepType
   round?: number
   sha?: string
+  /** Pre-computed next workflow step embedded in the annotation for fast-path reads. */
+  nextStep?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -944,6 +946,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     verdict: input.verdict ?? 'UNKNOWN',
     service: serviceName,
     ...(input.sha && { sha: input.sha }),
+    ...(input.nextStep !== undefined && { next_step: input.nextStep }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -969,6 +972,7 @@ export async function postReviewComment(
   stepType?: CrosscheckStepType,
   round = 1,
   sha?: string,
+  nextStep?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -987,6 +991,7 @@ export async function postReviewComment(
       stepType,
       round,
       sha,
+      nextStep,
     }),
   })
   return comment.id

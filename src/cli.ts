@@ -14,6 +14,7 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runDetectStep } from './commands/detect-step.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 
@@ -98,6 +99,13 @@ program
     const trigger = (opts.trigger as import('./lib/runner.js').WorkflowTrigger | undefined) ?? 'run'
     void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, trigger })
   })
+
+program
+  .command('detect-step <pr-url>')
+  .description('Show the crosscheck step history for a PR and identify the next step to run')
+  .option('-c, --config <path>', 'config file path')
+  .option('--json', 'emit result as JSON')
+  .action((prUrl: string, opts: { config?: string; json?: boolean }) => void runDetectStep(prUrl, opts))
 
 program
   .command('scan')

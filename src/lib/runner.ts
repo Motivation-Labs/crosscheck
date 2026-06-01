@@ -508,9 +508,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         reviewCommentId = ctx.initialReviewComment?.id
       }
       if (!reviewCommentBody) {
-        const latestReviewComment = await getLastCrossCheckReviewComment(owner, repoName, prNumber, token)
-        reviewCommentBody = latestReviewComment?.body
-        reviewCommentId = latestReviewComment?.id
+        try {
+          const latestReviewComment = await getLastCrossCheckReviewComment(owner, repoName, prNumber, token)
+          reviewCommentBody = latestReviewComment?.body
+          reviewCommentId = latestReviewComment?.id
+        } catch (fetchErr) {
+          fileLog({ level: 'warn', event: 'review_comment_fetch_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) })
+          throw fetchErr
+        }
       }
       if (!reviewCommentBody) { skipFix('no_review_comment'); continue }
 

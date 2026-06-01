@@ -13,6 +13,7 @@ import type { ErrorCategory } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
+import { loadWorkflow } from '../lib/workflow.js'
 
 export interface KickassOpts {
   force?: boolean
@@ -24,7 +25,7 @@ export interface KickassOpts {
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
-export type KickassSkipReason = 'fork_pr' | 'stale_signature'
+export type KickassSkipReason = 'fork_pr' | 'stale_signature' | 'codex_fix_unsupported'
 export type KickassFailureReason = ErrorCategory
 export type FixDeliveryMode = Config['post_review']['auto_fix']['delivery']['mode']
 
@@ -121,7 +122,9 @@ export async function runKickassWithDeps(
     }
 
     const fixDeliveryMode = deps.getFixDeliveryMode ? await deps.getFixDeliveryMode() : 'pull_request'
-    const plan = buildPreflightPlan(selected, opts.roundMode, fixDeliveryMode)
+    const workflowSteps = loadWorkflow(process.cwd())
+    const fixStep = workflowSteps.find(s => s.type === 'fix')
+    const plan = buildPreflightPlan(selected, opts.roundMode, fixDeliveryMode, fixStep?.reviewer)
     printPreflight(plan, mergeReady)
 
     if (opts.dryRun) {
@@ -156,11 +159,21 @@ export function buildPreflightPlan(
   prs: PRStatus[],
   roundMode?: 'crazy' | 'halfcrazy',
   fixDeliveryMode: FixDeliveryMode = 'pull_request',
+  fixStepReviewer?: string,
 ): PreflightItem[] {
   const modeTag = roundMode ? ` [${roundMode}]` : ''
   const chainRecheck = fixDeliveryMode === 'commit'
   return prs.map((pr) => {
     const fork = isForkPR(pr)
+    if (pr.nextAction === 'fix' && fixStepReviewer === 'origin' && pr.latestAnnotation?.origin === 'codex') {
+      return {
+        pr,
+        action: 'skip',
+        transition: `${pr.reviewState} -> Skip`,
+        details: ['reason codex_fix_unsupported'],
+        skipReason: 'codex_fix_unsupported',
+      }
+    }
     if (pr.nextAction === 'fix' && fork) {
       return {
         pr,

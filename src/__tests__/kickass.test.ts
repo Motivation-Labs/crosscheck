@@ -487,6 +487,50 @@ describe('runKickassWithDeps', () => {
       { pr: pr({ number: 3 }), status: 'failed', reason: 'unknown' },
     ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
   })
+
+  describe('codex_fix_unsupported guard', () => {
+    it('skips codex-origin fix PRs when fix step uses origin reviewer', () => {
+      const codexPR = pr({
+        nextAction: 'fix',
+        reviewState: 'NEEDS_FIX',
+        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+      })
+      const plan = buildPreflightPlan([codexPR], undefined, 'pull_request', 'origin')
+      expect(plan[0].action).toBe('skip')
+      expect(plan[0].skipReason).toBe('codex_fix_unsupported')
+    })
+
+    it('does not skip codex-origin fix PRs when fix step uses explicit claude reviewer', () => {
+      const codexPR = pr({
+        nextAction: 'fix',
+        reviewState: 'NEEDS_FIX',
+        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+      })
+      const plan = buildPreflightPlan([codexPR], undefined, 'pull_request', 'claude')
+      expect(plan[0].action).toBe('fix')
+    })
+
+    it('does not skip claude-origin fix PRs with origin reviewer (claude fix is supported)', () => {
+      const claudePR = pr({
+        nextAction: 'fix',
+        reviewState: 'NEEDS_FIX',
+        latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+      })
+      const plan = buildPreflightPlan([claudePR], undefined, 'pull_request', 'origin')
+      expect(plan[0].action).toBe('fix')
+    })
+
+    it('preserves existing behavior when fixStepReviewer is undefined (no 4th arg)', () => {
+      const codexPR = pr({
+        nextAction: 'fix',
+        reviewState: 'NEEDS_FIX',
+        latestAnnotation: { origin: 'codex', reviewer: 'claude', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
+      })
+      const plan = buildPreflightPlan([codexPR])
+      // Without fixStepReviewer, no guard fires — backward-compatible
+      expect(plan[0].action).toBe('fix')
+    })
+  })
 })
 
 describe('resolveCliInvocation', () => {

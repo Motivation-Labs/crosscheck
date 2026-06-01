@@ -259,7 +259,7 @@ describe('runKickassWithDeps', () => {
     expect(summarizeExecutionResults([
       { pr: pr({ number: 1 }), status: 'executed' },
       { pr: pr({ number: 2 }), status: 'skipped', reason: 'stale_signature' },
-      { pr: pr({ number: 3 }), status: 'failed', reason: 'error' },
+      { pr: pr({ number: 3 }), status: 'failed', reason: 'unknown' },
     ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
   })
 })

@@ -8,7 +8,8 @@ import { createGithubClient } from '../github/client.js'
 import { mergePullRequest } from '../github/merge.js'
 import { getGithubToken } from '../config/loader.js'
 import { parseDuration } from '../lib/durations.js'
-import { logError } from '../lib/logger.js'
+import { classifyError, logError } from '../lib/logger.js'
+import type { ErrorCategory } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
@@ -21,7 +22,7 @@ export interface KickassOpts {
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'merge' | 'skip'
 export type KickassSkipReason = 'fork_pr' | 'stale_signature'
-export type KickassFailureReason = 'error'
+export type KickassFailureReason = ErrorCategory
 
 export interface PreflightItem {
   pr: PRStatus
@@ -171,34 +172,61 @@ export async function executeKickassPlan(
   plan: PreflightItem[],
   deps: ExecuteKickassDeps,
 ): Promise<KickassExecutionResult[]> {
-  const results: KickassExecutionResult[] = []
+  const results: KickassExecutionResult[] = new Array(plan.length)
 
-  for (const item of plan) {
+  const executeItem = async (item: PreflightItem, index: number, attempt = 1): Promise<void> => {
     if (item.action === 'skip') {
       console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
-      results.push({ pr: item.pr, status: 'skipped', reason: item.skipReason })
-      continue
+      results[index] = { pr: item.pr, status: 'skipped', reason: item.skipReason }
+      return
     }
 
     try {
       const currentHeadSha = await deps.getCurrentHeadSha(item)
       if (currentHeadSha !== item.pr.headSha) {
         console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
-        results.push({ pr: item.pr, status: 'skipped', reason: 'stale_signature' })
-        continue
+        results[index] = { pr: item.pr, status: 'skipped', reason: 'stale_signature' }
+        return
       }
 
-      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}`))
+      const attemptLabel = attempt > 1 ? ` (retry ${attempt - 1})` : ''
+      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
       if (item.action === 'merge') {
         await deps.dispatchMerge(item)
       } else {
         await deps.dispatchRun(item)
       }
-      results.push({ pr: item.pr, status: 'executed' })
+      results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
-      logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number }, err)
+      logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
       console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      results.push({ pr: item.pr, status: 'failed', reason: 'error' })
+      const category = classifyError(err instanceof Error ? err.message : String(err))
+      results[index] = { pr: item.pr, status: 'failed', reason: category }
+    }
+  }
+
+  for (let i = 0; i < plan.length; i++) {
+    await executeItem(plan[i], i)
+  }
+
+  // Retry transient failures up to 4 times with escalating delays.
+  // Auth and permission failures are operator issues that won't self-heal.
+  const RETRYABLE = new Set<string>(['network', 'unknown', 'subprocess', 'timeout'])
+  const RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 600_000]
+
+  for (let attempt = 2; attempt <= RETRY_DELAYS_MS.length + 1; attempt++) {
+    const delayMs = RETRY_DELAYS_MS[attempt - 2]
+    const retryItems = results
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => r.status === 'failed' && RETRYABLE.has(r.reason as string))
+    if (retryItems.length === 0) break
+
+    const delaySec = delayMs / 1000
+    const delayLabel = delaySec >= 60 ? `${delaySec / 60}m` : `${delaySec}s`
+    console.log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
+    await new Promise(resolve => setTimeout(resolve, delayMs))
+    for (const { i } of retryItems) {
+      await executeItem(plan[i], i, attempt)
     }
   }
 

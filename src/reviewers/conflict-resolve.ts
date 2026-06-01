@@ -2,7 +2,9 @@ import { execSync } from 'child_process'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { execa } from 'execa'
+import type { Config } from '../config/schema.js'
 import { applyEdit } from './fix.js'
+import { DEFAULT_CLAUDE_TIMEOUT_SEC } from './claude.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -124,6 +126,7 @@ export async function runConflictResolveStep(
   prTitle: string,
   instructions: string,
   model = 'default',
+  config: Config,
 ): Promise<{ appliedCount: number; resolvedPaths: string[]; tokensUsed?: number }> {
   const conflictedFiles = findConflictedFiles(tmpDir)
   if (conflictedFiles.length === 0) return { appliedCount: 0, resolvedPaths: [] }
@@ -140,7 +143,7 @@ export async function runConflictResolveStep(
     const modelArgs = model !== 'default' ? ['--model', model] : []
     const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
       input: prompt,
-      timeout: 180_000,
+      timeout: (config.vendors.claude.timeout_sec ?? DEFAULT_CLAUDE_TIMEOUT_SEC) * 1000,
       env: { ...process.env },
     })
     const raw = stdout.trim()

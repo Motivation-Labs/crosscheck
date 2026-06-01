@@ -10,6 +10,11 @@ const EFFORT_MAP: Record<string, string> = {
   max: 'max',
 }
 
+// Default wall-clock budget for a single `claude` CLI invocation. Used by every
+// claude-driven step (review, fix, conflict-resolve, address) when the vendor
+// config does not set `timeout_sec`. Override per-vendor via vendors.claude.timeout_sec.
+export const DEFAULT_CLAUDE_TIMEOUT_SEC = 180
+
 export interface ReviewResult {
   review: string
   tokensUsed?: number
@@ -65,7 +70,7 @@ export async function runClaudeReview(
   try {
     const { stdout } = await execa('claude', args, {
       cwd: repoDir,
-      timeout: 180_000,
+      timeout: (vendor.timeout_sec ?? DEFAULT_CLAUDE_TIMEOUT_SEC) * 1000,
       input: prompt,
       env: { ...process.env },
     })

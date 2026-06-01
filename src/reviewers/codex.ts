@@ -65,11 +65,15 @@ export async function runCodexReview(
   mkdirSync(`${repoDir}/.codex`, { recursive: true })
   writeFileSync(instructionsPath, instructionsNote)
 
+  // Explicit vendor override wins; otherwise fall back to the tier-based default.
+  const timeoutMs = vendor.timeout_sec != null
+    ? vendor.timeout_sec * 1000
+    : (TIER_TIMEOUT_MS[quality.tier] ?? 600_000)
+
   try {
     const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
     onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
 
-    const timeoutMs = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
     const result = await execa(
       'codex',
       ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
@@ -96,7 +100,7 @@ export async function runCodexReview(
   } catch (err: unknown) {
     const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
     const rawStderr = execa.stderr ?? ''
-    const timeoutSec = (TIER_TIMEOUT_MS[quality.tier] ?? 600_000) / 1000
+    const timeoutSec = timeoutMs / 1000
     const summary = execa.timedOut
       ? `timed out after ${timeoutSec}s — PR diff may be too large (tier: ${quality.tier})`
       : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')

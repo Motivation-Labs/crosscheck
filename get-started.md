@@ -872,11 +872,13 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: o4-mini          # only used when auth: api-key
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
   claude:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
+    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:

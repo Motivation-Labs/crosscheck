@@ -276,8 +276,12 @@ function resolveReviewer(
 }
 
 // Extends resolveReviewer with a human-origin fallback for the fix step.
-// When reviewer: 'origin' and the PR was written by a human (no AI vendor maps),
-// pick the best available fixer rather than returning null and silently skipping.
+// Scoped to reviewer: 'origin' only — other reviewer types (claude, codex, auto)
+// already encode explicit vendor intent and need no fallback.
+// When origin is 'human' and no vendor resolved, honours routing.fallback_reviewer
+// so the fix step respects the same routing intent as the review step.
+// 'auto' mirrors resolveReviewer's auto path (config-enabled check, codex-first)
+// without async auth calls. null disables the fallback entirely.
 // Exported so callers can detect when the fallback was applied (e.g. for logging).
 export function resolveFixVendor(
   stepReviewer: string,
@@ -286,11 +290,19 @@ export function resolveFixVendor(
   fallback?: 'claude' | 'codex',
 ): { vendor: 'claude' | 'codex' | null; usedHumanFallback: boolean } {
   const vendor = resolveReviewer(stepReviewer, origin, config, fallback)
-  if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') return { vendor, usedHumanFallback: false }
-  if (fallback && config.vendors[fallback].enabled) return { vendor: fallback, usedHumanFallback: true }
-  if (config.vendors.claude.enabled) return { vendor: 'claude', usedHumanFallback: true }
-  if (config.vendors.codex.enabled) return { vendor: 'codex', usedHumanFallback: true }
-  return { vendor: null, usedHumanFallback: false }
+  if (vendor !== null || origin !== 'human' || stepReviewer !== 'origin') {
+    return { vendor, usedHumanFallback: false }
+  }
+  const fb = config.routing.fallback_reviewer
+  let humanFallback: 'claude' | 'codex' | null = null
+  if (fb === 'claude') humanFallback = config.vendors.claude.enabled ? 'claude' : null
+  else if (fb === 'codex') humanFallback = config.vendors.codex.enabled ? 'codex' : null
+  else if (fb !== null) {
+    // 'auto': prefer codex then claude, same as resolveReviewer's auto path
+    humanFallback = config.vendors.codex.enabled ? 'codex' : config.vendors.claude.enabled ? 'claude' : null
+  }
+  if (!humanFallback) return { vendor: null, usedHumanFallback: false }
+  return { vendor: humanFallback, usedHumanFallback: true }
 }
 
 // ─── pr_complexity helpers ────────────────────────────────────────────────────

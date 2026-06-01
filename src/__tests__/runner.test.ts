@@ -307,54 +307,72 @@ describe('buildWorkflowCompleteEvent', () => {
 })
 
 describe('resolveFixVendor', () => {
-  const cfg = (claudeEnabled: boolean, codexEnabled: boolean) => ({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
     vendors: {
       claude: { enabled: claudeEnabled },
       codex: { enabled: codexEnabled },
     },
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    routing: { fallback_reviewer: fallbackReviewer },
   }) as any
 
-  describe('human-origin fallback', () => {
-    it('returns claude when reviewer:origin, origin:human, claude enabled', () => {
-      const result = resolveFixVendor('origin', 'human', cfg(true, true))
-      expect(result).toEqual({ vendor: 'claude', usedHumanFallback: true })
+  describe('human-origin fallback — respects routing.fallback_reviewer', () => {
+    it('auto (default): prefers codex when both enabled', () => {
+      // 'auto' mirrors resolveReviewer auto path: codex-first config-enabled check
+      expect(resolveFixVendor('origin', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: true })
     })
 
-    it('returns codex when reviewer:origin, origin:human, claude disabled', () => {
-      const result = resolveFixVendor('origin', 'human', cfg(false, true))
-      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    it('auto: falls to claude when codex disabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: true })
     })
 
-    it('returns null when reviewer:origin, origin:human, both vendors disabled', () => {
-      const result = resolveFixVendor('origin', 'human', cfg(false, false))
-      expect(result).toEqual({ vendor: null, usedHumanFallback: false })
+    it('explicit claude: uses claude regardless of codex availability', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'claude'))).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('explicit codex: uses codex when enabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'codex'))).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('explicit codex disabled: returns null rather than falling to claude', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false, 'codex'))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('null fallback_reviewer: skips fix (no fallback)', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, null))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('returns null when both vendors disabled regardless of fallback_reviewer', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(false, false))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('scoped to reviewer:origin only', () => {
+    it('reviewer:claude with human origin resolves via resolveReviewer, no fallback', () => {
+      expect(resolveFixVendor('claude', 'human', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+      expect(resolveFixVendor('claude', 'human', cfg(false, true))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('reviewer:auto with human origin uses resolveReviewer auto path, no fallback', () => {
+      expect(resolveFixVendor('auto', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
   })
 
   describe('non-human origins — unchanged behaviour', () => {
     it('returns codex for codex-origin with reviewer:origin', () => {
-      const result = resolveFixVendor('origin', 'codex', cfg(true, true))
-      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: false })
+      expect(resolveFixVendor('origin', 'codex', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
 
     it('returns claude for claude-origin with reviewer:origin', () => {
-      const result = resolveFixVendor('origin', 'claude', cfg(true, true))
-      expect(result).toEqual({ vendor: 'claude', usedHumanFallback: false })
-    })
-
-    it('returns claude for reviewer:claude regardless of origin', () => {
-      expect(resolveFixVendor('claude', 'human', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: false })
-      expect(resolveFixVendor('claude', 'codex', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+      expect(resolveFixVendor('origin', 'claude', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
     })
   })
 
-  describe('fallback parameter respected', () => {
-    it('prefers explicit fallback over human-origin fallback for reviewer:origin', () => {
-      // smartSwitchFallback='codex' passed to resolveFixVendor — resolveReviewer uses it
-      // before we even reach the human-origin branch, so usedHumanFallback is false.
-      const result = resolveFixVendor('origin', 'human', cfg(false, true), 'codex')
-      expect(result).toEqual({ vendor: 'codex', usedHumanFallback: false })
+  describe('smartSwitchFallback takes precedence', () => {
+    it('smartSwitchFallback resolves via resolveReviewer before human-origin branch fires', () => {
+      // reviewer:origin + origin:human + smartSwitchFallback='codex' → resolveReviewer returns
+      // 'codex' directly, so usedHumanFallback is false even though origin is human
+      expect(resolveFixVendor('origin', 'human', cfg(false, true), 'codex')).toEqual({ vendor: 'codex', usedHumanFallback: false })
     })
   })
 })

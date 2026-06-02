@@ -209,6 +209,7 @@ export interface PickerOptions {
   title?: string
   initialSelected?: string[]
   pageSize?: number
+  selectAllLabel?: string
   // Optional: return dim metadata shown after each item label
   getDescription?: (item: string) => string
 }
@@ -228,6 +229,7 @@ export async function promptRepoPicker(
   if (items.length === 0) return []
 
   return new Promise<string[]>((resolve, reject) => {
+    const allRow = -1
     const selected = new Set<number>(
       opts.initialSelected
         ? opts.initialSelected.map(s => items.indexOf(s)).filter(i => i !== -1)
@@ -242,16 +244,25 @@ export async function promptRepoPicker(
     let lastLineCount = 0
 
     const viewport = () => resolveViewport(opts.pageSize, process.stdout.rows)
+    const displayIndices = () => (opts.selectAllLabel && filtered.length > 0 ? [allRow, ...filtered] : filtered)
+    const allVisibleSelected = () => filtered.length > 0 && filtered.every(i => selected.has(i))
+    const toggleAllVisible = () => {
+      const allOn = allVisibleSelected()
+      if (allOn) for (const i of filtered) selected.delete(i)
+      else for (const i of filtered) selected.add(i)
+    }
 
     function recomputeFiltered() {
       filtered = filterIndices(items, filterText)
-      if (cursorPos >= filtered.length) cursorPos = Math.max(0, filtered.length - 1)
-      windowStart = adjustWindowStart(windowStart, cursorPos, viewport(), filtered.length)
+      const displayed = displayIndices()
+      if (cursorPos >= displayed.length) cursorPos = Math.max(0, displayed.length - 1)
+      windowStart = adjustWindowStart(windowStart, cursorPos, viewport(), displayed.length)
     }
 
     function render(firstRender = false) {
       const vp = viewport()
-      windowStart = adjustWindowStart(windowStart, cursorPos, vp, filtered.length)
+      const displayed = displayIndices()
+      windowStart = adjustWindowStart(windowStart, cursorPos, vp, displayed.length)
 
       if (!firstRender) {
         process.stdout.write(`\x1b[${lastLineCount}A`)
@@ -262,8 +273,8 @@ export async function promptRepoPicker(
 
       // Render exactly as many item rows as we have items, capped at the
       // viewport. Empty filter result → one "(no matches)" hint row instead.
-      const visibleRows = Math.min(vp, filtered.length)
-      const emptyHint = filtered.length === 0
+      const visibleRows = Math.min(vp, displayed.length)
+      const emptyHint = displayed.length === 0
       const itemRows = emptyHint ? 1 : visibleRows
 
       lastLineCount = (opts.title ? 1 : 0) + 1 + itemRows + 1 + 1
@@ -296,12 +307,13 @@ export async function promptRepoPicker(
       } else {
         for (let row = 0; row < visibleRows; row++) {
           const fi = windowStart + row
-          const origIdx = filtered[fi]
-          const item = items[origIdx]
-          const isSelected = selected.has(origIdx)
+          const origIdx = displayed[fi]
+          const isAllRow = origIdx === allRow
+          const item = isAllRow ? opts.selectAllLabel ?? 'all' : items[origIdx]
+          const isSelected = isAllRow ? allVisibleSelected() : selected.has(origIdx)
           const isFocused = cursorPos === fi
           const checkStr = isSelected ? `${CYAN}[x]${RESET}` : '[ ]'
-          const desc = opts.getDescription ? opts.getDescription(item) : ''
+          const desc = isAllRow ? `${filtered.length} PRs` : opts.getDescription ? opts.getDescription(item) : ''
           // Budget: cols - 2 (indent) - 4 ("[x] ") - (desc.length + 2 spaces if desc).
           const descBudget = desc ? desc.length + 2 : 0
           const labelMax = Math.max(1, cols - 6 - descBudget)
@@ -313,16 +325,17 @@ export async function promptRepoPicker(
       }
 
       const total = filtered.length
-      const pos = total === 0 ? 0 : cursorPos + 1
+      const displayedTotal = displayed.length
+      const pos = displayedTotal === 0 ? 0 : cursorPos + 1
       const selCount = selected.size
       const filterNote = filterText ? ` · filter: "${filterText}"` : ''
       const selNote = selCount > 0 ? ` · ${selCount} selected` : ''
-      const statusLine = truncate(`${pos}/${total}${filterNote}${selNote}`, innerWidth)
+      const statusLine = truncate(`${pos}/${displayedTotal}${filterNote}${selNote}`, innerWidth)
       process.stdout.write(`${ERASE_LINE}${DIM}  ${statusLine}${RESET}\n`)
 
       // PgUp/PgDn only when the *current* visible list overflows the viewport.
       // After a filter narrows the list, the hint shrinks accordingly.
-      const navHint = filtered.length > vp ? '↑↓ PgUp/PgDn move' : '↑↓ move'
+      const navHint = displayed.length > vp ? '↑↓ PgUp/PgDn move' : '↑↓ move'
       const footerLine = filterMode
         ? `${navHint} · type to filter · backspace · esc clear · enter done`
         : `${navHint} · space select · a all · / filter · enter confirm`
@@ -360,14 +373,16 @@ export async function promptRepoPicker(
 
       // Navigation keys work in both modes — let the user scroll while filtering.
       if (key === '\x1b[A') {
-        if (filtered.length === 0) return
-        cursorPos = cursorPos > 0 ? cursorPos - 1 : filtered.length - 1
+        const displayed = displayIndices()
+        if (displayed.length === 0) return
+        cursorPos = cursorPos > 0 ? cursorPos - 1 : displayed.length - 1
         render()
         return
       }
       if (key === '\x1b[B') {
-        if (filtered.length === 0) return
-        cursorPos = cursorPos < filtered.length - 1 ? cursorPos + 1 : 0
+        const displayed = displayIndices()
+        if (displayed.length === 0) return
+        cursorPos = cursorPos < displayed.length - 1 ? cursorPos + 1 : 0
         render()
         return
       }
@@ -375,19 +390,21 @@ export async function promptRepoPicker(
         // PageUp — advance window AND cursor by one viewport so the page
         // actually flips. Without the windowStart bump, adjustWindowStart would
         // only scroll far enough to keep the cursor visible (one row).
-        if (filtered.length === 0) return
+        const displayed = displayIndices()
+        if (displayed.length === 0) return
         const vp = viewport()
         cursorPos = Math.max(0, cursorPos - vp)
-        windowStart = advancePageStart(windowStart, vp, filtered.length, -1)
+        windowStart = advancePageStart(windowStart, vp, displayed.length, -1)
         render()
         return
       }
       if (key === '\x1b[6~') {
         // PageDown — see PageUp comment.
-        if (filtered.length === 0) return
+        const displayed = displayIndices()
+        if (displayed.length === 0) return
         const vp = viewport()
-        cursorPos = Math.min(filtered.length - 1, cursorPos + vp)
-        windowStart = advancePageStart(windowStart, vp, filtered.length, 1)
+        cursorPos = Math.min(displayed.length - 1, cursorPos + vp)
+        windowStart = advancePageStart(windowStart, vp, displayed.length, 1)
         render()
         return
       }
@@ -430,16 +447,16 @@ export async function promptRepoPicker(
         filterMode = true
         render()
       } else if (key === ' ') {
-        if (filtered.length === 0) return
-        const origIdx = filtered[cursorPos]
-        if (selected.has(origIdx)) selected.delete(origIdx)
+        const displayed = displayIndices()
+        if (displayed.length === 0) return
+        const origIdx = displayed[cursorPos]
+        if (origIdx === allRow) toggleAllVisible()
+        else if (selected.has(origIdx)) selected.delete(origIdx)
         else selected.add(origIdx)
         render()
       } else if (key === 'a') {
         // Toggle every item in the current filtered view.
-        const allOn = filtered.every(i => selected.has(i))
-        if (allOn) for (const i of filtered) selected.delete(i)
-        else for (const i of filtered) selected.add(i)
+        toggleAllVisible()
         render()
       } else if (key === '\r' || key === '\n') {
         process.removeListener('SIGINT', handleSigint)

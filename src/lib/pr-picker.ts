@@ -15,6 +15,7 @@ export async function pickPRs(prs: PRStatus[]): Promise<PRStatus[]> {
   const rows = ordered.map(formatPickerLabel)
   const selected = await promptRepoPicker(rows, {
     title: 'Select stale PRs to advance',
+    selectAllLabel: 'all',
     getDescription: (row) => {
       const pr = ordered[rows.indexOf(row)]
       return pr ? pickerDescription(pr) : ''
@@ -36,7 +37,11 @@ export function sortPRsForPicker(prs: PRStatus[]): PRStatus[] {
 }
 
 export function formatPickerLabel(pr: PRStatus): string {
-  return `${actionGroupLabel(pr).padEnd(7)} ${pr.owner}/${pr.repo}#${pr.number}@${pr.headSha.slice(0, 7)}  ${pr.title}`
+  return `${actionGroupLabel(pr).padEnd(7)} ${formatPRSignature(pr)}  ${pr.title}  ${pr.reviewState}`
+}
+
+function formatPRSignature(pr: PRStatus): string {
+  return `${pr.owner}/${pr.repo}/PR#${pr.number}`
 }
 
 export function actionGroupLabel(pr: PRStatus): 'CR' | 'fix' | 'recheck' | 'merge' {

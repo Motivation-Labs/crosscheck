@@ -106,7 +106,7 @@ export async function runKickassWithDeps(
     const mergeReady = scan.prs.filter(pr => pr.nextAction === 'merge')
 
     if (queue.length === 0 && mergeReady.length === 0) {
-      console.log(chalk.dim('No actionable PRs found.'))
+      printNoActionablePRsWarning(scan.cached === true)
       return
     }
     if (queue.length === 0) {
@@ -222,6 +222,14 @@ function printCapturedOutput(label: string, output: string): void {
   const lines = output.trimEnd().split('\n')
   console.log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
   for (const line of lines) console.log(`  ${line}`)
+}
+
+function printNoActionablePRsWarning(fromCache: boolean): void {
+  console.log(chalk.dim('No actionable PRs found.'))
+  const cacheHint = fromCache
+    ? 'This result came from the scan cache.'
+    : 'A stale empty scan cache can hide newly opened or updated PRs.'
+  console.log(chalk.yellow(`⚠ ${cacheHint} Rerun with --force to refresh the queue.`))
 }
 
 export async function executeKickassPlan(

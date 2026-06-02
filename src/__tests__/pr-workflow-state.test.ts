@@ -88,6 +88,18 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(1)
   })
 
+  it('routes a non-APPROVE recheck followed by an unannotated HEAD commit to fix', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'first-sha', commentId: 100 }),
+      record({ type: 'fix', commentId: 101, pushedSha: 'first-fix-sha' }),
+      record({ type: 'recheck', verdict: 'NEEDS_WORK', sha: 'rechecked-sha', round: 7, commentId: 102 }),
+    ], workflow, 'new-unannotated-head-sha')
+
+    expect(next.step?.type).toBe('fix')
+    expect(next.reviewComment?.id).toBe(102)
+    expect(next.round).toBe(7)
+  })
+
   it('routes a current-head fix after review to recheck', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
@@ -140,6 +152,33 @@ describe('identifyNextWorkflowStep', () => {
 
     expect(next.step?.type).toBe('recheck')
     expect(next.reviewComment?.id).toBe(100)
+  })
+
+  it('routes a commit-trailer fix after a non-APPROVE recheck to recheck', () => {
+    const fixRecord = commitToRecord({
+      sha: '1851423327a8452ed291f95e162a22f33b0d954a',
+      commit: {
+        message: [
+          'fix credential resubmit evidence projection',
+          '',
+          'Crosscheck-Reviewer: codex',
+          'Crosscheck-Step: fix',
+          'Crosscheck-Service: crosscheck',
+        ].join('\n'),
+        committer: { date: '2026-06-02T02:17:32Z' },
+      },
+    } satisfies RawPRCommit)
+
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'first-sha', commentId: 100 }),
+      record({ type: 'fix', commentId: 101, pushedSha: 'first-fix-sha' }),
+      record({ type: 'recheck', verdict: 'NEEDS_WORK', sha: 'rechecked-sha', round: 7, commentId: 102 }),
+      fixRecord!,
+    ], workflow, '1851423327a8452ed291f95e162a22f33b0d954a')
+
+    expect(next.step?.type).toBe('recheck')
+    expect(next.reviewComment?.id).toBe(102)
+    expect(next.round).toBe(7)
   })
 
   it('routes a trailer fix followed by another HEAD back to review', () => {

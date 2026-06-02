@@ -48,6 +48,7 @@ crosscheck serve                    # team use — fixed port, register webhook 
 crosscheck review <pr-url>          # one-shot review of a specific PR
 crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
 crosscheck scan                     # show open PR workflow state across monitored repos
+crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
 crosscheck init                     # check prerequisites, write starter config
 crosscheck status                   # auth state, config summary, CLI versions
@@ -72,6 +73,20 @@ crosscheck status                   # auth state, config summary, CLI versions
 | `BLOCK` | AI hard-blocked merge |
 
 `BLOCK` and `NEEDS_WORK` both map to `NEEDS_FIX` stage — same next action, but the `verdict` field preserves severity so operators can prioritise.
+
+**How workflow steps are counted**
+
+Crosscheck reconstructs PR workflow state from visible artifacts:
+
+| Evidence | Counts as |
+|---|---|
+| Review or recheck comment with `<!-- crosscheck: ... verdict=... -->` | completed `review` / `recheck` step |
+| Fix or conflict-resolve comment, such as `<!-- crosscheck: fix_applied ... -->` | completed `fix` / `conflict-resolve` step |
+| PR commit trailer, such as `Crosscheck-Step: fix` | completed step declared by that trailer |
+
+Commit trailers are accepted as operator-declared workflow state. In practice, a PR author may command Claude, Codex, or another agent to apply a fix outside a standalone Crosscheck post; if the resulting PR commit carries `Crosscheck-Step: fix`, Crosscheck counts it as fix evidence.
+
+That evidence only advances the next step to `recheck` when the fix commit is the current PR HEAD. If another commit lands after the fix evidence, Crosscheck starts a fresh review round so the newer code is reviewed normally. This prevents an old fix trailer from marking later changes as ready for recheck.
 
 ```bash
 crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
@@ -174,6 +189,17 @@ crosscheck scan --tidy                   # stale actionable rows only
 crosscheck scan --stale-after 4h         # custom staleness threshold (default 24h)
 crosscheck scan --force                  # bypass cache
 crosscheck scan --json                   # machine-readable output
+```
+
+---
+
+### `crosscheck detect-step`
+
+Explains the workflow history for one PR and prints the next step Crosscheck would run. Use this when a PR has mixed evidence from comments, Crosscheck commits, or ad hoc agent commits with `Crosscheck-Step` trailers.
+
+```bash
+crosscheck detect-step <pr-url>
+crosscheck detect-step <pr-url> --json
 ```
 
 ---

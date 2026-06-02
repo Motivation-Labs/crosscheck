@@ -231,6 +231,11 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+      onVendorLimit: (failedVendor, fallbackVendor, reason) => {
+        if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
+          triggerSwitch(failedVendor, reason, announce)
+        }
+      },
       isRecheckRun,
       round,
       trigger: event.action === 'backtrace' ? 'backtrace' : 'serve',

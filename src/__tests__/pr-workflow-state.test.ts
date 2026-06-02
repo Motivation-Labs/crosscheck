@@ -57,12 +57,30 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.round).toBe(1)
   })
 
-  it('runs the initial review after conflict-resolve completes', () => {
+  it('runs the initial review after conflict-resolve completes for the current HEAD', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'conflict-resolve', commentId: 99, pushedSha: 'head-sha' }),
+    ], workflow, 'head-sha')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(1)
+  })
+
+  it('reruns initial conflict-resolve when prior conflict resolution is stale', () => {
+    const next = identifyNextWorkflowStep([
+      record({ type: 'conflict-resolve', commentId: 99, pushedSha: 'resolved-sha' }),
+    ], workflow, 'new-head-sha')
+
+    expect(next.step?.type).toBe('conflict-resolve')
+    expect(next.round).toBe(1)
+  })
+
+  it('reruns initial conflict-resolve when prior conflict resolution has no SHA', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'conflict-resolve', commentId: 99 }),
     ], workflow, 'head-sha')
 
-    expect(next.step?.type).toBe('review')
+    expect(next.step?.type).toBe('conflict-resolve')
     expect(next.round).toBe(1)
   })
 
@@ -122,8 +140,9 @@ describe('identifyNextWorkflowStep', () => {
   })
 
   it('counts a commit-trailer fix as a completed fix step', () => {
+    const sha = '59abeb630af4efbc874650db88ecf3dcb02724fb'
     const fixRecord = commitToRecord({
-      sha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
+      sha,
       commit: {
         message: [
           '[crosscheck] fix: apply fixes from code review',
@@ -135,7 +154,7 @@ describe('identifyNextWorkflowStep', () => {
         ].join('\n'),
         committer: { date: '2026-06-02T01:08:00Z' },
       },
-    } satisfies RawPRCommit)
+    } satisfies RawPRCommit, new Set([sha]))
 
     expect(fixRecord).toMatchObject({
       type: 'fix',
@@ -155,8 +174,9 @@ describe('identifyNextWorkflowStep', () => {
   })
 
   it('routes a commit-trailer fix after a non-APPROVE recheck to recheck', () => {
+    const sha = '1851423327a8452ed291f95e162a22f33b0d954a'
     const fixRecord = commitToRecord({
-      sha: '1851423327a8452ed291f95e162a22f33b0d954a',
+      sha,
       commit: {
         message: [
           'fix credential resubmit evidence projection',
@@ -167,7 +187,7 @@ describe('identifyNextWorkflowStep', () => {
         ].join('\n'),
         committer: { date: '2026-06-02T02:17:32Z' },
       },
-    } satisfies RawPRCommit)
+    } satisfies RawPRCommit, new Set([sha]))
 
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'first-sha', commentId: 100 }),
@@ -182,8 +202,9 @@ describe('identifyNextWorkflowStep', () => {
   })
 
   it('routes a trailer fix followed by another HEAD back to review', () => {
+    const sha = '59abeb630af4efbc874650db88ecf3dcb02724fb'
     const fixRecord = commitToRecord({
-      sha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
+      sha,
       commit: {
         message: [
           '[crosscheck] fix: apply fixes from code review',
@@ -195,7 +216,7 @@ describe('identifyNextWorkflowStep', () => {
         ].join('\n'),
         committer: { date: '2026-06-02T01:08:00Z' },
       },
-    } satisfies RawPRCommit)
+    } satisfies RawPRCommit, new Set([sha]))
 
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
@@ -210,6 +231,51 @@ describe('identifyNextWorkflowStep', () => {
     const next = identifyNextWorkflowStep([
       record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
     ], workflow, 'new-head-sha')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
+  })
+
+  it('ignores untrusted commit trailer workflow records', () => {
+    const fixRecord = commitToRecord({
+      sha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
+      commit: {
+        message: [
+          'human-authored commit',
+          '',
+          'Crosscheck-Reviewer: claude',
+          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Step: fix',
+          'Crosscheck-Service: crosscheck',
+        ].join('\n'),
+        committer: { date: '2026-06-02T01:08:00Z' },
+      },
+    } satisfies RawPRCommit, new Set())
+
+    expect(fixRecord).toBeNull()
+  })
+
+  it('routes a post-approval trailer fix at current HEAD back to review', () => {
+    const sha = '59abeb630af4efbc874650db88ecf3dcb02724fb'
+    const fixRecord = commitToRecord({
+      sha,
+      commit: {
+        message: [
+          '[crosscheck] fix: apply fixes from code review',
+          '',
+          'Crosscheck-Reviewer: claude',
+          'Crosscheck-Model: claude-sonnet-4-6',
+          'Crosscheck-Step: fix',
+          'Crosscheck-Service: crosscheck',
+        ].join('\n'),
+        committer: { date: '2026-06-02T01:08:00Z' },
+      },
+    } satisfies RawPRCommit, new Set([sha]))
+
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'APPROVE', sha: 'approved-sha' }),
+      fixRecord!,
+    ], workflow, sha)
 
     expect(next.step?.type).toBe('review')
     expect(next.round).toBe(2)

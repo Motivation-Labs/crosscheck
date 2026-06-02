@@ -71,7 +71,9 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
     return { type: 'fix', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at, ...(pushedSha !== undefined && { pushedSha }) }
   }
   if (marker === 'conflict_resolved') {
-    return { type: 'conflict-resolve', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at }
+    const shaMatch = comment.body.match(/\/commit\/([0-9a-f]{40})/i)
+    const pushedSha = shaMatch ? shaMatch[1] : undefined
+    return { type: 'conflict-resolve', round: 1, commentId: comment.id, commentBody: comment.body, createdAt: comment.created_at, ...(pushedSha !== undefined && { pushedSha }) }
   }
 
   // Full annotation (requires origin + reviewer)
@@ -97,8 +99,12 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
   }
 }
 
-export function commitToRecord(commit: RawPRCommit): StepRecord | null {
+export function commitToRecord(commit: RawPRCommit, trustedCrosscheckShas: ReadonlySet<string>): StepRecord | null {
+  if (!trustedCrosscheckShas.has(commit.sha)) return null
+
   const trailers = parseCommitTrailers(commit.commit.message)
+  if (trailers.get('crosscheck-service') !== 'crosscheck') return null
+
   const step = trailers.get('crosscheck-step') as StepRecordType | undefined
   if (step !== 'fix' && step !== 'conflict-resolve') return null
 
@@ -132,6 +138,7 @@ async function fetchCommitHistory(
   repo: string,
   prNumber: number,
   token: string,
+  trustedCrosscheckShas: ReadonlySet<string>,
 ): Promise<StepRecord[]> {
   const records: StepRecord[] = []
   let page = 1
@@ -139,7 +146,7 @@ async function fetchCommitHistory(
     const commits = await fetchPRCommitPage(owner, repo, prNumber, token, page)
     if (commits.length === 0) break
     for (const commit of commits) {
-      const record = commitToRecord(commit)
+      const record = commitToRecord(commit, trustedCrosscheckShas)
       if (record) records.push(record)
     }
     if (commits.length < 100) break
@@ -177,10 +184,11 @@ export async function fetchStepHistory(
   repo: string,
   prNumber: number,
   token: string,
+  trustedCrosscheckShas: ReadonlySet<string> = new Set(),
 ): Promise<StepRecord[]> {
   // Fetch the first page to discover total pagination
   const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
-  const commitHistory = await fetchCommitHistory(owner, repo, prNumber, token)
+  const commitHistory = await fetchCommitHistory(owner, repo, prNumber, token, trustedCrosscheckShas)
   if (firstPage.length === 0) return mergeStepHistory([], commitHistory)
 
   // ── Fast path ──────────────────────────────────────────────────────────────
@@ -231,7 +239,7 @@ export async function fetchStepHistory(
  *  1. No review/recheck on record → start from the first workflow step.
  *  2. Any non-APPROVE review/recheck without a later fix → fix is next.
  *  3. A fix after the last review/recheck → recheck is next.
- *  4. Current SHA has not been analyzed after the initial review → recheck is next.
+	 *  4. Current SHA has not been analyzed after the initial review → review is next.
  *  5. Current SHA already reviewed → walk the workflow steps that follow
  *     and return the first whose `when` condition evaluates to true and
  *     that hasn't already been completed in history.
@@ -245,7 +253,7 @@ export function identifyNextWorkflowStep(
   const hasExistingReview = reviewHistory.length > 0
 
   if (!hasExistingReview) {
-    const firstStep = firstIncompleteInitialStep(history, steps)
+    const firstStep = firstIncompleteInitialStep(history, steps, currentSha)
     return { step: firstStep, hasExistingReview: false, round: 1, history }
   }
 
@@ -281,7 +289,7 @@ export function identifyNextWorkflowStep(
   const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
   const fixedCurrentSha = lastFixAfterReview?.pushedSha !== undefined && lastFixAfterReview.pushedSha === currentSha
 
-  if (fixedCurrentSha) {
+  if (fixedCurrentSha && lastReview.verdict !== 'APPROVE') {
     return {
       step: effectiveRecheckStep(steps),
       reviewComment,
@@ -357,10 +365,10 @@ export function identifyNextWorkflowStep(
   return { step: null, hasExistingReview: true, round: lastReview.round, history }
 }
 
-function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[]): WorkflowStep | null {
+function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[], currentSha: string): WorkflowStep | null {
   for (const step of steps) {
     if (step.type === 'conflict-resolve') {
-      const conflictDone = history.some(r => r.type === 'conflict-resolve')
+      const conflictDone = history.some(r => r.type === 'conflict-resolve' && r.pushedSha === currentSha)
       if (!conflictDone) return step
       continue
     }

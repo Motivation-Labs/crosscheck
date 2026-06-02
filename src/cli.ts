@@ -82,7 +82,8 @@ program
   .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
-  .option('--vendor <vendor>', 'alias for --reviewer')
+  .option('--fixer <vendor>', 'force a specific fixer for fix steps: codex | claude')
+  .option('--vendor <vendor>', 'force one vendor for review, recheck, and fix steps')
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
@@ -92,12 +93,12 @@ program
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
   .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy; used internally by kickass fix legs)')
   .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch/serve
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean; trigger?: string }) => {
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; fixer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean; trigger?: string }) => {
     const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
     const noTimeout = opts.noTimeout || opts.timeout === false
     const trigger = (opts.trigger as import('./lib/runner.js').WorkflowTrigger | undefined) ?? 'run'
-    void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, trigger })
+    void runRun(prUrl, { ...opts, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, trigger })
   })
 
 program

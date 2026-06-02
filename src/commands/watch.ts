@@ -360,6 +360,11 @@ export async function runWatch(opts: WatchOpts = {}) {
           onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
           crosscheckShas,
           smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+          onVendorLimit: (failedVendor, fallbackVendor, reason) => {
+            if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
+              triggerSwitch(failedVendor, reason, bLog)
+            }
+          },
           isRecheckRun,
           round,
           trigger: params.action === 'backtrace' ? 'backtrace' : 'watch',

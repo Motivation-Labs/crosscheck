@@ -6,6 +6,7 @@ import chalk from 'chalk'
 import type { Config } from '../config/schema.js'
 import type { PREvent } from '../github/webhook.js'
 import type { PROrigin } from '../github/detector.js'
+import type { Vendor } from '../lib/vendor.js'
 import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep } from '../reviewers/fix.js'
@@ -20,6 +21,7 @@ import { buildStepIdentityFields } from '../lib/event-fields.js'
 import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
+import { isSubscriptionLimitError } from '../lib/smart-switch.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -32,10 +34,11 @@ function vendorTimeoutMs(timeoutSec: number | null): number | undefined {
   return timeoutSec == null ? undefined : timeoutSec * 1000
 }
 
-// Auth failures are operator issues that won't self-heal — everything else is worth a retry.
+// Auth and quota/credit failures are operator/vendor-capacity issues that won't
+// self-heal through an immediate retry. Transient subprocess failures can retry.
 export function isRetryableFixError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
-  return !/auth failure|not logged in|claude auth/i.test(msg)
+  return !/auth failure|not logged in|claude auth/i.test(msg) && !isSubscriptionLimitError(err)
 }
 
 // When a PR has already been reviewed, subsequent webhook runs treat every
@@ -230,6 +233,10 @@ export interface WorkflowContext {
   overrideTimeoutMs?: number
   // How this workflow was triggered — logged in step events for analysis segmentation.
   trigger?: WorkflowTrigger
+  // Called when a vendor hits a quota/credit limit and the runner can identify
+  // an immediate same-step fallback. Long-lived commands use this to activate
+  // smart-switch without failing the current PR first.
+  onVendorLimit?: (failedVendor: Vendor, fallbackVendor: Vendor | null, reason: string, stepName: string) => void
 }
 
 export interface WorkflowResult {
@@ -256,8 +263,8 @@ function resolveReviewer(
   reviewer: string,
   origin: PROrigin,
   config: Config,
-  fallback?: 'claude' | 'codex',
-): 'claude' | 'codex' | null {
+  fallback?: Vendor,
+): Vendor | null {
   if (reviewer === 'origin') {
     if (origin === 'claude' && config.vendors.claude.enabled) return 'claude'
     if (origin === 'codex' && config.vendors.codex.enabled) return 'codex'
@@ -273,6 +280,17 @@ function resolveReviewer(
   if (reviewer === 'claude') return config.vendors.claude.enabled ? 'claude' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   if (reviewer === 'codex') return config.vendors.codex.enabled ? 'codex' : (fallback && config.vendors[fallback].enabled ? fallback : null)
   return null
+}
+
+function supportsStep(vendor: Vendor, stepType: string): boolean {
+  if (stepType === 'review' || stepType === 'recheck') return true
+  // Fix and conflict resolution are Claude-only until Codex implementations exist.
+  return vendor === 'claude'
+}
+
+function resolveLimitFallbackVendor(failedVendor: Vendor, stepType: string, config: Config): Vendor | null {
+  const fallback: Vendor = failedVendor === 'claude' ? 'codex' : 'claude'
+  return config.vendors[fallback].enabled && supportsStep(fallback, stepType) ? fallback : null
 }
 
 // ─── pr_complexity helpers ────────────────────────────────────────────────────
@@ -407,7 +425,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     if (effectiveType === 'review' || effectiveType === 'recheck') {
       const isRecheck = effectiveType === 'recheck'
-      const reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
+      let reviewer = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!reviewer) {
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason: 'no_reviewer' })
         results[step.name] = { skipped: true }
@@ -427,15 +445,48 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // workflow start and never reset, so a recheck's duration_ms would
       // otherwise include the prior review and fix wall time.
       const stepStart = Date.now()
-      let rawReview: string
+      let rawReview = ''
       let tokensUsed: number | undefined
       let inputTokens: number | undefined
       let outputTokens: number | undefined
       let model = 'default'
-      if (reviewer === 'codex') {
-        ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
-      } else {
-        ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
+      const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
+        if (candidate === 'codex') {
+          ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
+          inputTokens = undefined
+          outputTokens = undefined
+        } else {
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
+        }
+      }
+
+      try {
+        await runReviewWithVendor(reviewer)
+      } catch (err: unknown) {
+        if (!isSubscriptionLimitError(err)) throw err
+
+        const failedVendor = reviewer
+        const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
+        const reason = err instanceof Error ? err.message : String(err)
+        ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+
+        if (!fallbackVendor) throw err
+
+        fileLog({
+          level: 'warn',
+          event: 'vendor_fallback',
+          repo: `${owner}/${repoName}`,
+          pr: prNumber,
+          step: step.name,
+          step_type: effectiveType,
+          failed_vendor: failedVendor,
+          fallback_vendor: fallbackVendor,
+          reason: reason.slice(0, 300),
+        })
+        log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
+        reviewer = fallbackVendor
+        onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+        await runReviewWithVendor(reviewer)
       }
 
       const { verdict, clean } = parseVerdict(rawReview)
@@ -590,7 +641,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       if (fixErr !== undefined) {
-        skipFix('fix_error')
+        skipFix(isSubscriptionLimitError(fixErr) ? 'vendor_limit' : 'fix_error')
         // Only notify for transient failures — auth errors are operator issues, not PR author issues
         if (isRetryableFixError(fixErr)) {
           try {
@@ -806,7 +857,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'conflict-resolve', attempt: 1 }, err)
         try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }
-        skipConflictResolve('resolve_error')
+        skipConflictResolve(isSubscriptionLimitError(err) ? 'vendor_limit' : 'resolve_error')
         continue
       }
 

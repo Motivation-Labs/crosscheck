@@ -23,6 +23,12 @@ describe('isRetryableFixError', () => {
     expect(isRetryableFixError(new Error('spawnSync claude ETIMEDOUT'))).toBe(true)
   })
 
+  it('returns false for credit and quota limit errors', () => {
+    expect(isRetryableFixError(new Error('claude: usage limit exceeded'))).toBe(false)
+    expect(isRetryableFixError(new Error('codex: 429 Too Many Requests'))).toBe(false)
+    expect(isRetryableFixError(new Error('quota exceeded'))).toBe(false)
+  })
+
   it('returns true for subprocess exit errors', () => {
     expect(isRetryableFixError(new Error('Command failed: claude --print --output-format text'))).toBe(true)
   })

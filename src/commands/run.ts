@@ -8,7 +8,7 @@ import { createGithubClient } from '../github/client.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
-import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
+import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
@@ -17,10 +17,13 @@ import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
+import { PersistentShaSet } from '../lib/sha-cache.js'
 
 export interface RunOpts {
   config?: string
   reviewer?: string
+  fixer?: string
+  vendor?: string
   steps?: string
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
@@ -48,10 +51,25 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
-function pinReviewers(steps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep[] {
-  return steps.map(s =>
-    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
-  )
+export interface StepVendorOverrides {
+  reviewer?: Vendor
+  fixer?: Vendor
+  vendor?: Vendor
+}
+
+function applyStepVendorOverrides(
+  steps: WorkflowStep[],
+  assignedReviewer: Vendor,
+  overrides: StepVendorOverrides = {},
+): WorkflowStep[] {
+  const reviewVendor = overrides.vendor ?? overrides.reviewer ?? assignedReviewer
+  const fixVendor = overrides.vendor ?? overrides.fixer
+  return steps.map(s => {
+    if (s.type === 'review' || s.type === 'recheck') return { ...s, reviewer: reviewVendor }
+    if (s.type === 'fix' && fixVendor !== undefined) return { ...s, reviewer: fixVendor }
+    if (s.type === 'conflict-resolve' && overrides.vendor !== undefined) return { ...s, reviewer: overrides.vendor }
+    return s
+  })
 }
 
 function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep | null {
@@ -78,11 +96,12 @@ export function resolveWorkflowSteps(
   allSteps: WorkflowStep[],
   stepFilter: string[] | undefined,
   assignedReviewer: 'claude' | 'codex',
+  overrides: StepVendorOverrides = {},
 ): WorkflowStep[] {
   const selected = stepFilter
     ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
     : allSteps
-  let steps = pinReviewers(selected, assignedReviewer)
+  let steps = applyStepVendorOverrides(selected, assignedReviewer, overrides)
 
   if (stepFilter?.includes('recheck') && !steps.some(s => s.type === 'recheck')) {
     const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
@@ -96,11 +115,12 @@ export function buildFixRecheckSteps(
   steps: WorkflowStep[],
   allSteps: WorkflowStep[],
   assignedReviewer: 'claude' | 'codex',
+  overrides: StepVendorOverrides = {},
 ): WorkflowStep[] {
   const selectedFixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
   const sourceSteps = selectedFixRecheckSteps.length > 0
     ? selectedFixRecheckSteps
-    : pinReviewers(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer)
+    : applyStepVendorOverrides(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer, overrides)
   let fixRecheckSteps = [...sourceSteps]
   if (!fixRecheckSteps.some(s => s.type === 'fix')) {
     const fixStep = allSteps.find(s => s.type === 'fix')
@@ -191,10 +211,28 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   process.once('SIGINT', earlySignalHandler)
   process.once('SIGTERM', earlySignalHandler)
 
-  // Resolve origin and reviewer
+  // Resolve origin plus any explicit per-step vendor overrides.
   const normalizedReviewer = normalizeVendor(opts.reviewer)
+  const normalizedFixer = normalizeVendor(opts.fixer)
+  const normalizedVendor = normalizeVendor(opts.vendor)
   if (opts.reviewer !== undefined && normalizedReviewer === null) {
     console.error(chalk.red(`✗ Unknown reviewer "${opts.reviewer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (opts.fixer !== undefined && normalizedFixer === null) {
+    console.error(chalk.red(`✗ Unknown fixer "${opts.fixer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (opts.vendor !== undefined && normalizedVendor === null) {
+    console.error(chalk.red(`✗ Unknown vendor "${opts.vendor}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (normalizedReviewer !== null && normalizedVendor !== null && normalizedReviewer !== normalizedVendor) {
+    console.error(chalk.red(`✗ --reviewer and --vendor disagree (${normalizedReviewer} vs ${normalizedVendor})`))
+    process.exit(1)
+  }
+  if (normalizedFixer !== null && normalizedVendor !== null && normalizedFixer !== normalizedVendor) {
+    console.error(chalk.red(`✗ --fixer and --vendor disagree (${normalizedFixer} vs ${normalizedVendor})`))
     process.exit(1)
   }
 
@@ -218,30 +256,35 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method})`))
   }
 
-  const assignedReviewer = normalizedReviewer !== null
-    ? normalizedReviewer
-    : await assignReviewer(origin, config)
+  const forcedReviewer = normalizedVendor ?? normalizedReviewer
+  const assignedReviewer = forcedReviewer ?? await assignReviewer(origin, config)
 
   if (!assignedReviewer) {
     console.log(chalk.dim(`  no reviewer assigned for origin "${origin}" — use --reviewer ${VENDOR_ALIAS_HINT} to force`))
     return
   }
-  if (normalizedReviewer === null) {
+  if (normalizedVendor !== null) {
+    console.log(chalk.dim(`  vendor: ${assignedReviewer} (forced for all workflow steps)`))
+  } else if (normalizedReviewer === null) {
     console.log(chalk.dim(`  assigned reviewer: ${assignedReviewer}`))
   }
+  if (normalizedFixer !== null && normalizedVendor === null) {
+    console.log(chalk.dim(`  fixer: ${normalizedFixer} (forced for fix steps)`))
+  }
 
-  // Resolve steps — filter from workflow.yml by type if --steps is specified, then pin the
-  // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
+  // Resolve steps — filter from workflow.yml by type if --steps is specified, then apply
+  // command-line vendor overrides so runWorkflow doesn't re-derive those step vendors.
   const allSteps = loadWorkflow(process.cwd())
   let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
   let initialReviewComment = opts.initialReviewComment
+  const crosscheckShas = new PersistentShaSet()
 
   // When running without an explicit --steps flag, traverse the PR comment
   // history to determine which workflow step to run next — skipping steps that
   // have already completed for the current HEAD SHA.
   if (!opts.steps) {
     try {
-      const history = await fetchStepHistory(owner, repo, number, token)
+      const history = await fetchStepHistory(owner, repo, number, token, crosscheckShas)
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
       if (nextResult.step === null) {
         // Workflow already complete for this SHA
@@ -263,7 +306,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     } catch { /* best-effort — fall through to normal review flow on API error */ }
   }
 
-  const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer)
+  const stepVendorOverrides: StepVendorOverrides = {
+    ...(normalizedReviewer !== null && { reviewer: normalizedReviewer }),
+    ...(normalizedFixer !== null && { fixer: normalizedFixer }),
+    ...(normalizedVendor !== null && { vendor: normalizedVendor }),
+  }
+  const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer, stepVendorOverrides)
 
   if (opts.dryRun) {
     console.log(chalk.dim('  dry-run: review will run but no comment will be posted; fix step skipped'))
@@ -402,7 +450,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         owner, repoName: repo, prNumber: number, token, config, origin,
         log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
         onPhaseChange: (label: string) => { activeSpinner.text = label },
-        crosscheckShas: new Set<string>(),
+        crosscheckShas,
         pushedShas,
         dryRun: opts.dryRun,
         // crazy/halfcrazy bypass per-step max_rounds; loop runs until stop condition or no-progress guard
@@ -426,7 +474,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       // Autonomous fix→recheck loop for --crazy / --halfcrazy
       if (opts.roundMode) {
         const mode = opts.roundMode
-        const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer)
+        const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
         let loopRound = 1
         let loopSha = sha
 

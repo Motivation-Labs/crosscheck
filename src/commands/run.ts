@@ -17,7 +17,6 @@ import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import type { PREvent } from '../github/webhook.js'
-import { PersistentShaSet } from '../lib/sha-cache.js'
 
 export interface RunOpts {
   config?: string
@@ -242,7 +241,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // have already completed for the current HEAD SHA.
   if (!opts.steps) {
     try {
-      const history = await fetchStepHistory(owner, repo, number, token, { trustedCommitShas: new PersistentShaSet() })
+      const history = await fetchStepHistory(owner, repo, number, token)
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
       if (nextResult.step === null) {
         // Workflow already complete for this SHA

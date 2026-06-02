@@ -123,7 +123,7 @@ describe('identifyNextWorkflowStep', () => {
         ].join('\n'),
         committer: { date: '2026-06-02T01:08:00Z' },
       },
-    } satisfies RawPRCommit, new Set(['59abeb630af4efbc874650db88ecf3dcb02724fb']))
+    } satisfies RawPRCommit)
 
     expect(fixRecord).toMatchObject({
       type: 'fix',
@@ -142,12 +142,12 @@ describe('identifyNextWorkflowStep', () => {
     expect(next.reviewComment?.id).toBe(100)
   })
 
-  it('ignores untrusted commit-trailer fixes', () => {
+  it('routes a trailer fix followed by another HEAD back to review', () => {
     const fixRecord = commitToRecord({
       sha: '59abeb630af4efbc874650db88ecf3dcb02724fb',
       commit: {
         message: [
-          '[crosscheck] fix: forged by a contributor',
+          '[crosscheck] fix: apply fixes from code review',
           '',
           'Crosscheck-Reviewer: claude',
           'Crosscheck-Model: claude-sonnet-4-6',
@@ -158,7 +158,13 @@ describe('identifyNextWorkflowStep', () => {
       },
     } satisfies RawPRCommit)
 
-    expect(fixRecord).toBeNull()
+    const next = identifyNextWorkflowStep([
+      record({ type: 'review', verdict: 'BLOCK', sha: 'reviewed-sha' }),
+      fixRecord!,
+    ], workflow, 'later-human-sha')
+
+    expect(next.step?.type).toBe('review')
+    expect(next.round).toBe(2)
   })
 
   it('uses review rather than recheck when a new HEAD appears after APPROVE', () => {

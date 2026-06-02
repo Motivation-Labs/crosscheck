@@ -4,6 +4,7 @@ import { createGithubClient } from '../github/client.js'
 import { getGithubToken } from '../config/loader.js'
 import { loadWorkflow } from '../lib/workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep, type StepRecord } from '../lib/pr-workflow-state.js'
+import { PersistentShaSet } from '../lib/sha-cache.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
@@ -73,7 +74,7 @@ export async function runDetectStep(
   const steps = loadWorkflow(process.cwd())
 
   const historySpinner = ora('Reading workflow history...').start()
-  const history = await fetchStepHistory(owner, repo, number, token)
+  const history = await fetchStepHistory(owner, repo, number, token, { trustedCommitShas: new PersistentShaSet() })
   historySpinner.stop()
 
   const currentSha = prData.head.sha

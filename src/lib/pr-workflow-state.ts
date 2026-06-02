@@ -42,6 +42,11 @@ export interface NextStepResult {
 
 const VALID_STEP_TYPES = new Set<StepRecordType>(['review', 'recheck', 'fix', 'conflict-resolve'])
 
+export interface FetchStepHistoryOptions {
+  /** Trusted SHAs that Crosscheck itself pushed. Commit-trailer records outside this set are ignored. */
+  trustedCommitShas?: ReadonlySet<string>
+}
+
 function commentToRecord(comment: { id: number; body: string; created_at: string }): StepRecord | null {
   const fields = parseAnnotationFields(comment.body)
 
@@ -97,10 +102,11 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
   }
 }
 
-export function commitToRecord(commit: RawPRCommit): StepRecord | null {
+export function commitToRecord(commit: RawPRCommit, trustedCommitShas?: ReadonlySet<string>): StepRecord | null {
   const trailers = parseCommitTrailers(commit.commit.message)
   const step = trailers.get('crosscheck-step') as StepRecordType | undefined
   if (step !== 'fix' && step !== 'conflict-resolve') return null
+  if (!trustedCommitShas?.has(commit.sha)) return null
 
   const createdAt = commit.commit.committer?.date ?? commit.commit.author?.date
   if (!createdAt) return null
@@ -132,6 +138,7 @@ async function fetchCommitHistory(
   repo: string,
   prNumber: number,
   token: string,
+  trustedCommitShas?: ReadonlySet<string>,
 ): Promise<StepRecord[]> {
   const records: StepRecord[] = []
   let page = 1
@@ -139,7 +146,7 @@ async function fetchCommitHistory(
     const commits = await fetchPRCommitPage(owner, repo, prNumber, token, page)
     if (commits.length === 0) break
     for (const commit of commits) {
-      const record = commitToRecord(commit)
+      const record = commitToRecord(commit, trustedCommitShas)
       if (record) records.push(record)
     }
     if (commits.length < 100) break
@@ -177,10 +184,11 @@ export async function fetchStepHistory(
   repo: string,
   prNumber: number,
   token: string,
+  opts: FetchStepHistoryOptions = {},
 ): Promise<StepRecord[]> {
   // Fetch the first page to discover total pagination
   const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
-  const commitHistory = await fetchCommitHistory(owner, repo, prNumber, token)
+  const commitHistory = await fetchCommitHistory(owner, repo, prNumber, token, opts.trustedCommitShas)
   if (firstPage.length === 0) return mergeStepHistory([], commitHistory)
 
   // ── Fast path ──────────────────────────────────────────────────────────────
@@ -256,7 +264,9 @@ export function identifyNextWorkflowStep(
   // Do NOT short-circuit based on lastReview.type === 'recheck': after a BLOCK or
   // NEEDS_WORK recheck, fix still needs to run. The fix step's `when` condition
   // (e.g. "review.verdict != 'APPROVE'") correctly gates it on APPROVE alone.
-  const fixAfterReview = historyAfterReview.some(r => r.type === 'fix' || r.type === 'conflict-resolve')
+  const lastFixAfterReview = historyAfterReview.filter(r => r.type === 'fix').at(-1)
+  const conflictAfterReview = historyAfterReview.some(r => r.type === 'conflict-resolve')
+  const fixAfterReview = lastFixAfterReview !== undefined || conflictAfterReview
 
   // Build synthetic results so evaluateWhen works correctly for downstream steps.
   // Always populate under the literal key 'review' so conditions like
@@ -276,12 +286,25 @@ export function identifyNextWorkflowStep(
 
   const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
 
-  if (fixAfterReview) {
+  const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
+  const fixedCurrentSha = lastFixAfterReview?.pushedSha !== undefined && lastFixAfterReview.pushedSha === currentSha
+
+  if (fixedCurrentSha) {
     return {
       step: effectiveRecheckStep(steps),
       reviewComment,
       hasExistingReview: true,
       round: lastReview.round,
+      history,
+    }
+  }
+
+  if (lastFixAfterReview !== undefined && !fixedCurrentSha) {
+    const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
+    return {
+      step: reviewStep,
+      hasExistingReview: true,
+      round: lastReview.round + 1,
       history,
     }
   }
@@ -297,12 +320,10 @@ export function identifyNextWorkflowStep(
     }
   }
 
-  const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
-
   if (!reviewedCurrentSha) {
+    const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
     return {
-      step: effectiveRecheckStep(steps),
-      reviewComment,
+      step: reviewStep,
       hasExistingReview: true,
       round: lastReview.round + 1,
       history,

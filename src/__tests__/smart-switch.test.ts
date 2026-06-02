@@ -31,13 +31,13 @@ describe('isSubscriptionLimitError', () => {
     expect(isSubscriptionLimitError(new Error('quota exceeded'))).toBe(true)
     expect(isSubscriptionLimitError(new Error('credits exhausted'))).toBe(true)
     expect(isSubscriptionLimitError(new Error('plan limit'))).toBe(true)
-    expect(isSubscriptionLimitError(new Error('overloaded'))).toBe(true)
   })
 
   it('does not match unrelated errors', () => {
     expect(isSubscriptionLimitError(new Error('codex: permission denied'))).toBe(false)
     expect(isSubscriptionLimitError(new Error('git clone failed'))).toBe(false)
     expect(isSubscriptionLimitError(new Error('timeout after 300s'))).toBe(false)
+    expect(isSubscriptionLimitError(new Error('provider overloaded'))).toBe(false)
   })
 })
 

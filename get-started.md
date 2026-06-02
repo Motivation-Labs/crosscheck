@@ -476,6 +476,8 @@ Executes the full configured workflow against a single PR: review â†’ auto-fix â
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
 crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
+crosscheck run https://github.com/owner/repo/pull/123 --fixer claude
+crosscheck run https://github.com/owner/repo/pull/123 --vendor claude
 crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
 crosscheck run https://github.com/owner/repo/pull/123 --dry-run
 crosscheck run https://github.com/owner/repo/pull/123 --crazy   # loop until APPROVE
@@ -486,7 +488,9 @@ The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root
 
 | Flag | Description |
 |---|---|
-| `-r, --reviewer codex\|claude` | Force a specific reviewer; skip auto-detection |
+| `-r, --reviewer codex\|claude` | Force review/recheck steps to use this vendor; skip auto-detection for review routing |
+| `--fixer codex\|claude` | Force fix steps to use this vendor |
+| `--vendor codex\|claude` | Force review, recheck, and fix steps to use this vendor |
 | `--steps <list>` | Run only the listed step types, comma-separated: `review`, `fix`, `recheck` |
 | `--dry-run` | Run the review but do not post a comment or apply fixes |
 | `--expected-head-sha <sha>` | Skip if the PR head changed since the command was queued |

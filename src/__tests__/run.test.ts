@@ -47,6 +47,30 @@ describe('resolveWorkflowSteps', () => {
       reviewer: 'claude',
     })
   })
+
+  it('pins --reviewer to review and recheck only', () => {
+    const steps = resolveWorkflowSteps([reviewStep, fixStep, recheckStep], undefined, 'codex', { reviewer: 'codex' })
+
+    expect(steps.find(step => step.type === 'review')?.reviewer).toBe('codex')
+    expect(steps.find(step => step.type === 'recheck')?.reviewer).toBe('codex')
+    expect(steps.find(step => step.type === 'fix')?.reviewer).toBe('origin')
+  })
+
+  it('pins --fixer to fix only', () => {
+    const steps = resolveWorkflowSteps([reviewStep, fixStep, recheckStep], undefined, 'codex', { fixer: 'claude' })
+
+    expect(steps.find(step => step.type === 'review')?.reviewer).toBe('codex')
+    expect(steps.find(step => step.type === 'recheck')?.reviewer).toBe('codex')
+    expect(steps.find(step => step.type === 'fix')?.reviewer).toBe('claude')
+  })
+
+  it('pins --vendor to review, recheck, and fix', () => {
+    const steps = resolveWorkflowSteps([reviewStep, fixStep, recheckStep], undefined, 'codex', { vendor: 'claude' })
+
+    expect(steps.find(step => step.type === 'review')?.reviewer).toBe('claude')
+    expect(steps.find(step => step.type === 'recheck')?.reviewer).toBe('claude')
+    expect(steps.find(step => step.type === 'fix')?.reviewer).toBe('claude')
+  })
 })
 
 describe('buildFixRecheckSteps', () => {

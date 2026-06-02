@@ -93,7 +93,7 @@ crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
 crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
 ```
 
-`crosscheck run` and `crosscheck review` accept vendor aliases via `--reviewer` / `--vendor`:
+`crosscheck review --reviewer`, `crosscheck run --reviewer`, `crosscheck run --fixer`, and `crosscheck run --vendor` accept vendor aliases:
 - Claude: `claude`, `claude-code`, `cc`, `anthropic`
 - Codex: `codex`, `openai`
 
@@ -168,7 +168,9 @@ Runs the full configured workflow against one PR: review → fix → recheck. Sa
 crosscheck run <pr-url>
 crosscheck run <pr-url> --steps review           # only the review step
 crosscheck run <pr-url> --steps fix,recheck      # skip initial review
-crosscheck run <pr-url> --reviewer claude        # override reviewer assignment
+crosscheck run <pr-url> --reviewer claude        # force review/recheck agent
+crosscheck run <pr-url> --fixer claude           # force fix agent
+crosscheck run <pr-url> --vendor claude          # force review/recheck/fix agent
 crosscheck run <pr-url> --dry-run                # review without posting or fixing
 crosscheck run <pr-url> --crazy                  # 🔥🔥 loop until APPROVE
 crosscheck run <pr-url> --half-crazy             # 🔥  loop until not BLOCK

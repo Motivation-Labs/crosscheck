@@ -2,7 +2,7 @@ import { parseAnnotation, parseAnnotationFields } from './annotation.js'
 import { evaluateWhen, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from './workflow.js'
 import type { StepResult } from './workflow.js'
 import { parseVerdict } from './verdict.js'
-import { fetchPRCommentPage, type RawPRComment } from '../github/client.js'
+import { fetchPRCommentPage, fetchPRCommitPage, type RawPRComment, type RawPRCommit } from '../github/client.js'
 
 export type StepRecordType = 'review' | 'recheck' | 'fix' | 'conflict-resolve'
 
@@ -23,6 +23,8 @@ export interface StepRecord {
   model?: string
   /** Pre-computed next workflow step from the annotation (review/recheck only) */
   next_step?: string
+  /** Where this record was reconstructed from. */
+  source?: 'comment' | 'commit'
 }
 
 export interface NextStepResult {
@@ -95,9 +97,72 @@ function commentToRecord(comment: { id: number; body: string; created_at: string
   }
 }
 
+export function commitToRecord(commit: RawPRCommit): StepRecord | null {
+  const trailers = parseCommitTrailers(commit.commit.message)
+  const step = trailers.get('crosscheck-step') as StepRecordType | undefined
+  if (step !== 'fix' && step !== 'conflict-resolve') return null
+
+  const createdAt = commit.commit.committer?.date ?? commit.commit.author?.date
+  if (!createdAt) return null
+
+  return {
+    type: step,
+    pushedSha: commit.sha,
+    round: 1,
+    commentId: 0,
+    commentBody: commit.commit.message,
+    createdAt,
+    source: 'commit',
+    ...(trailers.has('crosscheck-reviewer') && { reviewer: trailers.get('crosscheck-reviewer') }),
+    ...(trailers.has('crosscheck-model') && { model: trailers.get('crosscheck-model') }),
+  }
+}
+
+function parseCommitTrailers(message: string): Map<string, string> {
+  const trailers = new Map<string, string>()
+  for (const line of message.split('\n')) {
+    const match = line.match(/^\s*(Crosscheck-[A-Za-z-]+):\s*(.*?)\s*$/)
+    if (match) trailers.set(match[1].toLowerCase(), match[2])
+  }
+  return trailers
+}
+
+async function fetchCommitHistory(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<StepRecord[]> {
+  const records: StepRecord[] = []
+  let page = 1
+  while (true) {
+    const commits = await fetchPRCommitPage(owner, repo, prNumber, token, page)
+    if (commits.length === 0) break
+    for (const commit of commits) {
+      const record = commitToRecord(commit)
+      if (record) records.push(record)
+    }
+    if (commits.length < 100) break
+    page++
+  }
+  return records
+}
+
+function mergeStepHistory(commentRecords: StepRecord[], commitRecords: StepRecord[]): StepRecord[] {
+  const commentedStepShas = new Set(
+    commentRecords
+      .filter(r => (r.type === 'fix' || r.type === 'conflict-resolve') && r.pushedSha)
+      .map(r => r.pushedSha),
+  )
+  const uniqueCommitRecords = commitRecords.filter(r => !r.pushedSha || !commentedStepShas.has(r.pushedSha))
+  return [...commentRecords, ...uniqueCommitRecords]
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+}
+
 /**
- * Fetch all crosscheck step records from a PR's comment thread in chronological order.
- * All HTTP calls go through fetchPRCommentPage in github/client.ts.
+ * Fetch all crosscheck step records from PR comments and crosscheck commit
+ * trailers in chronological order.
+ * All HTTP calls go through github/client.ts.
  *
  * Fast path (new annotations with next_step):
  *   1. Fetch the last page to find the most recent review/recheck annotation.
@@ -115,7 +180,8 @@ export async function fetchStepHistory(
 ): Promise<StepRecord[]> {
   // Fetch the first page to discover total pagination
   const { comments: firstPage, lastPage } = await fetchPRCommentPage(owner, repo, prNumber, token)
-  if (firstPage.length === 0) return []
+  const commitHistory = await fetchCommitHistory(owner, repo, prNumber, token)
+  if (firstPage.length === 0) return mergeStepHistory([], commitHistory)
 
   // ── Fast path ──────────────────────────────────────────────────────────────
   if (lastPage !== null && lastPage > 1) {
@@ -135,7 +201,7 @@ export async function fetchStepHistory(
         const r = commentToRecord(c)
         if (r) trailing.push(r)
       }
-      return [anchorRecord, ...trailing]
+      return mergeStepHistory([anchorRecord, ...trailing], commitHistory)
     }
   }
 
@@ -154,7 +220,7 @@ export async function fetchStepHistory(
     const record = commentToRecord(comment)
     if (record) records.push(record)
   }
-  return records
+  return mergeStepHistory(records, commitHistory)
 }
 
 /**
@@ -162,11 +228,11 @@ export async function fetchStepHistory(
  * step should run next.
  *
  * The algorithm replays the history from the end:
- *  1. No review/recheck on record → start from the review step.
- *  2. Current SHA not reviewed yet:
- *     - A fix was applied since the last review → recheck is next.
- *     - No fix → human pushed a new commit; fresh review is next.
- *  3. Current SHA already reviewed → walk the workflow steps that follow
+ *  1. No review/recheck on record → start from the first workflow step.
+ *  2. Any non-APPROVE review/recheck without a later fix → fix is next.
+ *  3. A fix after the last review/recheck → recheck is next.
+ *  4. Current SHA has not been analyzed after the initial review → recheck is next.
+ *  5. Current SHA already reviewed → walk the workflow steps that follow
  *     and return the first whose `when` condition evaluates to true and
  *     that hasn't already been completed in history.
  */
@@ -179,7 +245,7 @@ export function identifyNextWorkflowStep(
   const hasExistingReview = reviewHistory.length > 0
 
   if (!hasExistingReview) {
-    const firstStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
+    const firstStep = firstIncompleteInitialStep(history, steps)
     return { step: firstStep, hasExistingReview: false, round: 1, history }
   }
 
@@ -208,44 +274,39 @@ export function identifyNextWorkflowStep(
     if (fixStepDef && fixStepDef.name !== 'fix') syntheticResults[fixStepDef.name] = { applied_count: 1 }
   }
 
-  // P1 fix: legacy comments have no sha field — treat as not reviewed so new pushes
-  // always get a fresh review rather than inheriting an old approval or being silently skipped.
+  const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
+
+  if (fixAfterReview) {
+    return {
+      step: effectiveRecheckStep(steps),
+      reviewComment,
+      hasExistingReview: true,
+      round: lastReview.round,
+      history,
+    }
+  }
+
+  const fixStep = firstRunnableFixStep(steps, syntheticResults)
+  if (fixStep) {
+    return {
+      step: fixStep,
+      reviewComment,
+      hasExistingReview: true,
+      round: lastReview.round,
+      history,
+    }
+  }
+
   const reviewedCurrentSha = lastReview.sha !== undefined && lastReview.sha === currentSha
 
   if (!reviewedCurrentSha) {
-    if (fixAfterReview) {
-      // P2 fix: a fix ran since the last review. Only route to recheck when we can
-      // verify that currentSha IS the commit the fix pushed — the pushed SHA is
-      // extracted from the commit URL in the fix_applied comment body.
-      const lastFix = historyAfterReview.filter(r => r.type === 'fix').at(-1)
-      const fixPushedSha = lastFix?.pushedSha
-      if (fixPushedSha !== undefined && fixPushedSha === currentSha) {
-        // currentSha is confirmed to be the fix commit → recheck is appropriate.
-        // Use an explicit recheck step from the workflow when present; otherwise
-        // synthesize one from the review step so the fixed commit is not silently
-        // treated as "complete" without any verification.
-        const recheckStep = steps.find(s => s.type === 'recheck')
-        const reviewComment = { id: lastReview.commentId, body: lastReview.commentBody }
-        const effectiveRecheck: WorkflowStep = recheckStep ?? (() => {
-          const reviewBase = steps.find(s => s.type === 'review')
-          return {
-            ...(reviewBase ?? { reviewer: 'auto' as const, max_rounds: 1 }),
-            name: 'recheck',
-            type: 'recheck' as const,
-            when: undefined,
-            instructions: DEFAULT_RECHECK_INSTRUCTIONS,
-          }
-        })()
-        return { step: effectiveRecheck, reviewComment, hasExistingReview: true, round: lastReview.round, history }
-      }
-      // pushedSha unknown or doesn't match currentSha — human pushed on top of
-      // the fix commit, or fix_applied is a legacy marker without a commit URL.
-      // Fall through to fresh review so the new diff is not silently skipped.
+    return {
+      step: effectiveRecheckStep(steps),
+      reviewComment,
+      hasExistingReview: true,
+      round: lastReview.round + 1,
+      history,
     }
-    // No fix ran, or the fix's push sha doesn't match — human pushed a new commit.
-    // Require a fresh review rather than routing to recheck with stale context.
-    const reviewStep = steps.find(s => s.type === 'review') ?? steps[0] ?? null
-    return { step: reviewStep, hasExistingReview: true, round: lastReview.round + 1, history }
   }
 
   // Current SHA has been reviewed — find the first incomplete step that follows
@@ -281,4 +342,42 @@ export function identifyNextWorkflowStep(
   }
 
   return { step: null, hasExistingReview: true, round: lastReview.round, history }
+}
+
+function firstIncompleteInitialStep(history: StepRecord[], steps: WorkflowStep[]): WorkflowStep | null {
+  for (const step of steps) {
+    if (step.type === 'conflict-resolve') {
+      const conflictDone = history.some(r => r.type === 'conflict-resolve')
+      if (!conflictDone) return step
+      continue
+    }
+    return step
+  }
+  return null
+}
+
+function firstRunnableFixStep(
+  steps: WorkflowStep[],
+  syntheticResults: Record<string, StepResult>,
+): WorkflowStep | null {
+  for (const step of steps) {
+    if (step.type !== 'fix') continue
+    if (step.when && !evaluateWhen(step.when, syntheticResults)) continue
+    return step
+  }
+  return null
+}
+
+function effectiveRecheckStep(steps: WorkflowStep[]): WorkflowStep {
+  const recheckStep = steps.find(s => s.type === 'recheck')
+  if (recheckStep) return recheckStep
+
+  const reviewBase = steps.find(s => s.type === 'review')
+  return {
+    ...(reviewBase ?? { reviewer: 'auto' as const, max_rounds: 1 }),
+    name: 'recheck',
+    type: 'recheck' as const,
+    when: undefined,
+    instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+  }
 }

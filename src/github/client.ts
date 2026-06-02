@@ -789,6 +789,14 @@ export async function getLastCrossCheckReviewComment(
 }
 
 export type RawPRComment = { id: number; body: string; created_at: string }
+export type RawPRCommit = {
+  sha: string
+  commit: {
+    message: string
+    author?: { date?: string | null } | null
+    committer?: { date?: string | null } | null
+  }
+}
 
 /**
  * Fetch one page of PR issue comments. All raw GitHub API calls for PR comments
@@ -819,6 +827,21 @@ export async function fetchPRCommentPage(
   return { comments, lastPage: m ? parseInt(m[1], 10) : null }
 }
 
+export async function fetchPRCommitPage(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+  page = 1,
+): Promise<RawPRCommit[]> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return []
+  return await res.json() as RawPRCommit[]
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,
@@ -828,12 +851,7 @@ export async function getPRCommits(
   const results: string[] = []
   let page = 1
   while (true) {
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
-    )
-    if (!res.ok) break
-    const data = await res.json() as Array<{ commit: { message: string } }>
+    const data = await fetchPRCommitPage(owner, repo, prNumber, token, page)
     if (data.length === 0) break
     for (const c of data) results.push(c.commit.message)
     if (data.length < 100) break

@@ -36,10 +36,12 @@ function printHistory(records: StepRecord[]): void {
     const date = chalk.dim(fmtDate(r.createdAt))
     const type = r.type.padEnd(typeWidth)
     const reviewer = r.reviewer ? chalk.cyan(r.reviewer) + (r.model ? chalk.dim(`·${r.model}`) : '') : chalk.dim('—')
-    const sha = r.sha ? chalk.dim(`sha=${r.sha.slice(0, 7)}`) : ''
+    const recordSha = r.sha ?? r.pushedSha
+    const sha = recordSha ? chalk.dim(`sha=${recordSha.slice(0, 7)}`) : ''
     const round = r.round > 1 ? chalk.dim(`round=${r.round}`) : ''
+    const source = r.source === 'commit' ? chalk.dim('source=commit') : ''
     const verdict = r.type === 'review' || r.type === 'recheck' ? verdictColor(r.verdict) : ''
-    const parts = [reviewer, sha, round, verdict].filter(Boolean).join('  ')
+    const parts = [reviewer, sha, source, round, verdict].filter(Boolean).join('  ')
     console.log(`  ${idx}  ${date}  ${type}  ${parts}`)
   }
 }
@@ -70,7 +72,7 @@ export async function runDetectStep(
 
   const steps = loadWorkflow(process.cwd())
 
-  const historySpinner = ora('Reading comment history...').start()
+  const historySpinner = ora('Reading workflow history...').start()
   const history = await fetchStepHistory(owner, repo, number, token)
   historySpinner.stop()
 
@@ -84,6 +86,8 @@ export async function runDetectStep(
         type: r.type,
         verdict: r.verdict,
         sha: r.sha,
+        pushedSha: r.pushedSha,
+        source: r.source,
         round: r.round,
         commentId: r.commentId,
         createdAt: r.createdAt,

@@ -9,6 +9,7 @@ import {
   exceedsMaxRounds,
   countCrosscheckCommitsForPR,
   buildWorkflowCompleteEvent,
+  resolveFixVendor,
 } from '../lib/runner.js'
 
 describe('isRetryableFixError', () => {
@@ -21,6 +22,12 @@ describe('isRetryableFixError', () => {
   it('returns true for timeout errors', () => {
     expect(isRetryableFixError(new Error('Command timed out after 180000 milliseconds: claude --print --output-format json'))).toBe(true)
     expect(isRetryableFixError(new Error('spawnSync claude ETIMEDOUT'))).toBe(true)
+  })
+
+  it('returns false for credit and quota limit errors', () => {
+    expect(isRetryableFixError(new Error('claude: usage limit exceeded'))).toBe(false)
+    expect(isRetryableFixError(new Error('codex: 429 Too Many Requests'))).toBe(false)
+    expect(isRetryableFixError(new Error('quota exceeded'))).toBe(false)
   })
 
   it('returns true for subprocess exit errors', () => {
@@ -63,6 +70,13 @@ describe('exceedsMaxRounds', () => {
 
   it('never skips a plain review step', () => {
     expect(exceedsMaxRounds('review', 'review', 1, 2)).toBe(false)
+  })
+
+  it('never skips when overrideMaxRounds is Infinity (crazy/halfcrazy mode)', () => {
+    // --crazy / --halfcrazy pass Infinity as the effective maxRounds; step.max_rounds is ignored
+    expect(exceedsMaxRounds('fix', 'fix', Infinity, 99)).toBe(false)
+    expect(exceedsMaxRounds('recheck', 'recheck', Infinity, 99)).toBe(false)
+    expect(exceedsMaxRounds('fix', 'fix', Infinity, 1)).toBe(false)
   })
 })
 
@@ -243,5 +257,128 @@ describe('buildWorkflowCompleteEvent', () => {
       ...base, stepsRun: ['custom-review', 'gate-check', 'apply-fixes', 'final-pass'],
     })
     expect(ev.steps_run).toEqual(['custom-review', 'gate-check', 'apply-fixes', 'final-pass'])
+  })
+
+  it('aggregates total_tokens and splits when steps carry token data', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review:  { verdict: 'NEEDS_WORK', tokens_used: 5000, input_tokens: 4000, output_tokens: 1000, vendor: 'codex' },
+        fix:     { applied_count: 2, tokens_used: 8000, vendor: 'claude' },
+        recheck: { verdict: 'APPROVE', tokens_used: 3000, input_tokens: 2500, output_tokens: 500, vendor: 'codex' },
+      },
+    })
+    expect(ev.total_tokens).toBe(16000)
+    expect(ev.total_input_tokens).toBe(6500)
+    expect(ev.total_output_tokens).toBe(1500)
+  })
+
+  it('omits total_tokens when no step has token data', () => {
+    const ev = buildWorkflowCompleteEvent(base)
+    expect('total_tokens' in ev).toBe(false)
+  })
+
+  it('omits split fields when no step has input/output token splits', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review: { verdict: 'NEEDS_WORK', tokens_used: 5000, vendor: 'codex' },
+        fix:    { applied_count: 1, tokens_used: 3000, vendor: 'claude' },
+      },
+    })
+    expect(ev.total_tokens).toBe(8000)
+    expect('total_input_tokens' in ev).toBe(false)
+    expect('total_output_tokens' in ev).toBe(false)
+  })
+
+  it('collects unique vendors_used across steps', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      results: {
+        review:  { verdict: 'NEEDS_WORK', vendor: 'codex' },
+        fix:     { applied_count: 1, vendor: 'claude' },
+        recheck: { verdict: 'APPROVE', vendor: 'codex' },
+      },
+    })
+    expect(ev.vendors_used).toEqual(expect.arrayContaining(['codex', 'claude']))
+    expect((ev.vendors_used as string[]).length).toBe(2)
+  })
+
+  it('includes quality_tier when provided', () => {
+    const ev = buildWorkflowCompleteEvent({ ...base, qualityTier: 'thorough' })
+    expect(ev.quality_tier).toBe('thorough')
+    const without = buildWorkflowCompleteEvent(base)
+    expect('quality_tier' in without).toBe(false)
+  })
+})
+
+describe('resolveFixVendor', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cfg = (claudeEnabled: boolean, codexEnabled: boolean, fallbackReviewer: 'auto' | 'claude' | 'codex' | null = 'auto') => ({
+    vendors: {
+      claude: { enabled: claudeEnabled },
+      codex: { enabled: codexEnabled },
+    },
+    routing: { fallback_reviewer: fallbackReviewer },
+  }) as any
+
+  describe('human-origin fallback — respects routing.fallback_reviewer', () => {
+    it('auto (default): prefers codex when both enabled', () => {
+      // 'auto' mirrors resolveReviewer auto path: codex-first config-enabled check
+      expect(resolveFixVendor('origin', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('auto: falls to claude when codex disabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false))).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('explicit claude: uses claude regardless of codex availability', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'claude'))).toEqual({ vendor: 'claude', usedHumanFallback: true })
+    })
+
+    it('explicit codex: uses codex when enabled', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, 'codex'))).toEqual({ vendor: 'codex', usedHumanFallback: true })
+    })
+
+    it('explicit codex disabled: returns null rather than falling to claude', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, false, 'codex'))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('null fallback_reviewer: skips fix (no fallback)', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(true, true, null))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('returns null when both vendors disabled regardless of fallback_reviewer', () => {
+      expect(resolveFixVendor('origin', 'human', cfg(false, false))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+  })
+
+  describe('scoped to reviewer:origin only', () => {
+    it('reviewer:claude with human origin resolves via resolveReviewer, no fallback', () => {
+      expect(resolveFixVendor('claude', 'human', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+      expect(resolveFixVendor('claude', 'human', cfg(false, true))).toEqual({ vendor: null, usedHumanFallback: false })
+    })
+
+    it('reviewer:auto with human origin uses resolveReviewer auto path, no fallback', () => {
+      expect(resolveFixVendor('auto', 'human', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+  })
+
+  describe('non-human origins — unchanged behaviour', () => {
+    it('returns codex for codex-origin with reviewer:origin', () => {
+      expect(resolveFixVendor('origin', 'codex', cfg(true, true))).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
+
+    it('returns claude for claude-origin with reviewer:origin', () => {
+      expect(resolveFixVendor('origin', 'claude', cfg(true, true))).toEqual({ vendor: 'claude', usedHumanFallback: false })
+    })
+  })
+
+  describe('smartSwitchFallback takes precedence', () => {
+    it('smartSwitchFallback resolves via resolveReviewer before human-origin branch fires', () => {
+      // reviewer:origin + origin:human + smartSwitchFallback='codex' → resolveReviewer returns
+      // 'codex' directly, so usedHumanFallback is false even though origin is human
+      expect(resolveFixVendor('origin', 'human', cfg(false, true), 'codex')).toEqual({ vendor: 'codex', usedHumanFallback: false })
+    })
   })
 })

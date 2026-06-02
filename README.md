@@ -41,6 +41,73 @@ crosscheck serve        # always-on team server
 
 ## Commands
 
+```bash
+crosscheck onboard                  # guided setup — pick repos, mode, and pipeline
+crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
+crosscheck serve                    # team use — fixed port, register webhook once
+crosscheck review <pr-url>          # one-shot review of a specific PR
+crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck scan                     # show open PR workflow state across monitored repos
+crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
+crosscheck kickass                  # advance stale PRs from an interactive operator queue
+crosscheck init                     # check prerequisites, write starter config
+crosscheck status                   # auth state, config summary, CLI versions
+```
+
+**Operator queue (scan + kickass)**
+
+`crosscheck scan` tracks two independent dimensions per PR:
+
+| Workflow stage (`reviewState`) | Meaning | Next action |
+|---|---|---|
+| `NEEDS_REVIEW` | No crosscheck review for current HEAD | review |
+| `NEEDS_FIX` | Reviewed — fix requested | fix |
+| `NEEDS_RECHECK` | Fix committed, recheck pending | recheck |
+| `APPROVED` | Reviewed and approved | merge |
+
+| Verdict (`verdict`) | Meaning |
+|---|---|
+| `UNREVIEWED` | No review found |
+| `APPROVE` | AI approved |
+| `NEEDS_WORK` | AI requested changes |
+| `BLOCK` | AI hard-blocked merge |
+
+`BLOCK` and `NEEDS_WORK` both map to `NEEDS_FIX` stage — same next action, but the `verdict` field preserves severity so operators can prioritise.
+
+**How workflow steps are counted**
+
+Crosscheck reconstructs PR workflow state from visible artifacts:
+
+| Evidence | Counts as |
+|---|---|
+| Review or recheck comment with `<!-- crosscheck: ... verdict=... -->` | completed `review` / `recheck` step |
+| Fix or conflict-resolve comment, such as `<!-- crosscheck: fix_applied ... -->` | completed `fix` / `conflict-resolve` step |
+| PR commit trailer, such as `Crosscheck-Step: fix` | completed step declared by that trailer |
+
+Commit trailers are accepted as operator-declared workflow state. In practice, a PR author may command Claude, Codex, or another agent to apply a fix outside a standalone Crosscheck post; if the resulting PR commit carries `Crosscheck-Step: fix`, Crosscheck counts it as fix evidence.
+
+That evidence only advances the next step to `recheck` when the fix commit is the current PR HEAD. If another commit lands after the fix evidence, Crosscheck starts a fresh review round so the newer code is reviewed normally. This prevents an old fix trailer from marking later changes as ready for recheck.
+
+```bash
+crosscheck scan [--tidy] [--stale-after <duration>] [--force] [--json]
+crosscheck kickass [--dry-run] [--stale-after <duration>] [--force]
+```
+
+`crosscheck review --reviewer`, `crosscheck run --reviewer`, `crosscheck run --fixer`, and `crosscheck run --vendor` accept vendor aliases:
+- Claude: `claude`, `claude-code`, `cc`, `anthropic`
+- Codex: `codex`, `openai`
+
+**Continuous improvement** *(experimental)*
+
+```bash
+crosscheck diagnose                 # surface failure patterns from review logs
+crosscheck optimize [--apply]       # rewrite reviewer instructions based on diagnose output
+crosscheck impact [--money]         # time saved, issues caught, code quality trends
+crosscheck issue                    # draft and file a bug report from recent error logs
+```
+
+---
+
 ### `crosscheck onboard`
 
 Interactive setup wizard. Picks repos/orgs to monitor, selects single-vendor or cross-vendor mode, configures the review pipeline, and writes `~/.crosscheck/config.yml` and `workflow.yml`.
@@ -87,6 +154,8 @@ One-shot review of a single PR. Clones, checks out, reviews, and posts the comme
 crosscheck review https://github.com/org/repo/pull/42
 crosscheck review <pr-url> --reviewer claude    # force Claude regardless of detection
 crosscheck review <pr-url> --reviewer codex     # force Codex regardless of detection
+crosscheck review <pr-url> --reviewer cc        # alias for Claude
+crosscheck review <pr-url> --reviewer openai    # alias for Codex
 ```
 
 ---
@@ -99,8 +168,13 @@ Runs the full configured workflow against one PR: review → fix → recheck. Sa
 crosscheck run <pr-url>
 crosscheck run <pr-url> --steps review           # only the review step
 crosscheck run <pr-url> --steps fix,recheck      # skip initial review
-crosscheck run <pr-url> --reviewer claude        # override reviewer assignment
+crosscheck run <pr-url> --reviewer claude        # force review/recheck agent
+crosscheck run <pr-url> --fixer claude           # force fix agent
+crosscheck run <pr-url> --vendor claude          # force review/recheck/fix agent
 crosscheck run <pr-url> --dry-run                # review without posting or fixing
+crosscheck run <pr-url> --crazy                  # 🔥🔥 loop until APPROVE
+crosscheck run <pr-url> --half-crazy             # 🔥  loop until not BLOCK
+crosscheck run <pr-url> --timeout 10m            # custom reviewer timeout
 ```
 
 ---
@@ -109,7 +183,7 @@ crosscheck run <pr-url> --dry-run                # review without posting or fix
 
 Scans every open PR in the configured monitor scope and reports where each one is in the crosscheck workflow. Results are cached for 60 seconds.
 
-States: `PR` (needs review) · `APPROVE` · `NEEDS_WORK` · `BLOCK` · `RECHECK` (fix applied, needs recheck)
+States: `NEEDS_REVIEW` · `NEEDS_FIX` · `BLOCK` · `NEEDS_RECHECK` · `APPROVE`
 
 ```bash
 crosscheck scan                          # all open PRs, grouped stale/not-stale
@@ -117,6 +191,17 @@ crosscheck scan --tidy                   # stale actionable rows only
 crosscheck scan --stale-after 4h         # custom staleness threshold (default 24h)
 crosscheck scan --force                  # bypass cache
 crosscheck scan --json                   # machine-readable output
+```
+
+---
+
+### `crosscheck detect-step`
+
+Explains the workflow history for one PR and prints the next step Crosscheck would run. Use this when a PR has mixed evidence from comments, Crosscheck commits, or ad hoc agent commits with `Crosscheck-Step` trailers.
+
+```bash
+crosscheck detect-step <pr-url>
+crosscheck detect-step <pr-url> --json
 ```
 
 ---
@@ -130,9 +215,33 @@ crosscheck kickass                       # interactive operator queue
 crosscheck kickass --dry-run             # preflight only — no mutations
 crosscheck kickass --stale-after 2h      # tighter staleness threshold
 crosscheck kickass --force               # bypass scan cache before picking
+crosscheck kickass --crazy               # 🔥🔥 auto loop until APPROVE
+crosscheck kickass --half-crazy          # 🔥  auto loop until not BLOCK
 ```
 
-Actions: `PR → CR` · `NEEDS_WORK/BLOCK → Fix` · `FIX/RECHECK → Recheck` · `APPROVE → Merge`
+Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
+
+**Autonomous loop modes**
+
+`--crazy` and `--half-crazy` turn `run` and `kickass` into autonomous fix→recheck loops that keep going until the verdict improves — no manual re-runs needed.
+
+| Flag | Stops when | Max rounds | Timeout |
+|---|---|---|---|
+| `--crazy` 🔥🔥 | verdict = `APPROVE` | ∞ | none |
+| `--half-crazy` 🔥 | verdict ≠ `BLOCK` | ∞ | none |
+
+Both flags disable all reviewer subprocess timeout constraints — long fixes on large PRs won't be cut short. Use `--timeout <duration>` (e.g. `--timeout 10m`) without these flags to set a custom cap.
+
+```bash
+# Run full workflow and keep looping until approved
+crosscheck run <pr-url> --crazy
+
+# Advance every stale PR until it's no longer blocked
+crosscheck kickass --half-crazy
+
+# Custom timeout without looping
+crosscheck run <pr-url> --timeout 10m
+```
 
 ---
 

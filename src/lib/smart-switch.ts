@@ -41,7 +41,7 @@ export function getSmartSwitch(): Readonly<SmartSwitchState> {
  */
 export function isSubscriptionLimitError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
-  return /rate.?limit|subscription.?limit|usage.?limit|quota|429|too many requests|credits? exhausted|plan limit|overloaded/.test(msg)
+  return /rate.?limit|subscription.?limit|usage.?limit|quota|429|too many requests|credits? exhausted|plan limit/.test(msg)
 }
 
 /**

@@ -476,6 +476,8 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
 crosscheck run https://github.com/owner/repo/pull/123 --reviewer claude
+crosscheck run https://github.com/owner/repo/pull/123 --fixer claude
+crosscheck run https://github.com/owner/repo/pull/123 --vendor claude
 crosscheck run https://github.com/owner/repo/pull/123 --steps review,fix
 crosscheck run https://github.com/owner/repo/pull/123 --dry-run
 ```
@@ -484,7 +486,9 @@ crosscheck run https://github.com/owner/repo/pull/123 --dry-run
 
 | 参数 | 说明 |
 |---|---|
-| `-r, --reviewer codex\|claude` | 强制使用指定审查者，跳过自动检测 |
+| `-r, --reviewer codex\|claude` | 强制 review/recheck 步骤使用该 vendor，并跳过审查路由自动检测 |
+| `--fixer codex\|claude` | 强制 fix 步骤使用该 vendor |
+| `--vendor codex\|claude` | 强制 review、recheck、fix 步骤都使用该 vendor |
 | `--steps <list>` | 只运行列出的步骤类型，逗号分隔：`review`、`fix`、`recheck` |
 | `--dry-run` | 运行审查但不发布评论或应用修复 |
 | `-c, --config <path>` | 使用指定配置文件 |
@@ -823,11 +827,13 @@ vendors:
     enabled: true
     auth: subscription      # subscription | api-key
     model: o4-mini          # 仅在 auth: api-key 时生效
+    # timeout_sec: 1200     # 单次 CLI 调用最大秒数；不设 = 按 tier（300/600/1200）
 
   claude:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
+    # timeout_sec: 1200     # 单次 CLI 调用最大秒数；不设 = 180。大 PR 可调高。
 
 # ── 质量 ───────────────────────────────────────────────────────────────────
 quality:

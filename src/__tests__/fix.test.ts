@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -146,5 +146,63 @@ describe('fix step new-file and empty-old guard', () => {
     const newContent = 'export const added = true\n'
     writeFileSync(newFilePath, newContent)  // as runFixStep would do for empty <old>
     expect(readFileSync(newFilePath, 'utf8')).toBe(newContent)
+  })
+})
+
+describe('runCodexFixStep', () => {
+  vi.mock('execa', () => ({ execa: vi.fn() }))
+  vi.mock('child_process', async (importOriginal) => {
+    const real = await importOriginal<typeof import('child_process')>()
+    return { ...real, execSync: vi.fn() }
+  })
+
+  let execSyncMock: ReturnType<typeof vi.fn>
+  let execaMock: ReturnType<typeof vi.fn>
+
+  beforeEach(async () => {
+    vi.resetModules()
+    const childProcess = await import('child_process')
+    execSyncMock = vi.mocked(childProcess.execSync) as ReturnType<typeof vi.fn>
+    const execa = await import('execa')
+    execaMock = vi.mocked(execa.execa) as ReturnType<typeof vi.fn>
+    // Default: git diff returns empty string (no changes)
+    execSyncMock.mockReturnValue('')
+    execaMock.mockResolvedValue({ stdout: '', stderr: '' } as never)
+  })
+
+  afterEach(() => { vi.clearAllMocks() })
+
+  it('returns appliedCount=0 when codex makes no file changes', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    execSyncMock.mockReturnValue('')
+    const result = await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '')
+    expect(result.appliedCount).toBe(0)
+    expect(result.tokensUsed).toBeUndefined()
+  })
+
+  it('returns appliedCount matching changed file count from git diff', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    execSyncMock.mockImplementation((cmd: unknown) => {
+      if (String(cmd).includes('--name-only')) return 'src/foo.ts\nsrc/bar.ts'
+      return ''
+    })
+    const result = await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '')
+    expect(result.appliedCount).toBe(2)
+  })
+
+  it('throws a helpful message on codex auth failure', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    execaMock.mockRejectedValueOnce(new Error('not logged in to codex'))
+    await expect(
+      runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', ''),
+    ).rejects.toThrow('codex auth failure')
+  })
+
+  it('re-throws non-auth errors unchanged', async () => {
+    const { runCodexFixStep } = await import('../reviewers/fix.js')
+    execaMock.mockRejectedValueOnce(new Error('network timeout'))
+    await expect(
+      runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', ''),
+    ).rejects.toThrow('network timeout')
   })
 })

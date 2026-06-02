@@ -13,6 +13,8 @@ const EFFORT_MAP: Record<string, string> = {
 export interface ReviewResult {
   review: string
   tokensUsed?: number
+  inputTokens?: number
+  outputTokens?: number
   model: string
 }
 
@@ -33,6 +35,8 @@ export async function runClaudeReview(
   perReviewBudget: number,
   stepInstructions?: string,
   onLog?: (msg: string) => void,
+  timeoutMs?: number,
+  noBudgetCap?: boolean,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -51,21 +55,29 @@ export async function runClaudeReview(
     behaviorInstructions,
   ].filter(Boolean).join('\n')
 
+  // Omit --max-budget-usd when:
+  // 1. No ANTHROPIC_API_KEY → subscription mode (claude.ai plan, budget limits don't apply)
+  // 2. noBudgetCap → crazy/halfcrazy mode (explicitly uncapped run; NOT set by --no-timeout alone)
+  const applyBudgetCap = !!process.env.ANTHROPIC_API_KEY && !noBudgetCap
+
   const args = [
     '--print',
     '--output-format', 'json',
     '--model', model,
     '--effort', effort,
-    '--max-budget-usd', String(perReviewBudget),
+    ...(applyBudgetCap ? ['--max-budget-usd', String(perReviewBudget)] : []),
     '--allowedTools', 'Bash(git diff),Bash(git log)',
   ]
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
 
+  // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → 180s default; positive → user-specified
+  const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
+
   try {
     const { stdout } = await execa('claude', args, {
       cwd: repoDir,
-      timeout: 180_000,
+      timeout: resolvedTimeout,
       input: prompt,
       env: { ...process.env },
     })
@@ -73,12 +85,10 @@ export async function runClaudeReview(
     try {
       const parsed: ClaudeJsonOutput = JSON.parse(raw)
       const review = typeof parsed.result === 'string' ? parsed.result.trim() : raw
-      const inTok = parsed.usage?.input_tokens
-      const outTok = parsed.usage?.output_tokens
-      const tokensUsed = typeof inTok === 'number' && typeof outTok === 'number'
-        ? inTok + outTok
-        : undefined
-      return { review, tokensUsed, model }
+      const inputTokens = typeof parsed.usage?.input_tokens === 'number' ? parsed.usage.input_tokens : undefined
+      const outputTokens = typeof parsed.usage?.output_tokens === 'number' ? parsed.usage.output_tokens : undefined
+      const tokensUsed = inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
+      return { review, tokensUsed, inputTokens, outputTokens, model }
     } catch {
       return { review: raw, model }
     }

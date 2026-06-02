@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander'
+import { Command, Option } from 'commander'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { basename, dirname, join } from 'path'
@@ -14,6 +14,7 @@ import { runOptimize } from './commands/optimize.js'
 import { runImpact } from './commands/impact.js'
 import { runIssue } from './commands/issue.js'
 import { runRun } from './commands/run.js'
+import { runDetectStep } from './commands/detect-step.js'
 import { runScan } from './commands/scan.js'
 import { runKickass } from './commands/kickass.js'
 
@@ -81,11 +82,31 @@ program
   .description('Execute the full configured workflow against a single PR (review → fix → recheck)')
   .option('-c, --config <path>', 'config file path')
   .option('-r, --reviewer <vendor>', 'force a specific reviewer: codex | claude (bypasses attribution detection)')
-  .option('--vendor <vendor>', 'alias for --reviewer')
+  .option('--fixer <vendor>', 'force a specific fixer for fix steps: codex | claude')
+  .option('--vendor <vendor>', 'force one vendor for review, recheck, and fix steps')
   .option('--steps <list>', 'run only these step types, comma-separated: review,fix,recheck')
   .option('--dry-run', 'run the review but do not post a comment or apply fixes')
   .option('--expected-head-sha <sha>', 'skip if the PR head changed since selection')
-  .action((prUrl: string, opts: { config?: string; reviewer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string }) => void runRun(prUrl, { ...opts, reviewer: opts.reviewer ?? opts.vendor }))
+  .option('--crazy', 'loop fix→recheck until APPROVE; disables all timeout constraints')
+  .option('--half-crazy', 'loop fix→recheck until verdict is not BLOCK; disables all timeout constraints')
+  .option('--halfcrazy', '(deprecated alias for --half-crazy)')
+  .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
+  .option('--no-timeout', 'remove the reviewer subprocess timeout cap (implied by --crazy/--half-crazy; used internally by kickass fix legs)')
+  .addOption(new Option('--trigger <source>').hideHelp())  // internal: set by kickass/watch/serve
+  .action((prUrl: string, opts: { config?: string; reviewer?: string; fixer?: string; vendor?: string; steps?: string; dryRun?: boolean; expectedHeadSha?: string; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean; trigger?: string }) => {
+    const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
+    // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed
+    const noTimeout = opts.noTimeout || opts.timeout === false
+    const trigger = (opts.trigger as import('./lib/runner.js').WorkflowTrigger | undefined) ?? 'run'
+    void runRun(prUrl, { ...opts, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, trigger })
+  })
+
+program
+  .command('detect-step <pr-url>')
+  .description('Show the crosscheck step history for a PR and identify the next step to run')
+  .option('-c, --config <path>', 'config file path')
+  .option('--json', 'emit result as JSON')
+  .action((prUrl: string, opts: { config?: string; json?: boolean }) => void runDetectStep(prUrl, opts))
 
 program
   .command('scan')
@@ -98,11 +119,24 @@ program
 
 program
   .command('kickass')
-  .description('Select stale PRs from the operator queue and advance them')
+  .description('Select actionable PRs from the operator queue and advance them')
   .option('--force', 'bypass the 1-minute scan cache')
   .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
   .option('--dry-run', 'print selected actions without running them')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean }) => void runKickass(opts))
+  .option('--crazy', 'loop fix→recheck per PR until APPROVE; disables all timeout constraints')
+  .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK; disables all timeout constraints')
+  .option('--halfcrazy', '(deprecated alias for --half-crazy)')
+  .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
+  .option('--concurrent [n]', 'run PRs in parallel; omit n for one agent per selected PR, or set a cap (e.g. --concurrent 3)')
+  .option('--stagger <ms>', 'ms delay between concurrent worker starts; default 2000 when --concurrent is set')
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true; stagger?: string }) => {
+    const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
+    const concurrent = opts.concurrent === undefined ? undefined
+      : opts.concurrent === true ? 0
+      : Number(opts.concurrent)
+    const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
+    void runKickass({ ...opts, roundMode, concurrent, staggerMs })
+  })
 
 program
   .command('status')

@@ -2,13 +2,16 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import chalk from 'chalk'
+import { parseDuration } from '../lib/durations.js'
 import ora from 'ora'
 import { createGithubClient } from '../github/client.js'
+import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
+import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow } from '../lib/workflow.js'
+import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
@@ -18,13 +21,27 @@ import type { PREvent } from '../github/webhook.js'
 export interface RunOpts {
   config?: string
   reviewer?: string
+  fixer?: string
+  vendor?: string
   steps?: string
   dryRun?: boolean
+  roundMode?: 'crazy' | 'halfcrazy'
   initialReviewComment?: {
-    id: number
+    id?: number
     body: string
   }
   expectedHeadSha?: string
+  timeout?: string
+  noTimeout?: boolean
+  trigger?: import('../lib/runner.js').WorkflowTrigger
+}
+
+
+function meetsCrazyStopCondition(verdict: string | null, mode: 'crazy' | 'halfcrazy'): boolean {
+  if (verdict === null) return false
+  if (mode === 'crazy') return verdict === 'APPROVE'
+  // halfcrazy: any non-BLOCK verdict (APPROVE or NEEDS_WORK) is acceptable
+  return verdict !== 'BLOCK'
 }
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -33,10 +50,127 @@ function parsePRUrl(url: string): { owner: string; repo: string; number: number 
   return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
 }
 
+export interface StepVendorOverrides {
+  reviewer?: Vendor
+  fixer?: Vendor
+  vendor?: Vendor
+}
+
+function applyStepVendorOverrides(
+  steps: WorkflowStep[],
+  assignedReviewer: Vendor,
+  overrides: StepVendorOverrides = {},
+): WorkflowStep[] {
+  const reviewVendor = overrides.vendor ?? overrides.reviewer ?? assignedReviewer
+  const fixVendor = overrides.vendor ?? overrides.fixer
+  return steps.map(s => {
+    if (s.type === 'review' || s.type === 'recheck') return { ...s, reviewer: reviewVendor }
+    if (s.type === 'fix' && fixVendor !== undefined) return { ...s, reviewer: fixVendor }
+    if (s.type === 'conflict-resolve' && overrides.vendor !== undefined) return { ...s, reviewer: overrides.vendor }
+    return s
+  })
+}
+
+function synthesizeRecheckStep(allSteps: WorkflowStep[], assignedReviewer: 'claude' | 'codex'): WorkflowStep | null {
+  const reviewStep = allSteps.find(s => s.type === 'review')
+  if (!reviewStep) return null
+  return {
+    ...reviewStep,
+    name: 'recheck',
+    type: 'recheck',
+    reviewer: assignedReviewer,
+    when: undefined,
+    max_rounds: reviewStep.max_rounds,
+    instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+  }
+}
+
+function appendAfterLastFix(steps: WorkflowStep[], step: WorkflowStep): WorkflowStep[] {
+  const lastFix = steps.map(s => s.type).lastIndexOf('fix')
+  if (lastFix === -1) return [...steps, step]
+  return [...steps.slice(0, lastFix + 1), step, ...steps.slice(lastFix + 1)]
+}
+
+export function resolveWorkflowSteps(
+  allSteps: WorkflowStep[],
+  stepFilter: string[] | undefined,
+  assignedReviewer: 'claude' | 'codex',
+  overrides: StepVendorOverrides = {},
+): WorkflowStep[] {
+  const selected = stepFilter
+    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
+    : allSteps
+  let steps = applyStepVendorOverrides(selected, assignedReviewer, overrides)
+
+  if (stepFilter?.includes('recheck') && !steps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) steps = appendAfterLastFix(steps, synthetic)
+  }
+
+  return steps
+}
+
+export function buildFixRecheckSteps(
+  steps: WorkflowStep[],
+  allSteps: WorkflowStep[],
+  assignedReviewer: 'claude' | 'codex',
+  overrides: StepVendorOverrides = {},
+): WorkflowStep[] {
+  const selectedFixRecheckSteps = steps.filter(s => s.type === 'fix' || s.type === 'recheck')
+  const sourceSteps = selectedFixRecheckSteps.length > 0
+    ? selectedFixRecheckSteps
+    : applyStepVendorOverrides(allSteps.filter(s => s.type === 'fix' || s.type === 'recheck'), assignedReviewer, overrides)
+  let fixRecheckSteps = [...sourceSteps]
+  if (!fixRecheckSteps.some(s => s.type === 'fix')) {
+    const fixStep = allSteps.find(s => s.type === 'fix')
+    if (fixStep) fixRecheckSteps = [fixStep, ...fixRecheckSteps]
+  }
+  if (!fixRecheckSteps.some(s => s.type === 'recheck')) {
+    const synthetic = synthesizeRecheckStep(allSteps, assignedReviewer)
+    if (synthetic) fixRecheckSteps = appendAfterLastFix(fixRecheckSteps, synthetic)
+  }
+  return fixRecheckSteps
+}
+
+function printRoundModeBanner(mode: 'crazy' | 'halfcrazy'): void {
+  const BLINK = '\x1b[5m'
+  const RESET = '\x1b[0m'
+  if (mode === 'crazy') {
+    const label = chalk.bold.white.bgRed(' CRAZY ') + ' ' + chalk.red.bold('MODE')
+    console.log(`\n ${label} ${BLINK}🔥🔥${RESET}  ${chalk.dim('fix→recheck until APPROVE')}`)
+    console.log(` ${chalk.yellow('⚠')}  ${chalk.yellow('Token consumption may skyrocket 🚀 — use with caution.')}\n`)
+  } else {
+    const label = chalk.bold.yellow('half') + chalk.bold.white.bgRed('-CRAZY') + ' ' + chalk.red.bold('MODE')
+    console.log(`\n ${label} ${BLINK}🔥${RESET}  ${chalk.dim('fix→recheck until not BLOCK')}`)
+    console.log(` ${chalk.yellow('⚠')}  ${chalk.yellow('Token consumption may skyrocket 🚀 — use with caution.')}\n`)
+  }
+}
+
 export async function runRun(prUrl: string, opts: RunOpts = {}) {
+  if (opts.roundMode && opts.dryRun) {
+    console.error(chalk.red(`✗ --${opts.roundMode} and --dry-run are mutually exclusive`))
+    process.exit(1)
+  }
+
+  if (opts.roundMode) printRoundModeBanner(opts.roundMode)
+
+  // crazy/halfcrazy (or --no-timeout) lift all constraints including the reviewer timeout (0 = no cap).
+  // Otherwise parse the user-supplied --timeout value; undefined keeps each reviewer's default.
+  let reviewerTimeoutMs: number | undefined
+  if (opts.roundMode || opts.noTimeout) {
+    reviewerTimeoutMs = 0
+  } else if (opts.timeout) {
+    try {
+      reviewerTimeoutMs = parseDuration(opts.timeout)
+    } catch {
+      console.error(chalk.red(`✗ Invalid --timeout value "${opts.timeout}". Use a duration like 300s or 10m.`))
+      process.exit(1)
+    }
+  }
+
   const config = loadConfig(opts.config)
   initLogger(config.logs)
-  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl })
+  fileLog({ level: 'info', event: 'session_start', command: 'run', pr_url: prUrl, ...(opts.roundMode && { round_mode: opts.roundMode }) })
 
   let token: string
   try {
@@ -65,12 +199,47 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   spinner.succeed(`PR #${number}: ${prData.title}`)
   fileLog({ level: 'info', event: 'pr_received', repo: `${owner}/${repo}`, pr: number, sha: prData.head.sha })
 
-  // Resolve origin and reviewer
+  // Early signal handler: covers the window between pr_received and the full
+  // onSignal handler installed below (after acquirePRLock + acquireRemoteLock).
+  // Without this, a SIGINT/SIGTERM during origin detection or step resolution
+  // exits Node silently with no fileLog event.
+  const earlySignalHandler = (signal: NodeJS.Signals): void => {
+    fileLog({ level: 'info', event: 'session_killed', repo: `${owner}/${repo}`, pr: number, phase: 'setup', signal })
+    process.exit(signal === 'SIGTERM' ? 143 : 130)
+  }
+  process.once('SIGINT', earlySignalHandler)
+  process.once('SIGTERM', earlySignalHandler)
+
+  // Resolve origin plus any explicit per-step vendor overrides.
+  const normalizedReviewer = normalizeVendor(opts.reviewer)
+  const normalizedFixer = normalizeVendor(opts.fixer)
+  const normalizedVendor = normalizeVendor(opts.vendor)
+  if (opts.reviewer !== undefined && normalizedReviewer === null) {
+    console.error(chalk.red(`✗ Unknown reviewer "${opts.reviewer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (opts.fixer !== undefined && normalizedFixer === null) {
+    console.error(chalk.red(`✗ Unknown fixer "${opts.fixer}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (opts.vendor !== undefined && normalizedVendor === null) {
+    console.error(chalk.red(`✗ Unknown vendor "${opts.vendor}". Expected: ${VENDOR_ALIAS_HINT}`))
+    process.exit(1)
+  }
+  if (normalizedReviewer !== null && normalizedVendor !== null && normalizedReviewer !== normalizedVendor) {
+    console.error(chalk.red(`✗ --reviewer and --vendor disagree (${normalizedReviewer} vs ${normalizedVendor})`))
+    process.exit(1)
+  }
+  if (normalizedFixer !== null && normalizedVendor !== null && normalizedFixer !== normalizedVendor) {
+    console.error(chalk.red(`✗ --fixer and --vendor disagree (${normalizedFixer} vs ${normalizedVendor})`))
+    process.exit(1)
+  }
+
   let origin: import('../github/detector.js').PROrigin
-  if (opts.reviewer === 'codex' || opts.reviewer === 'claude') {
+  if (normalizedReviewer !== null) {
     // --reviewer forces the origin to the opposite vendor (cross-vendor semantics)
-    origin = opts.reviewer === 'codex' ? 'claude' : 'codex'
-    console.log(chalk.dim(`  reviewer: ${opts.reviewer} (forced)`))
+    origin = normalizedReviewer === 'codex' ? 'claude' : 'codex'
+    console.log(chalk.dim(`  reviewer: ${normalizedReviewer} (forced)`))
   } else {
     const { origin: detectedOrigin, method } = await detectOriginFull(
       prData.body ?? '',
@@ -86,28 +255,61 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     console.log(chalk.dim(`  PR origin: ${origin} (via ${method})`))
   }
 
-  const assignedReviewer = opts.reviewer === 'codex' || opts.reviewer === 'claude'
-    ? opts.reviewer
-    : await assignReviewer(origin, config)
+  const forcedReviewer = normalizedVendor ?? normalizedReviewer
+  const assignedReviewer = forcedReviewer ?? await assignReviewer(origin, config)
 
   if (!assignedReviewer) {
-    console.log(chalk.dim(`  no reviewer assigned for origin "${origin}" — use --reviewer codex|claude to force`))
+    console.log(chalk.dim(`  no reviewer assigned for origin "${origin}" — use --reviewer ${VENDOR_ALIAS_HINT} to force`))
     return
   }
-  if (!opts.reviewer) {
+  if (normalizedVendor !== null) {
+    console.log(chalk.dim(`  vendor: ${assignedReviewer} (forced for all workflow steps)`))
+  } else if (normalizedReviewer === null) {
     console.log(chalk.dim(`  assigned reviewer: ${assignedReviewer}`))
   }
+  if (normalizedFixer !== null && normalizedVendor === null) {
+    console.log(chalk.dim(`  fixer: ${normalizedFixer} (forced for fix steps)`))
+  }
 
-  // Resolve steps — filter from workflow.yml by type if --steps is specified, then pin the
-  // resolved reviewer on every review/recheck step so runWorkflow doesn't re-derive it
+  // Resolve steps — filter from workflow.yml by type if --steps is specified, then apply
+  // command-line vendor overrides so runWorkflow doesn't re-derive those step vendors.
   const allSteps = loadWorkflow(process.cwd())
-  const stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
-  const filteredSteps = (stepFilter
-    ? allSteps.filter(s => stepFilter.includes(s.type) || stepFilter.includes(s.name))
-    : allSteps
-  ).map(s =>
-    s.type === 'review' || s.type === 'recheck' ? { ...s, reviewer: assignedReviewer } : s,
-  )
+  let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
+  let initialReviewComment = opts.initialReviewComment
+
+  // When running without an explicit --steps flag, traverse the PR comment
+  // history to determine which workflow step to run next — skipping steps that
+  // have already completed for the current HEAD SHA.
+  if (!opts.steps) {
+    try {
+      const history = await fetchStepHistory(owner, repo, number, token)
+      const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
+      if (nextResult.step === null) {
+        // Workflow already complete for this SHA
+        console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
+        return
+      }
+      if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
+        // Resume from the identified step. Look up by type (not name) so synthesized
+        // steps (e.g. a recheck not present in allSteps) still route correctly.
+        // When the step isn't in allSteps at all, use [step.type] so resolveWorkflowSteps
+        // can synthesize it (e.g. synthesizeRecheckStep for the 'recheck' type).
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        stepFilter = nextStepIdx >= 0
+          ? allSteps.slice(nextStepIdx).map(s => s.name)
+          : [nextResult.step.type]
+        initialReviewComment = nextResult.reviewComment
+        console.log(chalk.dim(`  existing review found — resuming from ${nextResult.step.type} step`))
+      }
+    } catch { /* best-effort — fall through to normal review flow on API error */ }
+  }
+
+  const stepVendorOverrides: StepVendorOverrides = {
+    ...(normalizedReviewer !== null && { reviewer: normalizedReviewer }),
+    ...(normalizedFixer !== null && { fixer: normalizedFixer }),
+    ...(normalizedVendor !== null && { vendor: normalizedVendor }),
+  }
+  const filteredSteps = resolveWorkflowSteps(allSteps, stepFilter, assignedReviewer, stepVendorOverrides)
 
   if (opts.dryRun) {
     console.log(chalk.dim('  dry-run: review will run but no comment will be posted; fix step skipped'))
@@ -153,6 +355,27 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   // but if a signal fires mid-workflow we exit via process.exit and bypass
   // that finally, so the signal handler iterates this array too.
   const pushedShas: string[] = []
+  const loopLockShas: string[] = []
+
+  const rememberLoopLock = (lockSha: string): void => {
+    if (!loopLockShas.includes(lockSha)) loopLockShas.push(lockSha)
+  }
+  const releaseRememberedLoopLock = async (lockSha: string, outcome: 'success' | 'failure'): Promise<void> => {
+    const idx = loopLockShas.indexOf(lockSha)
+    if (idx !== -1) loopLockShas.splice(idx, 1)
+    try {
+      await releaseRemoteLock(octokit, owner, repo, lockSha, outcome)
+    } catch (err) {
+      rememberLoopLock(lockSha)
+      throw err
+    }
+  }
+  const drainLoopLocks = async (outcome: 'success' | 'failure'): Promise<void> => {
+    while (loopLockShas.length > 0) {
+      const s = loopLockShas.shift()!
+      try { await releaseRemoteLock(octokit, owner, repo, s, outcome) } catch { /* best-effort per sha */ }
+    }
+  }
 
   const onSignal = (signal: NodeJS.Signals): void => {
     void (async () => {
@@ -160,6 +383,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         stopHeartbeat()
         if (!opts.dryRun && lockAttemptStarted) {
           await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+          await drainLoopLocks('failure')
           // Drain the shared array via shift() so the runner's finally (which
           // also drains via shift) doesn't double-release. Whichever loop
           // shifts a sha first owns its release; the other sees a shorter
@@ -178,6 +402,8 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       process.exit(signal === 'SIGTERM' ? 143 : 130)
     })()
   }
+  process.removeListener('SIGINT', earlySignalHandler)
+  process.removeListener('SIGTERM', earlySignalHandler)
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
 
@@ -206,6 +432,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     acquiredTmpDir = tmpDir
     const cloneSpinner = ora('Cloning repo...').start()
 
+    let workflowError: unknown
     try {
       clonePRForReview({
         owner, repo, prNumber: number, baseRef: prData.base.ref,
@@ -217,49 +444,138 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (!opts.dryRun) stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, sha)
       let activeSpinner = ora('').start()
 
-      const { verdict } = await runWorkflow({
-        owner,
-        repoName: repo,
-        prNumber: number,
-        pr,
-        tmpDir,
-        token,
-        config,
-        origin,
-        reviewStart: Date.now(),
-        log: (msg) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
-        onPhaseChange: (label) => { activeSpinner.text = label },
-        crosscheckShas: new Set(),
+      const sharedCtx = {
+        owner, repoName: repo, prNumber: number, token, config, origin,
+        log: (msg: string) => { activeSpinner.stop(); console.log(msg); activeSpinner = ora('').start() },
+        onPhaseChange: (label: string) => { activeSpinner.text = label },
+        crosscheckShas: new Set<string>(),
         pushedShas,
         dryRun: opts.dryRun,
+        // crazy/halfcrazy bypass per-step max_rounds; loop runs until stop condition or no-progress guard
+        overrideMaxRounds: opts.roundMode ? Infinity : undefined,
+        roundMode: opts.roundMode,
+        overrideTimeoutMs: reviewerTimeoutMs,
+        trigger: opts.trigger ?? 'run',
+      }
+
+      let workflowResult = await runWorkflow({
+        ...sharedCtx,
+        pr,
+        tmpDir,
+        reviewStart: Date.now(),
         steps: filteredSteps,
-        initialReviewComment: opts.initialReviewComment,
+        initialReviewComment,
       })
+      let { verdict, fixAppliedCount } = workflowResult
+      let latestReviewComment = workflowResult.latestReviewComment ?? initialReviewComment
+
+      // Autonomous fix→recheck loop for --crazy / --halfcrazy
+      if (opts.roundMode) {
+        const mode = opts.roundMode
+        const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
+        let loopRound = 1
+        let loopSha = sha
+
+        // Continue when the verdict hasn't met the stop condition OR when the
+        // initial workflow applied fixes that still need a follow-up recheck.
+        // Without the fixAppliedCount clause, --half-crazy stops after a
+        // NEEDS_WORK review (which is its stop condition) even when the workflow's
+        // fix step already pushed a commit — leaving the new head unrechecked.
+        while (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0)) {
+          // No-progress guard: if fix ran but applied nothing, looping is futile
+          if (fixAppliedCount === 0) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  no progress in round ${loopRound} — stopping`))
+            break
+          }
+
+          loopRound++
+          console.log(chalk.dim(`\n  round ${loopRound}  previous verdict ${verdict ?? '--'} — continuing...`))
+
+          // Refresh head SHA so the remote lock targets the commit fix pushed.
+          // A review-only first round has no fix count and no new head yet; in
+          // that case continue on the existing lock so round 2 can actually run
+          // the synthesized fix/recheck follow-up.
+          const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+          const freshSha = freshPR.head.sha
+          const priorRoundRanFix = fixAppliedCount !== undefined
+          if (freshSha === loopSha && priorRoundRanFix) {
+            // Head didn't advance — fix made no changes despite applied_count > 0 (edge case)
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+            console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))
+            break
+          }
+          const acquiredLoopLock = freshSha !== loopSha
+          if (acquiredLoopLock) {
+            loopSha = freshSha
+            stopHeartbeat()
+            if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', mode, round: loopRound })
+              console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
+              break
+            }
+            rememberLoopLock(loopSha)
+            await acquireRemoteLock(octokit, owner, repo, loopSha)
+            stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+          }
+
+          const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
+          workflowResult = await runWorkflow({
+            ...sharedCtx,
+            pr: loopPR,
+            tmpDir,
+            reviewStart: Date.now(),
+            steps: fixRecheckSteps,
+            initialReviewComment: latestReviewComment,
+            round: loopRound,
+          })
+          ;({ verdict, fixAppliedCount } = workflowResult)
+          latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+
+          if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
+
+          // Fix step was structurally skipped (unsupported vendor, fork PR, commit limit, etc.) —
+          // the head won't advance so looping cannot make progress.
+          if (fixAppliedCount === undefined) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', mode, round: loopRound })
+            console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
+            break
+          }
+
+          // Explicit stop when the recheck satisfies the condition, so the
+          // fixAppliedCount > 0 clause in the while predicate doesn't cause an
+          // unnecessary extra fix/recheck round against an already-approving verdict.
+          if (meetsCrazyStopCondition(verdict, mode)) {
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'stop_condition_met', mode, round: loopRound })
+            console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — done`)
+            break
+          }
+          console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — continuing...`)
+        }
+
+      }
 
       activeSpinner.stop()
       console.log(`\n  ${formatVerdict(verdict as Verdict | null)}`)
 
-      if (!opts.dryRun) {
-        console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
-      } else {
-        console.log(chalk.dim(`\n  dry-run complete — no changes posted\n`))
-      }
-
-      stopHeartbeat()
-      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'success')
+      console.log(chalk.green(`\n✓ Workflow complete — ${prUrl}\n`))
     } catch (err: unknown) {
-      stopHeartbeat()
-      if (!opts.dryRun) await releaseRemoteLock(octokit, owner, repo, sha, 'failure')
+      workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
       console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
-      releasePRLock(owner, repo, number, sha)
-      if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
-      process.exit(2)
     } finally {
+      stopHeartbeat()
+      if (!opts.dryRun && lockAttemptStarted) {
+        try { await releaseRemoteLock(octokit, owner, repo, sha, workflowError ? 'failure' : 'success') } catch { /* best-effort */ }
+        await drainLoopLocks(workflowError ? 'failure' : 'success')
+      }
       releasePRLock(owner, repo, number, sha)
       if (acquiredTmpDir) rmSync(acquiredTmpDir, { force: true, recursive: true })
     }
+    if (workflowError) process.exit(2)
   } finally {
+    process.removeListener('SIGINT', earlySignalHandler)
+    process.removeListener('SIGTERM', earlySignalHandler)
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
   }

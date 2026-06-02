@@ -2,6 +2,7 @@ import { Octokit } from 'octokit'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { buildAnnotation, parseAnnotation, parseAnnotationFields, type CrosscheckStepType } from '../lib/annotation.js'
 import { modelDisplayName } from '../lib/review-models.js'
+import { CROSSCHECK_REPO_URL } from '../lib/product.js'
 
 export function createGithubClient(token: string) {
   return new Octokit({ auth: token })
@@ -787,6 +788,60 @@ export async function getLastCrossCheckReviewComment(
   return lastComment
 }
 
+export type RawPRComment = { id: number; body: string; created_at: string }
+export type RawPRCommit = {
+  sha: string
+  commit: {
+    message: string
+    author?: { date?: string | null } | null
+    committer?: { date?: string | null } | null
+  }
+}
+
+/**
+ * Fetch one page of PR issue comments. All raw GitHub API calls for PR comments
+ * are routed through this function so auth headers and URL construction stay in
+ * the client layer.
+ *
+ * Returns the comments and the last-page number parsed from the Link header
+ * (null when there is only one page or the header is absent).
+ */
+export async function fetchPRCommentPage(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+  opts: { page?: number; since?: string } = {},
+): Promise<{ comments: RawPRComment[]; lastPage: number | null }> {
+  const params = new URLSearchParams({ per_page: '100' })
+  if (opts.page !== undefined) params.set('page', String(opts.page))
+  if (opts.since !== undefined) params.set('since', opts.since)
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments?${params}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return { comments: [], lastPage: null }
+  const comments = await res.json() as RawPRComment[]
+  const link = res.headers.get('link') ?? ''
+  const m = link.match(/page=(\d+)>;\s*rel="last"/)
+  return { comments, lastPage: m ? parseInt(m[1], 10) : null }
+}
+
+export async function fetchPRCommitPage(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  token: string,
+  page = 1,
+): Promise<RawPRCommit[]> {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) return []
+  return await res.json() as RawPRCommit[]
+}
+
 export async function getPRCommits(
   owner: string,
   repo: string,
@@ -796,12 +851,7 @@ export async function getPRCommits(
   const results: string[] = []
   let page = 1
   while (true) {
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
-    )
-    if (!res.ok) break
-    const data = await res.json() as Array<{ commit: { message: string } }>
+    const data = await fetchPRCommitPage(owner, repo, prNumber, token, page)
     if (data.length === 0) break
     for (const c of data) results.push(c.commit.message)
     if (data.length < 100) break
@@ -909,6 +959,8 @@ export interface ReviewCommentBodyInput {
   stepType?: CrosscheckStepType
   round?: number
   sha?: string
+  /** Pre-computed next workflow step embedded in the annotation for fast-path reads. */
+  nextStep?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -926,8 +978,8 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
   const header = `### ${stepVerb(stepType)} by ${vendorLabel}${modelSegment}${serviceSegment}\n\n`
 
   const defaultAttribution = isClaude
-    ? '_Reviewed with [Claude Code](https://claude.ai/code)_'
-    : '_Reviewed with [OpenAI Codex](https://openai.com/codex)_'
+    ? `_Reviewed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+    : `_Reviewed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
   const attribution = brand.reviewer_attribution || defaultAttribution
   const footer = `\n\n---\n${attribution}`
 
@@ -943,6 +995,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     verdict: input.verdict ?? 'UNKNOWN',
     service: serviceName,
     ...(input.sha && { sha: input.sha }),
+    ...(input.nextStep !== undefined && { next_step: input.nextStep }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -968,6 +1021,7 @@ export async function postReviewComment(
   stepType?: CrosscheckStepType,
   round = 1,
   sha?: string,
+  nextStep?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -986,6 +1040,7 @@ export async function postReviewComment(
       stepType,
       round,
       sha,
+      nextStep,
     }),
   })
   return comment.id

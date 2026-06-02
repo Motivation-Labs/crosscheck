@@ -107,6 +107,11 @@ export interface StepResult {
   commentId?: number
   applied_count?: number
   skipped?: boolean
+  tokens_used?: number
+  input_tokens?: number
+  output_tokens?: number
+  vendor?: string
+  model?: string
 }
 
 // Evaluates simple "stepName.field op 'value'" expressions.

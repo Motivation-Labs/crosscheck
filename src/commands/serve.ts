@@ -24,11 +24,13 @@ import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
 import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+import { CROSSCHECK_ISSUES_URL } from '../lib/product.js'
 import {
   getSmartSwitch,
   isSubscriptionLimitError,
@@ -173,8 +175,36 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
   }
 
   const prKey = `${owner}/${repoName}#${prNumber}`
-  const isRecheckRun = reviewedPRKeys.has(prKey)
-  const round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+
+  // Determine the correct starting step from PR comment history so serve
+  // behaves correctly after a restart (reviewedPRKeys is in-memory only).
+  // Fast-path: if the PR was reviewed in this session, skip the API call.
+  let isRecheckRun = reviewedPRKeys.has(prKey)
+  let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+  let resolvedSteps: WorkflowStep[] | undefined
+  let detectedReviewComment: { id?: number; body: string } | undefined
+
+  if (!isRecheckRun) {
+    try {
+      const allSteps = loadWorkflow(process.cwd())
+      const history = await fetchStepHistory(owner, repoName, prNumber, token)
+      const nextResult = identifyNextWorkflowStep(history, allSteps, pr.head.sha)
+      if (nextResult.step === null) {
+        await releaseRemoteLock(lockOctokit, owner, repoName, pr.head.sha, 'success')
+        releasePRLock(owner, repoName, prNumber, pr.head.sha)
+        inFlight.delete(key)
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'workflow_complete', sha: pr.head.sha })
+        return
+      }
+      if (nextResult.hasExistingReview) {
+        isRecheckRun = nextResult.step.type !== 'review'
+        round = nextResult.round
+        detectedReviewComment = nextResult.reviewComment
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        if (nextStepIdx >= 0) resolvedSteps = allSteps.slice(nextStepIdx)
+      }
+    } catch { /* best-effort — fall back to session-based detection */ }
+  }
 
   const reviewStart = Date.now()
   const tmpDir = mkdtempSync(join(tmpdir(), 'crosscheck-repo-'))
@@ -230,8 +260,16 @@ async function handlePR(event: PREvent, config: ReturnType<typeof loadConfig>, t
       onPhaseChange: (label, data) => board.updatePR(key, { label, ...data }),
       crosscheckShas,
       smartSwitchFallback: (ss.active && ss.fallbackVendor) ? ss.fallbackVendor : undefined,
+      onVendorLimit: (failedVendor, fallbackVendor, reason) => {
+        if (config.mode === 'cross-vendor' && fallbackVendor !== null && !getSmartSwitch().active) {
+          triggerSwitch(failedVendor, reason, announce)
+        }
+      },
+      ...(resolvedSteps !== undefined && { steps: resolvedSteps }),
+      ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
       isRecheckRun,
       round,
+      trigger: event.action === 'backtrace' ? 'backtrace' : 'serve',
     })
 
     reviewedPRKeys.add(prKey)
@@ -365,7 +403,7 @@ export async function runServe(opts: ServeOpts = {}) {
     const webhookUrl = `http://${hostname()}:${effectivePort}${config.server.webhook_path}`
     console.log(chalk.dim(`\n  "${randomFortune()}"\n`))
     console.log(chalk.bold('crosscheck serving\n'))
-    console.log(chalk.yellow('  ⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues\n'))
+    console.log(chalk.yellow(`  ⚠  serve is in beta — report issues at ${CROSSCHECK_ISSUES_URL}\n`))
     if (effectiveDeployment) {
       const label = sessionOnly
         ? chalk.dim(`${effectiveDeployment} (session only — not saved)`)

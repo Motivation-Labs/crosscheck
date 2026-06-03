@@ -103,7 +103,10 @@ export function createWebhookServer(
       // PR state (open vs closed/merged) is not reliably present in the
       // issue_comment payload — check it authoritatively in the watch handler
       // after fetching the PR via the REST API.
-      if (annotation?.type === 'review') {
+      // Only fire for kickass one-step dispatches (trigger=kickass in the annotation).
+      // Full-pipeline standalone runs also post type=review annotations but they
+      // handle fix themselves; the bridge would duplicate that work.
+      if (annotation?.type === 'review' && annotation.trigger === 'kickass') {
         res.writeHead(200).end('ok')
         setImmediate(() => onComment(body))
       } else {

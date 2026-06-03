@@ -49,7 +49,7 @@ const reviewComment = (prNumber: number, sha: string): IssueCommentEvent => ({
   },
   comment: {
     id: 1,
-    body: `<!-- crosscheck: origin=claude reviewer=codex model=o4-mini type=review round=1 verdict=NEEDS_WORK service=crosscheck sha=${sha} -->`,
+    body: `<!-- crosscheck: origin=claude reviewer=codex model=o4-mini type=review round=1 verdict=NEEDS_WORK service=crosscheck sha=${sha} trigger=kickass -->`,
     user: { login: 'crosscheck[bot]' },
   },
   repository: { name: 'repo', owner: { login: 'acme' } },

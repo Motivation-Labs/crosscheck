@@ -1004,6 +1004,8 @@ export interface ReviewCommentBodyInput {
   sha?: string
   /** Pre-computed next workflow step embedded in the annotation for fast-path reads. */
   nextStep?: string
+  /** Workflow trigger (e.g. 'kickass') embedded so the issue_comment bridge only fires for one-step dispatches. */
+  trigger?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -1039,6 +1041,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     service: serviceName,
     ...(input.sha && { sha: input.sha }),
     ...(input.nextStep !== undefined && { next_step: input.nextStep }),
+    ...(input.trigger !== undefined && { trigger: input.trigger }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -1065,6 +1068,7 @@ export async function postReviewComment(
   round = 1,
   sha?: string,
   nextStep?: string,
+  trigger?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1084,6 +1088,7 @@ export async function postReviewComment(
       round,
       sha,
       nextStep,
+      trigger,
     }),
   })
   return comment.id

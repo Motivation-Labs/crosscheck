@@ -197,6 +197,15 @@ export async function runWatch(opts: WatchOpts = {}) {
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'watch' })
+
+  // Fetch the authenticated user once so the onComment handler can reject
+  // review annotations posted by anyone other than the crosscheck token owner.
+  let authenticatedLogin: string | null = null
+  try {
+    const { data: me } = await createGithubClient(token).rest.users.getAuthenticated()
+    authenticatedLogin = me.login
+  } catch { /* best-effort — comment author check is skipped when login is unavailable */ }
+
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
 
@@ -523,29 +532,55 @@ export async function runWatch(opts: WatchOpts = {}) {
       const owner = event.repository.owner.login
       const repoName = event.repository.name
       const prNumber = event.issue.number
+
+      // P1: only respond to comments from the crosscheck token owner — prevents
+      // any repo commenter from forging an annotation and triggering fix work.
+      if (authenticatedLogin !== null && event.comment.user.login !== authenticatedLogin) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_untrusted_author', author: event.comment.user.login })
+        return
+      }
+
+      // P2: the annotation embeds the SHA the review was written for. If the PR
+      // head is already past that SHA, the fix would apply to an unreviewed diff —
+      // let the synchronize event from the new commit handle it instead.
+      const commentAnnotation = parseAnnotation(event.comment.body)
+      const annotationSha = commentAnnotation?.sha  // may be short (7 chars)
+      const shaMatches = (a: string, b: string) => a.startsWith(b) || b.startsWith(a)
+
       try {
         const octokit = createGithubClient(token)
-        const { data: prData } = await octokit.rest.pulls.get({
-          owner, repo: repoName, pull_number: prNumber,
-        })
-        const prShaKey = `${owner}/${repoName}#${prNumber}@${prData.head.sha}`
-        // Skip if this watch session already processed this PR+SHA — the issue_comment
-        // was posted by watch itself, not by an external kickass run. Re-entering would
-        // duplicate the fix step under PR/comment delivery modes (no fix marker in PR
-        // history, so identifyNextWorkflowStep still returns fix on re-entry).
-        if (reviewedPRShaKeys.has(prShaKey)) {
+        const initial = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+        let prData = initial.data
+
+        if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha, annotation_sha: annotationSha })
+          return
+        }
+
+        if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
           return
         }
+
         // GitHub can deliver issue_comment before ck run's finally block releases
-        // the remote lock (acquired before the review comment was posted). Retry with
-        // backoff so we don't silently miss the fix step when kickass finishes shortly.
+        // the remote lock. Retry with backoff; re-fetch the PR head on each attempt
+        // so we don't dispatch against a sha that advanced while we were waiting.
         const RETRY_DELAYS_MS = [3_000, 10_000, 30_000]
         for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-          if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]))
-          // Re-check: watch may have completed the PR while we were waiting (e.g.
-          // if this comment was posted by watch mid-run and the lock just cleared).
-          if (reviewedPRShaKeys.has(prShaKey)) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]))
+            try {
+              const { data: fresh } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+              prData = fresh
+            } catch { /* best-effort — proceed with previous data */ }
+            // PR advanced past the reviewed SHA during the wait — let synchronize handle it
+            if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
+              fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha })
+              break
+            }
+          }
+
+          if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
             fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
             break
           }

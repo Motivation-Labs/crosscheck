@@ -33,6 +33,33 @@ Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practic
 
 ## Quick start
 
+### First useful review in 10 minutes
+
+Start with one low-risk PR before turning on continuous watch mode. You only need GitHub CLI plus one authenticated reviewer CLI.
+
+```bash
+# 1. Install crosscheck
+npm install -g @humanbased/crosscheck
+
+# 2. Authenticate GitHub
+brew install gh && gh auth login
+
+# 3. Authenticate one reviewer
+npm install -g @openai/codex && codex login --device-auth
+# or:
+npm install -g @anthropic-ai/claude-code && claude
+
+# 4. Check your setup
+crosscheck status
+
+# 5. Review one PR
+crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
+```
+
+Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the first useful review works, run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
+
+### Continuous mode
+
 ```bash
 # 1. Install crosscheck and the agent CLIs
 npm install -g @humanbased/crosscheck
@@ -257,6 +284,8 @@ crosscheck run <pr-url> --timeout 10m
 ---
 
 ## Configuration
+
+Crosscheck uses `~/.crosscheck/config.yml` by default. If that file exists, it wins over `./crosscheck.config.yml` unless you pass `--config ./crosscheck.config.yml`.
 
 ### Review depth (`quality.tier`)
 

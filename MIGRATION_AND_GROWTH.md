@@ -1,6 +1,6 @@
 # Crosscheck Migration and Growth Plan
 
-Crosscheck is moving from `motivation-labs` to `humanbased-ai` because HumanBased AI is the primary brand to grow. The product should function as a public proof point: HumanBased AI builds practical, careful tools for the agentic coding era.
+Crosscheck is moving from `motivation-labs` to `humanbased-ai` because Humanbased is the primary brand to grow. The product should function as a public proof point: Humanbased builds practical, careful tools for the agentic coding era.
 
 ## Positioning
 
@@ -69,7 +69,7 @@ AI coding agents are fast enough to create a new problem: PRs that look finished
 
 Crosscheck adds a Review -> Fix -> Recheck loop around Claude Code and Codex. One agent writes the patch, another reviews it, the author fixes the findings, and the reviewer checks again. It runs through the CLIs you already use, with no hosted review service and no per-review API bill.
 
-Built by HumanBased AI to combat AI slop without slowing down the teams already shipping with agents.
+Built by Humanbased to combat AI slop without slowing down the teams already shipping with agents.
 
 ### Demo script
 
@@ -99,7 +99,7 @@ Week 3:
 
 - Ship trust docs: permissions, webhook behavior, what leaves the machine, what Crosscheck can mutate, and how to run review-only.
 - Add templates for "solo developer", "two-agent team", and "shared server" setups.
-- Collect first public case study from the HumanBased AI workflow.
+- Collect first public case study from the Humanbased workflow.
 
 Week 4:
 

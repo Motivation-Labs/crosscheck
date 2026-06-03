@@ -198,13 +198,16 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   fileLog({ level: 'info', event: 'session_start', command: 'watch' })
 
-  // Fetch the authenticated user once so the onComment handler can reject
-  // review annotations posted by anyone other than the crosscheck token owner.
+  // Fetch the authenticated user so the onComment handler can reject annotation
+  // injection from non-token accounts. If this fails, the handler is disabled
+  // entirely (fail closed) — allowing unknown authors would defeat the guard.
   let authenticatedLogin: string | null = null
   try {
     const { data: me } = await createGithubClient(token).rest.users.getAuthenticated()
     authenticatedLogin = me.login
-  } catch { /* best-effort — comment author check is skipped when login is unavailable */ }
+  } catch {
+    fileLog({ level: 'warn', event: 'authenticated_login_unavailable', message: 'issue_comment bridge disabled — could not determine token owner' })
+  }
 
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
@@ -545,7 +548,13 @@ export async function runWatch(opts: WatchOpts = {}) {
       // marker to drive automated fix work. Guard against it by verifying the
       // comment was posted by the account that owns the crosscheck token — the
       // only entity that legitimately writes these automation markers.
-      if (authenticatedLogin !== null && event.comment.user.login !== authenticatedLogin) {
+      // Fail closed: if we couldn't determine the token owner at startup, disable
+      // the bridge entirely rather than allowing any commenter to trigger fixes.
+      if (authenticatedLogin === null) {
+        fileLog({ level: 'warn', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'authenticated_login_unavailable' })
+        return
+      }
+      if (event.comment.user.login !== authenticatedLogin) {
         fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'annotation_injection_blocked', author: event.comment.user.login })
         return
       }

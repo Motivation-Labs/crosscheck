@@ -29,7 +29,7 @@
 
 ```bash
 # 1. 安装 crosscheck 及 Agent CLI
-npm install -g @motivation-labs/crosscheck
+npm install -g @humanbased/crosscheck
 npm install -g @anthropic-ai/claude-code && claude        # 需要 Claude Pro/Max 订阅
 npm install -g @openai/codex && codex login --device-auth # 需要 ChatGPT Plus/Pro 订阅
 brew install gh && gh auth login                          # GitHub CLI
@@ -160,10 +160,10 @@ post_review:
 
 ## 参与贡献
 
-欢迎提交 Issue 和 PR：[github.com/Motivation-Labs/crosscheck](https://github.com/Motivation-Labs/crosscheck)
+欢迎提交 Issue 和 PR：[github.com/humanbased-ai/crosscheck](https://github.com/humanbased-ai/crosscheck)
 
 ---
 
 ## 许可证
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 Motivation Labs LLC.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 HumanBased AI.

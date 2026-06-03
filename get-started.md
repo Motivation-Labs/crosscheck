@@ -78,26 +78,26 @@ Used for cloning PR branches and (in watch mode) registering webhooks automatica
 **Stable (recommended):**
 
 ```bash
-npm install -g @motivation-labs/crosscheck
+npm install -g @humanbased/crosscheck
 ```
 
 **Beta (latest features, may have rough edges):**
 
 ```bash
-npm install -g @motivation-labs/crosscheck@beta
+npm install -g @humanbased/crosscheck@beta
 ```
 
 **npx — no install:**
 
 ```bash
-npx @motivation-labs/crosscheck <command>
-npx @motivation-labs/crosscheck@beta <command>
+npx @humanbased/crosscheck <command>
+npx @humanbased/crosscheck@beta <command>
 ```
 
 **From source:**
 
 ```bash
-git clone https://github.com/Motivation-Labs/crosscheck
+git clone https://github.com/humanbased-ai/crosscheck
 cd crosscheck
 npm install && npm run build && npm link
 ```
@@ -229,14 +229,14 @@ cd /path/to/your/repo && crosscheck watch
 ```
 crosscheck watch
 
-  orgs      motivation-labs, codatta
+  orgs      humanbased-ai, codatta
   mode      cross-vendor
   quality   balanced
   config    ./crosscheck.config.yml  ← edit to change above
 
   ✓ tunnel ready: https://abc123.lhr.life
   tunnel    https://abc123.lhr.life
-  ✓ webhook registered for motivation-labs
+  ✓ webhook registered for humanbased-ai
 
 Waiting for PR events — Ctrl+C to stop.
 ```
@@ -247,7 +247,7 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 ### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
 
-> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/Motivation-Labs/crosscheck/issues](https://github.com/Motivation-Labs/crosscheck/issues).
+> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/humanbased-ai/crosscheck/issues](https://github.com/humanbased-ai/crosscheck/issues).
 
 Listens on a fixed port. You register the webhook(s) manually once and they stay registered.
 
@@ -257,7 +257,7 @@ crosscheck serve
 
 ```
 crosscheck serving
-⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues
+⚠  serve is in beta — report issues at github.com/humanbased-ai/crosscheck/issues
 
   mode      cross-vendor
   quality   balanced
@@ -265,7 +265,7 @@ crosscheck serving
   endpoint  http://your-machine.local:7891/webhook
 
 Register the endpoint above as a GitHub org webhook (content-type: application/json).
-  → https://github.com/organizations/motivation-labs/settings/hooks
+  → https://github.com/organizations/humanbased-ai/settings/hooks
   → https://github.com/organizations/codatta/settings/hooks
 ```
 
@@ -408,7 +408,7 @@ crosscheck onboard
   Choice [1]: 1
 
   Step 3 — select repos to monitor
-  [1] motivation-labs (org · 12 repos)
+  [1] humanbased-ai (org · 12 repos)
   [2] codatta (org · 5 repos)
   [3] your-github-login (personal · 8 repos)
   Select [all]: 1,3
@@ -428,7 +428,7 @@ crosscheck onboard
   Step 7 — review and write config
   deployment   personal
   connection   localhost.run
-  orgs         motivation-labs
+  orgs         humanbased-ai
   users        your-github-login (8 repos)
   mode         cross-vendor
   pipeline     review-fix-recheck
@@ -763,7 +763,7 @@ The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caugh
 
 ### `crosscheck issue`
 
-Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `Motivation-Labs/crosscheck` after you confirm. No manual log-digging or issue writing required.
+Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `humanbased-ai/crosscheck` after you confirm. No manual log-digging or issue writing required.
 
 ```bash
 crosscheck issue               # interactive — review draft before submitting
@@ -798,8 +798,8 @@ crosscheck issue
   When crosscheck runs a Codex review, the reviewer tries to execute `tsc`
   ...
 
-  Submit to Motivation-Labs/crosscheck? [y/N]: y
-  ✓ https://github.com/Motivation-Labs/crosscheck/issues/99
+  Submit to humanbased-ai/crosscheck? [y/N]: y
+  ✓ https://github.com/humanbased-ai/crosscheck/issues/99
 ```
 
 If no errors are found in recent logs, crosscheck prints `No errors found in recent logs — nothing to report` and exits cleanly.
@@ -910,7 +910,7 @@ budget:
 
 # ── Orgs — covers all repos in each org with one webhook ─────────────────────
 orgs:
-  - motivation-labs
+  - humanbased-ai
   - codatta
 
 # ── Users — monitors all repos owned by personal GitHub accounts (non-org) ───

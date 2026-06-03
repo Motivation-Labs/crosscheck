@@ -270,7 +270,7 @@ export function patchDeploymentConfig(
   raw.deployment = deployment
 
   // Update orgs unless user has already set non-example values
-  const EXAMPLE_ORGS = new Set(['motivation-labs', 'codatta'])
+  const EXAMPLE_ORGS = new Set(['humanbased-ai', 'codatta'])
   const currentOrgs = Array.isArray(raw.orgs) ? (raw.orgs as string[]) : []
   const hasCustomOrgs = currentOrgs.length > 0 && currentOrgs.some(o => !EXAMPLE_ORGS.has(o))
   if (force || !hasCustomOrgs) raw.orgs = orgs

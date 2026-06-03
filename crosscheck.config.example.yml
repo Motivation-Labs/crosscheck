@@ -71,7 +71,7 @@ budget:
 # Monitor entire orgs — all repos get covered with one webhook per org.
 # Takes priority over `repos` when both are set.
 orgs:
-  - motivation-labs
+  - humanbased-ai
   - codatta
 
 # ─── Users ───────────────────────────────────────────────────────────────────

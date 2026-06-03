@@ -15,7 +15,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const PACKAGE_ROOT = resolve(__dirname, '..', '..')
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
-const ISSUE_REPO = 'Motivation-Labs/crosscheck'
+const ISSUE_REPO = 'humanbased-ai/crosscheck'
 
 function loadIssueHarness(cwd: string): string {
   const candidates = [

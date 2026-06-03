@@ -471,7 +471,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Executes the full configured workflow against a single PR: review → auto-fix → recheck. Where `crosscheck review` stops after posting a comment, `crosscheck run` closes the loop — if issues are found, the authoring agent opens a fix PR and crosscheck re-reviews it.
+Detects the next pending workflow step for a PR from live comment history and runs exactly that one step. If no `--steps` flag is given, `detect-step` determines where to start (review, fix, or recheck) and stops after completing it — `watch` picks up continuation via webhooks. Pass `--steps` explicitly to run a specific step regardless of history.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -524,7 +524,7 @@ crosscheck scan --json
 
 Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
-Fix actions dispatch a full fix→recheck cycle in one invocation, honoring the `max_rounds` setting in your `workflow.yml`.
+Each PR dispatch uses `detect-step` to read live PR comment history and runs **exactly the next needed step** — never more. Continuation (fix after review, recheck after fix) is handled by `watch` via the webhooks each completed step produces.
 
 ```bash
 crosscheck kickass --dry-run
@@ -540,6 +540,40 @@ crosscheck kickass --halfcrazy    # loop until verdict is not BLOCK
 | `--stale-after <duration>` | Only show PRs stale for at least this duration |
 | `--crazy` | Autonomous loop: keep running fix→recheck cycles until APPROVE (ceiling: 2 rounds per PR) |
 | `--halfcrazy` | Autonomous loop: keep running until verdict is not BLOCK — NEEDS\_WORK is acceptable |
+
+#### `kickass` + `watch` combo
+
+When a batch of PRs is stuck — timed out, or stopped before `watch` was running — use both commands together for hands-free recovery:
+
+```bash
+# terminal 1 — keep running to handle continuations
+crosscheck watch
+
+# terminal 2 — kick each stuck PR one step forward
+crosscheck scan --force
+crosscheck kickass
+```
+
+How they divide the work:
+
+```
+crosscheck kickass
+  └─ ck run <url>                     (detect-step, no --steps)
+       └─ detect-step → "review"      run review only → posts comment
+       └─ detect-step → "fix"         run fix only → pushes commit
+       └─ detect-step → "recheck"     run recheck only → posts verdict
+
+crosscheck watch
+  ├─ issue_comment (type=review) → pick up fix step automatically
+  └─ synchronize   (fix commit)  → pick up recheck step automatically
+```
+
+`kickass` advances each PR exactly one step using live `detect-step` detection. `watch` owns all continuation via webhooks:
+
+- A posted review fires an `issue_comment` webhook → `watch` starts the fix step.
+- A fix commit fires a `synchronize` webhook → `watch` starts the recheck step.
+
+No second `kickass` run is needed. Once `kickass` kicks the first step, the pipeline advances on its own as long as `watch` is running. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
 
 ---
 

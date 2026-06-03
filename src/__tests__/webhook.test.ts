@@ -118,16 +118,17 @@ describe('createWebhookServer — issue_comment handling', () => {
     }
   })
 
-  it('ignores issue_comment events on merged PRs', async () => {
+  it('forwards issue_comment events on merged PRs to onComment — state checked by watch handler', async () => {
+    // merged_at is absent from real issue_comment payloads; webhook.ts no longer
+    // attempts to check it. The watch handler verifies PR state via the REST API.
     const received: IssueCommentEvent[] = []
     const server = createWebhookServer(config, secret, () => {}, () => {}, undefined, e => received.push(e))
     await startServer(server)
     try {
-      const merged = { ...reviewComment(7, 'abc1234') }
-      merged.issue = { ...merged.issue, pull_request: { merged_at: '2026-06-01T00:00:00Z' } }
-      await postWebhook(server, 'issue_comment', merged)
+      await postWebhook(server, 'issue_comment', reviewComment(7, 'abc1234'))
       await new Promise(r => setImmediate(r))
-      expect(received).toHaveLength(0)
+      // webhook.ts passes it through; watch.ts skips after fetching PR state
+      expect(received).toHaveLength(1)
     } finally {
       await stopServer(server)
     }

@@ -557,6 +557,13 @@ export async function runWatch(opts: WatchOpts = {}) {
         const initial = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
         let prData = initial.data
 
+        // merged_at is absent from the issue_comment webhook payload so we check
+        // PR state authoritatively here — skip closed or already-merged PRs.
+        if (prData.state !== 'open' || prData.merged) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_not_open', state: prData.state })
+          return
+        }
+
         if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha, annotation_sha: annotationSha })
           return

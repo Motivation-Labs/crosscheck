@@ -27,7 +27,7 @@ export interface IssueCommentEvent {
     number: number
     title: string
     user: { login: string }
-    pull_request?: { merged_at: string | null }
+    pull_request?: Record<string, unknown>  // presence indicates this is a PR, not an issue
   }
   comment: {
     id: number
@@ -100,7 +100,10 @@ export function createWebhookServer(
       const annotation = body.action === 'created' && body.issue.pull_request
         ? parseAnnotation(body.comment.body)
         : null
-      if (annotation?.type === 'review' && !body.issue.pull_request?.merged_at) {
+      // PR state (open vs closed/merged) is not reliably present in the
+      // issue_comment payload — check it authoritatively in the watch handler
+      // after fetching the PR via the REST API.
+      if (annotation?.type === 'review') {
         res.writeHead(200).end('ok')
         setImmediate(() => onComment(body))
       } else {

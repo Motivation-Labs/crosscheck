@@ -471,7 +471,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against a single PR: review → auto-fix → recheck. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
+Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123

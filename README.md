@@ -46,7 +46,7 @@ crosscheck onboard                  # guided setup — pick repos, mode, and pip
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
 crosscheck review <pr-url>          # one-shot review of a specific PR
-crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck run <pr-url>             # run the full workflow: review → (fix → recheck) × max_rounds
 crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
@@ -162,7 +162,7 @@ crosscheck review <pr-url> --reviewer openai    # alias for Codex
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against one PR: review → fix → recheck. Same logic as `watch`/`serve`, but triggered manually.
+Runs the full configured workflow against one PR: review → (fix → recheck) × `max_rounds`. Same logic as `watch`/`serve`, but triggered manually.
 
 ```bash
 crosscheck run <pr-url>

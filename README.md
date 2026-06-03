@@ -6,7 +6,7 @@
   <img src="./assets/logo.png" alt="crosscheck" width="160" />
 </p>
 
-<p align="center"><em>Building crosscheck with crosscheck.</em></p>
+<p align="center"><em>A HumanBased AI project, built with crosscheck.</em></p>
 
 # crosscheck
 
@@ -14,9 +14,20 @@
   <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
 </p>
 
-**Auto Code Review Pipeline — customizable PR → Review → Fix → Recheck loop, single-vendor or cross-vendor, zero new infrastructure.**
+**Stop merging AI slop. Crosscheck turns agent-written PRs into merge-ready patches with a configurable Review -> Fix -> Recheck pipeline.**
 
-Define the review pipeline in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
+AI coding agents are fast, but they can still ship regressions, half-finished fixes, brittle edge cases, and "early victory" PRs that look done before they are solid. Crosscheck adds an independent safety loop: let one agent write the patch, let another review it, send the findings back to the author, then recheck the result before merge.
+
+Define the workflow in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
+
+Built by [HumanBased AI](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
+
+## Why crosscheck?
+
+- **Combats AI slop before merge** — catches code regressions, incomplete fixes, hallucinated assumptions, and brittle "looks green" patches.
+- **Uses independent reviewers** — route Claude-authored PRs to Codex, Codex-authored PRs to Claude, or run a single-vendor loop when that is what you have.
+- **Closes the loop** — review findings can become a fix step and then a recheck step, so the PR moves toward real merge readiness instead of another comment thread.
+- **Runs on your machine or server** — no new hosted code review service, no per-review API bill, no extra infrastructure to trust.
 
 ---
 
@@ -24,7 +35,7 @@ Define the review pipeline in `workflow.yml`: review-only, review + fix, or the 
 
 ```bash
 # 1. Install crosscheck and the agent CLIs
-npm install -g @motivation-labs/crosscheck
+npm install -g @humanbased/crosscheck
 npm install -g @anthropic-ai/claude-code && claude        # Claude Pro/Max subscription
 npm install -g @openai/codex && codex login --device-auth # ChatGPT Plus/Pro subscription
 brew install gh && gh auth login                          # GitHub CLI
@@ -334,10 +345,10 @@ Full reference: [get-started.md](./get-started.md)
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/Motivation-Labs/crosscheck](https://github.com/Motivation-Labs/crosscheck).
+Issues and PRs welcome at [github.com/humanbased-ai/crosscheck](https://github.com/humanbased-ai/crosscheck).
 
 ---
 
 ## License
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 Motivation Labs LLC.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 HumanBased AI.

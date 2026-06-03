@@ -24,10 +24,10 @@ describe('sanitizeEntry', () => {
   it('sanitizes owner/repo pattern in message', () => {
     const entry: RawLogEntry = {
       ts: '', level: 'error', event: 'error',
-      message: 'failed cloning motivation-labs/crosscheck',
+      message: 'failed cloning humanbased-ai/crosscheck',
     }
     expect(sanitizeEntry(entry).message).toContain('[repo]')
-    expect(sanitizeEntry(entry).message).not.toContain('motivation-labs/crosscheck')
+    expect(sanitizeEntry(entry).message).not.toContain('humanbased-ai/crosscheck')
   })
 
   it('sanitizes GitHub URLs in message', () => {

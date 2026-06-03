@@ -79,26 +79,26 @@ gh auth login
 **稳定版（推荐）：**
 
 ```bash
-npm install -g @motivation-labs/crosscheck
+npm install -g @humanbased/crosscheck
 ```
 
 **Beta 版（最新特性，可能存在问题）：**
 
 ```bash
-npm install -g @motivation-labs/crosscheck@beta
+npm install -g @humanbased/crosscheck@beta
 ```
 
 **npx — 无需安装：**
 
 ```bash
-npx @motivation-labs/crosscheck <命令>
-npx @motivation-labs/crosscheck@beta <命令>
+npx @humanbased/crosscheck <命令>
+npx @humanbased/crosscheck@beta <命令>
 ```
 
 **从源码安装：**
 
 ```bash
-git clone https://github.com/Motivation-Labs/crosscheck
+git clone https://github.com/humanbased-ai/crosscheck
 cd crosscheck
 npm install && npm run build && npm link
 ```
@@ -229,14 +229,14 @@ cd /path/to/your/repo && crosscheck watch
 ```
 crosscheck watch
 
-  orgs      motivation-labs, codatta
+  orgs      humanbased-ai, codatta
   mode      cross-vendor
   quality   balanced
   config    ./crosscheck.config.yml  ← 编辑可修改以上配置
 
   ✓ tunnel ready: https://abc123.lhr.life
   tunnel    https://abc123.lhr.life
-  ✓ webhook registered for motivation-labs
+  ✓ webhook registered for humanbased-ai
 
 Waiting for PR events — Ctrl+C to stop.
 ```
@@ -247,7 +247,7 @@ Waiting for PR events — Ctrl+C to stop.
 
 ### Serve 模式 [BETA] — 适合常驻机器（mac-mini、家庭服务器）
 
-> **Beta：** `serve` 功能可用，但尚未经过充分生产验证。欢迎在 [github.com/Motivation-Labs/crosscheck/issues](https://github.com/Motivation-Labs/crosscheck/issues) 报告问题。
+> **Beta：** `serve` 功能可用，但尚未经过充分生产验证。欢迎在 [github.com/humanbased-ai/crosscheck/issues](https://github.com/humanbased-ai/crosscheck/issues) 报告问题。
 
 监听固定端口，Webhook 只需手动注册一次，永久生效。
 
@@ -257,7 +257,7 @@ crosscheck serve
 
 ```
 crosscheck serving
-⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues
+⚠  serve is in beta — report issues at github.com/humanbased-ai/crosscheck/issues
 
   mode      cross-vendor
   quality   balanced
@@ -265,7 +265,7 @@ crosscheck serving
   endpoint  http://your-machine.local:7891/webhook
 
 Register the endpoint above as a GitHub org webhook (content-type: application/json).
-  → https://github.com/organizations/motivation-labs/settings/hooks
+  → https://github.com/organizations/humanbased-ai/settings/hooks
   → https://github.com/organizations/codatta/settings/hooks
 ```
 
@@ -408,7 +408,7 @@ crosscheck onboard
   Choice [1]: 1
 
   Step 3 — select repos to monitor
-  [1] motivation-labs (org · 12 repos)
+  [1] humanbased-ai (org · 12 repos)
   [2] codatta (org · 5 repos)
   [3] your-github-login (personal · 8 repos)
   Select [all]: 1,3
@@ -428,7 +428,7 @@ crosscheck onboard
   Step 7 — review and write config
   deployment   personal
   connection   localhost.run
-  orgs         motivation-labs
+  orgs         humanbased-ai
   users        your-github-login (8 repos)
   mode         cross-vendor
   pipeline     review-fix-recheck
@@ -715,7 +715,7 @@ crosscheck impact  (all time · 47 reviews)
 
 ### `crosscheck issue`
 
-读取近期错误日志，由你最优 AI Agent 起草 GitHub Issue，询问三个简短跟进问题，确认后提交到 `Motivation-Labs/crosscheck`。无需手动翻日志或手写 Issue。
+读取近期错误日志，由你最优 AI Agent 起草 GitHub Issue，询问三个简短跟进问题，确认后提交到 `humanbased-ai/crosscheck`。无需手动翻日志或手写 Issue。
 
 ```bash
 crosscheck issue               # 交互式 — 提交前确认草稿
@@ -747,8 +747,8 @@ crosscheck issue
   TITLE: codex: command not found: tsc during review in temp clone
   ...
 
-  Submit to Motivation-Labs/crosscheck? [y/N]: y
-  ✓ https://github.com/Motivation-Labs/crosscheck/issues/99
+  Submit to humanbased-ai/crosscheck? [y/N]: y
+  ✓ https://github.com/humanbased-ai/crosscheck/issues/99
 ```
 
 近期日志中若无错误，crosscheck 打印 `No errors found in recent logs — nothing to report` 并正常退出。
@@ -852,7 +852,7 @@ budget:
 
 # ── Org — 一个 Webhook 覆盖 Org 下所有仓库 ──────────────────────────────────
 orgs:
-  - motivation-labs
+  - humanbased-ai
   - codatta
 
 # ── Users — 监控个人 GitHub 账号下的所有仓库（非 Org）──────────────────────

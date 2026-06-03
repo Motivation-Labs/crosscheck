@@ -400,7 +400,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         } catch { /* base unavailable — proceed with full review, skip cache update */ }
 
         const prev = newDiffHash ? diffHashes.get(prKey) : undefined
-        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha) {
+        // Comment-triggered runs (issue_comment bridge) must bypass the diff-hash skip:
+        // the annotation is the explicit signal to advance to fix, regardless of whether
+        // the diff changed since the last review (e.g. no-op rebase/amend).
+        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha && params.action !== 'comment') {
           const prevShort = prev.sha.slice(0, 7)
           const nowShort = params.headSha.slice(0, 7)
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
@@ -599,6 +602,11 @@ export async function runWatch(opts: WatchOpts = {}) {
               const { data: fresh } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
               prData = fresh
             } catch { /* best-effort — proceed with previous data */ }
+            // PR may have been closed or merged during the backoff window
+            if (prData.state !== 'open' || prData.merged) {
+              fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_not_open', state: prData.state })
+              break
+            }
             // PR advanced past the reviewed SHA during the wait — let synchronize handle it
             if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
               fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha })

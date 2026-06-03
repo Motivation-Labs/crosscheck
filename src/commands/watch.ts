@@ -533,10 +533,15 @@ export async function runWatch(opts: WatchOpts = {}) {
       const repoName = event.repository.name
       const prNumber = event.issue.number
 
-      // P1: only respond to comments from the crosscheck token owner — prevents
-      // any repo commenter from forging an annotation and triggering fix work.
+      // Human feedback in regular PR comments is always valued and never reaches
+      // this handler (webhook.ts only forwards comments that contain the hidden
+      // <!-- crosscheck: ... type=review --> automation marker). The concern is
+      // specifically annotation injection: someone deliberately embedding that
+      // marker to drive automated fix work. Guard against it by verifying the
+      // comment was posted by the account that owns the crosscheck token — the
+      // only entity that legitimately writes these automation markers.
       if (authenticatedLogin !== null && event.comment.user.login !== authenticatedLogin) {
-        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_untrusted_author', author: event.comment.user.login })
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'annotation_injection_blocked', author: event.comment.user.login })
         return
       }
 
@@ -808,6 +813,10 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log()
     console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
     console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
+    // Without an author filter on a public (or broadly accessible) repo, any commenter
+    // can post the hidden automation marker and attempt to trigger automated fix work.
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('Annotation injection risk: any commenter can post a hidden crosscheck annotation')}`)
+    console.log(`     ${chalk.yellow('to trigger the automated fix bridge. Restrict via')} ${chalk.cyan('routing.allowed_authors')} ${chalk.yellow('or keep repos private.')}`)
   }
 
   // Warn when author_routes will be silently bypassed (cross-vendor + both vendors enabled)

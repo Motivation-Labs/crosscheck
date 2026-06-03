@@ -90,12 +90,13 @@ export function createWebhookServer(
         res.writeHead(400).end()
         return
       }
-      // Only act on newly-created comments on open PRs whose body contains a
-      // crosscheck review annotation — this is how kickass-posted reviews signal
-      // watch to advance to the fix step without needing a new commit. The webhook
-      // signature already proves GitHub delivered the event; downstream
-      // identifyNextWorkflowStep re-reads live PR history so any forged annotation
-      // cannot redirect work — it can only trigger an early re-check of real state.
+      // Only act on newly-created comments whose body contains a crosscheck review
+      // annotation — the hidden <!-- crosscheck: ... type=review --> marker is the
+      // intentional automation trigger that signals watch to advance the fix step.
+      // Regular human feedback (plain comments without this marker) is always welcome
+      // and never reaches this handler. The concern here is specifically annotation
+      // injection: a non-token account posting the hidden marker to drive automated
+      // fix work. That check happens in watch.ts against the authenticated user login.
       const annotation = body.action === 'created' && body.issue.pull_request
         ? parseAnnotation(body.comment.body)
         : null

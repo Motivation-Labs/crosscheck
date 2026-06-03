@@ -636,11 +636,13 @@ export class PRBoard {
     lines.push(`  ${this.statsRow()}  ${t.dim('│')}  ${t.dim('↑')} ${this.uptime()}`)
 
     const { type: tunnelType, url, alive } = this.tunnel
-    const tunnelLabel = tunnelType === 'serve' ? 'endpoint:' : 'tunnel:  '
-    const tunnelDisplay = url
-      ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
-      : t.dim('connecting...')
-    lines.push(`  ${t.dim(tunnelLabel)} ${tunnelDisplay}`)
+    if (tunnelType !== 'none') {
+      const tunnelLabel = tunnelType === 'serve' ? 'endpoint:' : 'tunnel:  '
+      const tunnelDisplay = url
+        ? `${url.replace(/^https?:\/\//, '')} ${alive ? t.success('✓') : t.warning('⚠')}`
+        : t.dim('connecting...')
+      lines.push(`  ${t.dim(tunnelLabel)} ${tunnelDisplay}`)
+    }
 
     // Connectivity log: already prefixed with timestamps + indent in logConnectivity()
     const activeConn = this.connLog.filter(l => l.trim())

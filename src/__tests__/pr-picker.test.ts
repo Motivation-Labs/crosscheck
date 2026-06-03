@@ -61,6 +61,7 @@ describe('picker grouping', () => {
 
   it('renders compact labels with action group and scanned head', () => {
     expect(formatPickerLabel(pr(12))).toContain('CR')
-    expect(formatPickerLabel(pr(12))).toContain('acme/web#12@abc123')
+    expect(formatPickerLabel(pr(12))).toContain('acme/web/PR#12')
+    expect(formatPickerLabel(pr(12))).toContain('NEEDS_REVIEW')
   })
 })

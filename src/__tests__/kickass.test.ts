@@ -129,6 +129,7 @@ describe('buildKickassRunArgs', () => {
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'crazy')
+    expect(args).not.toContain('--steps')
     expect(args).toContain('--no-timeout')
     expect(args).not.toContain('--crazy')
   })
@@ -148,12 +149,60 @@ describe('buildKickassRunArgs', () => {
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     }), 'crazy')
+    expect(args).not.toContain('--steps')
     expect(args).not.toContain('--crazy')
     expect(args).toContain('--no-timeout')
   })
 })
 
 describe('runKickassWithDeps', () => {
+  it('warns to use --force when a cached scan finds no PRs', async () => {
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      logs.push(String(message ?? ''))
+    })
+    const deps: KickassDeps = {
+      loadScanResult: async () => ({ ...scan([]), cached: true }),
+      pickPRs: async () => [],
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    try {
+      await runKickassWithDeps({ staleAfter: '1m' }, deps)
+    } finally {
+      logSpy.mockRestore()
+    }
+
+    expect(logs.join('\n')).toContain('No actionable PRs found.')
+    expect(logs.join('\n')).toContain('This result came from the scan cache.')
+    expect(logs.join('\n')).toContain('Rerun with --force to refresh the queue.')
+  })
+
+  it('shows no --force hint when a fresh scan finds no PRs', async () => {
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      logs.push(String(message ?? ''))
+    })
+    const deps: KickassDeps = {
+      loadScanResult: async () => scan([]),
+      pickPRs: async () => [],
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    try {
+      await runKickassWithDeps({ staleAfter: '1m' }, deps)
+    } finally {
+      logSpy.mockRestore()
+    }
+
+    expect(logs.join('\n')).toContain('No actionable PRs found.')
+    expect(logs.join('\n')).not.toContain('--force')
+  })
+
   it('dry-run scans, picks PRs, and prints preflight without mutating', async () => {
     const selected = pr({
       latestAnnotation: {

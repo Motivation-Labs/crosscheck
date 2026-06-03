@@ -32,7 +32,7 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
 import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
@@ -330,11 +330,26 @@ export async function runWatch(opts: WatchOpts = {}) {
             isRecheckRun = nextResult.step.type !== 'review'
             round = nextResult.round
             detectedReviewComment = nextResult.reviewComment
-            // Slice allSteps to start from the detected next step so runWorkflow
-            // runs the correct operations (fix, recheck, etc.) rather than starting
-            // from review and relying solely on isRecheckRun coercion.
             const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
-            if (nextStepIdx >= 0) resolvedSteps = allSteps.slice(nextStepIdx)
+            if (nextStepIdx >= 0) {
+              let steps = allSteps.slice(nextStepIdx)
+              // Synthesize a recheck step when one isn't explicitly in workflow.yml —
+              // fix must always be followed by recheck so the PR verdict stays current.
+              if (!steps.some(s => s.type === 'recheck')) {
+                const reviewStep = allSteps.find(s => s.type === 'review')
+                if (reviewStep) {
+                  const synthetic: WorkflowStep = {
+                    ...reviewStep, name: 'recheck', type: 'recheck', reviewer,
+                    when: undefined, instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+                  }
+                  const lastFix = steps.map(s => s.type).lastIndexOf('fix')
+                  steps = lastFix >= 0
+                    ? [...steps.slice(0, lastFix + 1), synthetic, ...steps.slice(lastFix + 1)]
+                    : [...steps, synthetic]
+                }
+              }
+              resolvedSteps = steps
+            }
           }
         } catch { /* best-effort — fall back to session-based detection */ }
       }
@@ -502,20 +517,33 @@ export async function runWatch(opts: WatchOpts = {}) {
       const repoName = event.repository.name
       const prNumber = event.issue.number
       try {
-        const { data: prData } = await createGithubClient(token).rest.pulls.get({
+        const octokit = createGithubClient(token)
+        const { data: prData } = await octokit.rest.pulls.get({
           owner, repo: repoName, pull_number: prNumber,
         })
-        await reviewPR({
-          owner, repoName, prNumber,
-          title: prData.title,
-          body: prData.body ?? '',
-          author: prData.user?.login ?? '',
-          headSha: prData.head.sha,
-          headRef: prData.head.ref,
-          headRepo: prData.head.repo?.full_name ?? null,
-          baseRef: prData.base.ref,
-          action: 'comment',
-        })
+        // GitHub can deliver issue_comment before ck run's finally block releases
+        // the remote lock (acquired before the review comment was posted). Retry with
+        // backoff so we don't silently miss the fix step when kickass finishes shortly.
+        const RETRY_DELAYS_MS = [3_000, 10_000, 30_000]
+        for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]))
+          if (await checkRemoteLock(octokit, owner, repoName, prData.head.sha).catch(() => false)) {
+            fileLog({ level: 'info', event: 'comment_trigger_deferred', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote', attempt })
+            continue
+          }
+          await reviewPR({
+            owner, repoName, prNumber,
+            title: prData.title,
+            body: prData.body ?? '',
+            author: prData.user?.login ?? '',
+            headSha: prData.head.sha,
+            headRef: prData.head.ref,
+            headRepo: prData.head.repo?.full_name ?? null,
+            baseRef: prData.base.ref,
+            action: 'comment',
+          })
+          break
+        }
       } catch (err: unknown) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'comment_trigger' }, err)
       }

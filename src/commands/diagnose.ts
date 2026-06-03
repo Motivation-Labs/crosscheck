@@ -6,7 +6,15 @@ import { INDICATORS } from '../lib/languages.js'
 
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 
-type ErrorPattern = 'command_not_found' | 'base_branch_missing' | 'timeout' | 'auth_failure' | 'other'
+type ErrorPattern =
+  | 'command_not_found'
+  | 'base_branch_missing'
+  | 'timeout'
+  | 'rate_limit'    // 429 — GitHub or model API rate limit
+  | 'overloaded'    // 529 — upstream model API temporarily overloaded
+  | 'budget'        // per-review budget cap reached
+  | 'auth_failure'
+  | 'other'
 
 interface ErrorEntry {
   pattern: ErrorPattern
@@ -95,6 +103,16 @@ export function classifyError(message: string): { pattern: ErrorPattern; command
   const branchMatch = message.match(/fatal: no such branch:?\s*'?([^\s'"]+)'?/i)
   if (branchMatch) return { pattern: 'base_branch_missing', branch: branchMatch[1] }
 
+  // Transient model-API conditions are matched before the broad auth check so a
+  // 429/529/budget body that also mentions credentials isn't swallowed as an auth
+  // failure. Mirrors logger.classifyError so the issue/diagnose summary lines up
+  // with the categories recorded in the logs.
+  // Word-boundary the numeric codes so they don't match digits embedded in
+  // durations/counts/ports (e.g. "timed out after 5290ms" must not read as 529).
+  if (/rate limit|secondary rate|\b429\b/i.test(message)) return { pattern: 'rate_limit' }
+  if (/\b529\b|overloaded/i.test(message)) return { pattern: 'overloaded' }
+  if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/i.test(message)) return { pattern: 'budget' }
+
   if (/timed? ?out|etimedout/i.test(message)) return { pattern: 'timeout' }
 
   if (/bad credentials|401|unauthorized/i.test(message)) return { pattern: 'auth_failure' }
@@ -146,6 +164,22 @@ function buildSuggestions(errors: ErrorEntry[], languages: string[]): Suggestion
       suggestions.push({
         type: 'config_change',
         reason: `review timed out ×${e.count} — consider lowering quality.tier to "fast" or "balanced"`,
+      })
+    }
+
+    if ((e.pattern === 'rate_limit' || e.pattern === 'overloaded') && e.count >= 2 && !seen.has('transient_capacity')) {
+      seen.add('transient_capacity')
+      suggestions.push({
+        type: 'investigate',
+        reason: `transient vendor-capacity errors (${e.pattern}) ×${e.count} — add retry/backoff or stagger concurrent reviews`,
+      })
+    }
+
+    if (e.pattern === 'budget' && !seen.has('budget')) {
+      seen.add('budget')
+      suggestions.push({
+        type: 'config_change',
+        reason: `per-review budget exhausted ×${e.count} — raise the budget cap or lower quality.tier`,
       })
     }
   }
@@ -319,6 +353,9 @@ function printReport(report: DiagnoseReport): void {
     for (const e of errors) {
       const label = e.pattern === 'command_not_found' ? `command not found: ${e.command}`
         : e.pattern === 'base_branch_missing' ? `base branch missing: ${e.branch}`
+        : e.pattern === 'rate_limit' ? 'rate limit (429)'
+        : e.pattern === 'overloaded' ? 'API overloaded (529)'
+        : e.pattern === 'budget' ? 'budget exhausted'
         : e.pattern
       console.log(`    ${chalk.red('✗')} ${label.padEnd(40)} ×${e.count}${e.reviewer ? chalk.dim(`  (${e.reviewer})`) : ''}`)
     }

@@ -1,0 +1,5 @@
+{"ts":"2026-02-01T09:00:00Z","level":"info","event":"review_started","repo":"acme/api","pr":1,"reviewer":"claude","languages":["typescript"]}
+{"ts":"2026-02-01T09:01:00Z","level":"error","event":"error","repo":"acme/api","pr":1,"message":"API Error: 529 Overloaded. Please try again in a moment."}
+{"ts":"2026-02-01T09:05:00Z","level":"error","event":"error","repo":"acme/api","pr":1,"message":"Claude api_error_status: 429 rate limit — check token usage"}
+{"ts":"2026-02-01T09:06:00Z","level":"error","event":"error","repo":"acme/api","pr":1,"message":"api_error_status: 429 secondary rate limit"}
+{"ts":"2026-02-01T09:07:00Z","level":"error","event":"error","repo":"acme/api","pr":1,"message":"error_max_budget_usd: Reached maximum budget ($2)"}

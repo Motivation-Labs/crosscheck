@@ -6,6 +6,7 @@ import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
+import { tierTimeoutMs } from './tier-timeouts.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
 // Infer the verdict from the highest severity present and append it so parseVerdict() can
@@ -31,12 +32,6 @@ function extractErrorSummary(stderr: string): string | undefined {
   ).at(-1)
 }
 
-const TIER_TIMEOUT_MS: Record<string, number> = {
-  fast: 300_000,
-  balanced: 600_000,
-  thorough: 1_200_000,
-}
-
 export async function runCodexReview(
   repoDir: string,
   baseBranch: string,
@@ -49,7 +44,7 @@ export async function runCodexReview(
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
-  const tierTimeout = TIER_TIMEOUT_MS[quality.tier] ?? 600_000
+  const tierTimeout = tierTimeoutMs(quality.tier)
   // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default; positive → user-specified
   const resolvedTimeout = timeoutMs === undefined ? tierTimeout : timeoutMs === 0 ? undefined : timeoutMs
 

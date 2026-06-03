@@ -227,6 +227,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
+  // PR+sha pairs completed by this watch session — used to suppress issue_comment
+  // re-entries for reviews that watch posted itself (as opposed to kickass).
+  const reviewedPRShaKeys = new Set<string>()
 
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
@@ -427,6 +430,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
         void verdict
         reviewedPRKeys.add(prKey)
+        reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
         prRoundCounts.set(prKey, round)
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
         // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
@@ -521,12 +525,27 @@ export async function runWatch(opts: WatchOpts = {}) {
         const { data: prData } = await octokit.rest.pulls.get({
           owner, repo: repoName, pull_number: prNumber,
         })
+        const prShaKey = `${owner}/${repoName}#${prNumber}@${prData.head.sha}`
+        // Skip if this watch session already processed this PR+SHA — the issue_comment
+        // was posted by watch itself, not by an external kickass run. Re-entering would
+        // duplicate the fix step under PR/comment delivery modes (no fix marker in PR
+        // history, so identifyNextWorkflowStep still returns fix on re-entry).
+        if (reviewedPRShaKeys.has(prShaKey)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
+          return
+        }
         // GitHub can deliver issue_comment before ck run's finally block releases
         // the remote lock (acquired before the review comment was posted). Retry with
         // backoff so we don't silently miss the fix step when kickass finishes shortly.
         const RETRY_DELAYS_MS = [3_000, 10_000, 30_000]
         for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
           if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]))
+          // Re-check: watch may have completed the PR while we were waiting (e.g.
+          // if this comment was posted by watch mid-run and the lock just cleared).
+          if (reviewedPRShaKeys.has(prShaKey)) {
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
+            break
+          }
           if (await checkRemoteLock(octokit, owner, repoName, prData.head.sha).catch(() => false)) {
             fileLog({ level: 'info', event: 'comment_trigger_deferred', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote', attempt })
             continue

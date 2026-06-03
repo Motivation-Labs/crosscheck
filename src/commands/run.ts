@@ -306,7 +306,15 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
         initialReviewComment = nextResult.reviewComment
       }
-    } catch { /* best-effort — fall through to normal review flow on API error */ }
+    } catch (err: unknown) {
+      if (opts.trigger === 'kickass') {
+        // Fail closed for kickass dispatches: running more steps than intended
+        // (full pipeline instead of one step) is worse than aborting. Re-throw
+        // so the subprocess exits non-zero and kickass records a retryable failure.
+        throw err
+      }
+      /* best-effort for other triggers — fall through to normal review flow */
+    }
   }
 
   const stepVendorOverrides: StepVendorOverrides = {

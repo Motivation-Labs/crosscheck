@@ -320,7 +320,12 @@ export async function runWatch(opts: WatchOpts = {}) {
       // Determine the correct starting step from PR comment history so watch
       // behaves correctly after a restart (reviewedPRKeys is in-memory only).
       // Fast-path: if the PR was reviewed in this session, skip the API call.
-      let isRecheckRun = reviewedPRKeys.has(prKey)
+      // Exception: comment-triggered runs must always do live detection —
+      // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
+      // annotation for a new SHA as a recheck run instead of routing to fix.
+      let isRecheckRun = params.action === 'comment'
+        ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
+        : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
       let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined

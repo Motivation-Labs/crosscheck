@@ -90,10 +90,13 @@ export function createWebhookServer(
         res.writeHead(400).end()
         return
       }
-      // Only act on newly-created comments on open PRs whose body contains a
-      // crosscheck review annotation — this is how kickass-posted reviews signal
-      // watch to advance to the fix step without needing a new commit.
-      const annotation = body.action === 'created' && body.issue.pull_request
+      // Only act on newly-created comments from bot accounts on open PRs whose body
+      // contains a crosscheck review annotation — this is how kickass-posted reviews
+      // signal watch to advance to the fix step without needing a new commit.
+      // Restricting to [bot] logins prevents any commenter from forging an annotation
+      // to trigger privileged auto-fix work.
+      const isBotAuthor = body.comment.user.login.endsWith('[bot]')
+      const annotation = body.action === 'created' && body.issue.pull_request && isBotAuthor
         ? parseAnnotation(body.comment.body)
         : null
       if (annotation?.type === 'review' && !body.issue.pull_request?.merged_at) {

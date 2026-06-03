@@ -9,6 +9,8 @@ import {
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
+  patchOrgWebhookEvents,
+  patchRepoWebhookEvents,
   findOrgWebhook,
   findRepoWebhook,
   listUserRepos,
@@ -53,6 +55,8 @@ import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+
+const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -805,10 +809,12 @@ export async function runWatch(opts: WatchOpts = {}) {
         if ('org' in scope) {
           existing = await findOrgWebhook(scope.org, channelUrl, token)
           if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+          else await patchOrgWebhookEvents(scope.org, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
           succeededOrgs.add(scope.org)
         } else {
           existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
           if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
+          else await patchRepoWebhookEvents(scope.owner, scope.repo, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
         }
         smeeOk++
         fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
@@ -826,6 +832,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           try {
             const existing = await findRepoWebhook(owner, repo, channelUrl, token)
             if (!existing) await registerRepoWebhook(owner, repo, channelUrl, webhookSecret, token)
+            else await patchRepoWebhookEvents(owner, repo, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
             smeeOk++
             fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: repoLabel, url: channelUrl, fallback_for_org: fallbackOrg })
           } catch (fallbackErr: unknown) {
@@ -959,6 +966,13 @@ export async function runWatch(opts: WatchOpts = {}) {
           : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId: existingId })
         hookOk++
         fileLog({ level: 'info', event: 'webhook_active', scope: label, url: webhookUrl })
+        // Ensure the hook delivers issue_comment (may be missing on hooks created
+        // before this feature was added). Best-effort — a patch failure is non-fatal.
+        if ('org' in scope) {
+          patchOrgWebhookEvents(scope.org, existingId, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
+        } else {
+          patchRepoWebhookEvents(scope.owner, scope.repo, existingId, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
+        }
         return
       }
 

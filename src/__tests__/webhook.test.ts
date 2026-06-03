@@ -72,6 +72,22 @@ describe('createWebhookServer — issue_comment handling', () => {
     }
   })
 
+  it('calls onComment for review annotations from non-bot users (PAT installs)', async () => {
+    // crosscheck posts comments as whatever GitHub user owns the token — not always [bot]
+    const received: IssueCommentEvent[] = []
+    const server = createWebhookServer(config, secret, () => {}, () => {}, undefined, e => received.push(e))
+    await startServer(server)
+    try {
+      const nonBot = { ...reviewComment(7, 'abc1234') }
+      nonBot.comment = { ...nonBot.comment, user: { login: 'myorg-bot-user' } }  // no [bot] suffix
+      await postWebhook(server, 'issue_comment', nonBot)
+      await new Promise(r => setImmediate(r))
+      expect(received).toHaveLength(1)
+    } finally {
+      await stopServer(server)
+    }
+  })
+
   it('ignores issue_comment events with action other than created', async () => {
     const received: IssueCommentEvent[] = []
     const server = createWebhookServer(config, secret, () => {}, () => {}, undefined, e => received.push(e))

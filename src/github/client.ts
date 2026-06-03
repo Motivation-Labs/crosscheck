@@ -80,6 +80,28 @@ export async function registerRepoWebhook(
   return data.id
 }
 
+export async function patchRepoWebhookEvents(
+  owner: string,
+  repo: string,
+  hookId: number,
+  events: string[],
+  token: string,
+): Promise<void> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${hookId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ events }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to patch repo webhook [${res.status}]: ${err.message ?? res.statusText}`)
+  }
+}
+
 export async function deleteRepoWebhook(
   owner: string,
   repo: string,
@@ -118,6 +140,27 @@ export async function registerOrgWebhook(
   }
   const data = await res.json() as { id: number }
   return data.id
+}
+
+export async function patchOrgWebhookEvents(
+  org: string,
+  hookId: number,
+  events: string[],
+  token: string,
+): Promise<void> {
+  const res = await fetch(`https://api.github.com/orgs/${org}/hooks/${hookId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ events }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to patch org webhook [${res.status}]: ${err.message ?? res.statusText}`)
+  }
 }
 
 export async function deleteOrgWebhook(

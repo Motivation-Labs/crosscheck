@@ -278,10 +278,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let initialReviewComment = opts.initialReviewComment
 
   // When running without an explicit --steps flag, detect the next step from live
-  // PR comment history and run only that one step. Subsequent steps are handled by
-  // watch via the webhooks the completed step produces (issue_comment → fix,
-  // synchronize → recheck). Limiting to one step keeps each run atomic and lets
-  // watch own the full-pipeline continuation.
+  // PR comment history. When triggered by kickass the dispatch is intentionally
+  // one-step-at-a-time (watch owns continuation via webhooks). For all other
+  // triggers (direct user invocation, backtrace, etc.) run all remaining steps
+  // from the detected starting point so a standalone `ck run` still works end-to-end.
   if (!opts.steps) {
     try {
       const history = await fetchStepHistory(owner, repo, number, token)
@@ -291,12 +291,21 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
         return
       }
-      // Pin to exactly the detected step (type-based so synthesized steps resolve).
-      stepFilter = [nextResult.step.type]
+      if (opts.trigger === 'kickass') {
+        // One step only — watch picks up continuation via issue_comment / synchronize.
+        stepFilter = [nextResult.step.type]
+        console.log(chalk.dim(`  detected next step: ${nextResult.step.type}`))
+      } else if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
+        // Resume from the identified step and run all remaining steps.
+        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
+        stepFilter = nextStepIdx >= 0
+          ? allSteps.slice(nextStepIdx).map(s => s.name)
+          : [nextResult.step.type]
+        console.log(chalk.dim(`  existing review found — resuming from ${nextResult.step.type} step`))
+      }
       if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
         initialReviewComment = nextResult.reviewComment
       }
-      console.log(chalk.dim(`  detected next step: ${nextResult.step.type}`))
     } catch { /* best-effort — fall through to normal review flow on API error */ }
   }
 

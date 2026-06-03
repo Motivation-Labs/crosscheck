@@ -107,8 +107,10 @@ export function classifyError(message: string): { pattern: ErrorPattern; command
   // 429/529/budget body that also mentions credentials isn't swallowed as an auth
   // failure. Mirrors logger.classifyError so the issue/diagnose summary lines up
   // with the categories recorded in the logs.
-  if (/rate limit|secondary rate|429/i.test(message)) return { pattern: 'rate_limit' }
-  if (/529|overloaded/i.test(message)) return { pattern: 'overloaded' }
+  // Word-boundary the numeric codes so they don't match digits embedded in
+  // durations/counts/ports (e.g. "timed out after 5290ms" must not read as 529).
+  if (/rate limit|secondary rate|\b429\b/i.test(message)) return { pattern: 'rate_limit' }
+  if (/\b529\b|overloaded/i.test(message)) return { pattern: 'overloaded' }
   if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/i.test(message)) return { pattern: 'budget' }
 
   if (/timed? ?out|etimedout/i.test(message)) return { pattern: 'timeout' }

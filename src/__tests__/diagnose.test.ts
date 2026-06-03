@@ -64,6 +64,12 @@ describe('classifyError', () => {
     expect(classifyError('error_max_budget_usd: Reached maximum budget ($2)').pattern).toBe('budget')
   })
 
+  it('does not match 429/529 digits embedded in durations or counts', () => {
+    // Without word boundaries, "5290ms" matched /529/ and a timeout read as `overloaded`.
+    expect(classifyError('Request timed out after 5290ms').pattern).toBe('timeout')
+    expect(classifyError('operation timed out after 4290ms').pattern).toBe('timeout')
+  })
+
   it('falls back to other for unrecognised message', () => {
     const r = classifyError('some completely unknown error')
     expect(r.pattern).toBe('other')

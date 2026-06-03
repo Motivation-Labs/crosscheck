@@ -6,9 +6,9 @@ export const VendorConfigSchema = z.object({
   auth: z.enum(['subscription', 'api-key']).default('subscription'),
   effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
   // Max wall-clock seconds for a single CLI invocation before it is killed.
-  // null = use the reviewer's built-in default (claude: 180s; codex: tier-based,
-  // 300/600/1200s for fast/balanced/thorough). Raise this for large PRs that
-  // legitimately need longer than the default to finish.
+  // null = use the reviewer's built-in default, which is tier-based for both
+  // claude and codex: 300s (fast) / 600s (balanced) / 1200s (thorough).
+  // Raise this for large PRs that legitimately need longer to finish.
   timeout_sec: z.number().int().positive().nullable().default(null),
 })
 

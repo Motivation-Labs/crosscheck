@@ -891,7 +891,7 @@ vendors:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
-    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:

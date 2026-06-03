@@ -471,7 +471,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Detects the next pending workflow step for a PR from live comment history and runs exactly that one step. If no `--steps` flag is given, `detect-step` determines where to start (review, fix, or recheck) and stops after completing it — `watch` picks up continuation via webhooks. Pass `--steps` explicitly to run a specific step regardless of history.
+Runs the full configured workflow against a single PR: review → auto-fix → recheck. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -524,7 +524,7 @@ crosscheck scan --json
 
 Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
-Each PR dispatch uses `detect-step` to read live PR comment history and runs **exactly the next needed step** — never more. Continuation (fix after review, recheck after fix) is handled by `watch` via the webhooks each completed step produces.
+Each PR dispatch uses `detect-step` to read live PR comment history and advances **exactly the next needed step** — kickass drives one step per PR, then `watch` picks up continuation via the webhooks that step produces.
 
 ```bash
 crosscheck kickass --dry-run
@@ -558,7 +558,7 @@ How they divide the work:
 
 ```
 crosscheck kickass
-  └─ ck run <url>                     (detect-step, no --steps)
+  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
        └─ detect-step → "review"      run review only → posts comment
        └─ detect-step → "fix"         run fix only → pushes commit
        └─ detect-step → "recheck"     run recheck only → posts verdict
@@ -567,6 +567,8 @@ crosscheck watch
   ├─ issue_comment (type=review) → pick up fix step automatically
   └─ synchronize   (fix commit)  → pick up recheck step automatically
 ```
+
+> **Note:** `ck run <url>` invoked directly (without `--trigger kickass`) runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it.
 
 `kickass` advances each PR exactly one step using live `detect-step` detection. `watch` owns all continuation via webhooks:
 

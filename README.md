@@ -46,7 +46,7 @@ crosscheck onboard                  # guided setup — pick repos, mode, and pip
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
 crosscheck review <pr-url>          # one-shot review of a specific PR
-crosscheck run <pr-url>             # advance the next detected step for a PR
+crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
 crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
@@ -230,7 +230,7 @@ For the best recovery experience when a batch of PRs is stuck (timed out, stoppe
 
 ```
 crosscheck kickass
-  └─ ck run <url>                     (detect-step, no --steps)
+  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
        └─ detect-step → "review"      run review only → posts comment
        └─ detect-step → "fix"         run fix only → pushes commit
        └─ detect-step → "recheck"     run recheck only → posts verdict
@@ -239,6 +239,8 @@ crosscheck watch
   ├─ issue_comment (type=review) → pick up fix step automatically
   └─ synchronize   (fix commit)  → pick up recheck step automatically
 ```
+
+> **Note:** `crosscheck run <pr-url>` invoked directly runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it with `--trigger kickass`.
 
 Start `watch` first, then run `kickass` in a second terminal:
 

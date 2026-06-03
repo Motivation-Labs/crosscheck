@@ -84,7 +84,7 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
 // How the workflow was triggered. Included in workflow_complete, review_complete,
 // fix_complete, and conflict_resolve_complete so log analysis can segment outcomes
 // by entry point (e.g. kickass vs webhook vs direct run).
-export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace'
+export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace' | 'comment'
 
 export interface WorkflowCompleteInputs {
   owner: string
@@ -574,6 +574,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
+          ctx.trigger === 'kickass' ? 'kickass' : undefined,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })

@@ -1,7 +1,7 @@
 import { execSync, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
-import { createWebhookServer, type PREvent } from '../github/webhook.js'
+import { createWebhookServer, type PREvent, type IssueCommentEvent } from '../github/webhook.js'
 import {
   createGithubClient,
   getCommitMessage,
@@ -9,6 +9,8 @@ import {
   deleteOrgWebhook,
   registerRepoWebhook,
   deleteRepoWebhook,
+  patchOrgWebhookEvents,
+  patchRepoWebhookEvents,
   findOrgWebhook,
   findRepoWebhook,
   listUserRepos,
@@ -30,8 +32,9 @@ import { scanUnreviewedPRs } from '../lib/backtrace.js'
 import { initLogger, log as fileLog, logError, logUncaught } from '../lib/logger.js'
 import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
-import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
+import { loadWorkflow, DEFAULT_RECHECK_INSTRUCTIONS, type WorkflowStep } from '../lib/workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
 import {
@@ -52,6 +55,8 @@ import { dedupScopes, type Scope } from '../lib/scopes.js'
 import { acquirePRLock, releasePRLock } from '../lib/pr-lock.js'
 import { checkRemoteLock, acquireRemoteLock, releaseRemoteLock, startRemoteLockHeartbeat } from '../github/review-status.js'
 import { isCrosscheckCommitMessage } from '../lib/crosscheck-commit.js'
+
+const WEBHOOK_EVENTS = ['pull_request', 'issue_comment']
 
 function buildFallbackConfig(config: Config, fallbackVendor: 'claude' | 'codex'): Config {
   return {
@@ -192,6 +197,18 @@ export async function runWatch(opts: WatchOpts = {}) {
   }
 
   fileLog({ level: 'info', event: 'session_start', command: 'watch' })
+
+  // Fetch the authenticated user so the onComment handler can reject annotation
+  // injection from non-token accounts. If this fails, the handler is disabled
+  // entirely (fail closed) — allowing unknown authors would defeat the guard.
+  let authenticatedLogin: string | null = null
+  try {
+    const { data: me } = await createGithubClient(token).rest.users.getAuthenticated()
+    authenticatedLogin = me.login
+  } catch {
+    fileLog({ level: 'warn', event: 'authenticated_login_unavailable', message: 'issue_comment bridge disabled — could not determine token owner' })
+  }
+
   const webhookSecret = getWebhookSecret()
   const webhookPath = config.server.webhook_path
 
@@ -222,6 +239,9 @@ export async function runWatch(opts: WatchOpts = {}) {
   // PRs reviewed at least once this session — synchronize events on these run as recheck rounds
   const reviewedPRKeys = new Set<string>()
   const prRoundCounts = new Map<string, number>()
+  // PR+sha pairs completed by this watch session — used to suppress issue_comment
+  // re-entries for reviews that watch posted itself (as opposed to kickass).
+  const reviewedPRShaKeys = new Set<string>()
 
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
@@ -303,7 +323,12 @@ export async function runWatch(opts: WatchOpts = {}) {
       // Determine the correct starting step from PR comment history so watch
       // behaves correctly after a restart (reviewedPRKeys is in-memory only).
       // Fast-path: if the PR was reviewed in this session, skip the API call.
-      let isRecheckRun = reviewedPRKeys.has(prKey)
+      // Exception: comment-triggered runs must always do live detection —
+      // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
+      // annotation for a new SHA as a recheck run instead of routing to fix.
+      let isRecheckRun = params.action === 'comment'
+        ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
+        : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
       let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
@@ -325,11 +350,29 @@ export async function runWatch(opts: WatchOpts = {}) {
             isRecheckRun = nextResult.step.type !== 'review'
             round = nextResult.round
             detectedReviewComment = nextResult.reviewComment
-            // Slice allSteps to start from the detected next step so runWorkflow
-            // runs the correct operations (fix, recheck, etc.) rather than starting
-            // from review and relying solely on isRecheckRun coercion.
             const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
-            if (nextStepIdx >= 0) resolvedSteps = allSteps.slice(nextStepIdx)
+            if (nextStepIdx >= 0) {
+              let steps = allSteps.slice(nextStepIdx)
+              // Synthesize a recheck step when one isn't explicitly in workflow.yml,
+              // but only for commit delivery mode. Under pull_request/comment delivery
+              // the fix does not push to the PR head, so a recheck would evaluate the
+              // un-fixed diff and post an incorrect verdict on the original PR.
+              const deliveryMode = config.post_review.auto_fix.delivery.mode
+              if (deliveryMode === 'commit' && !steps.some(s => s.type === 'recheck')) {
+                const reviewStep = allSteps.find(s => s.type === 'review')
+                if (reviewStep) {
+                  const synthetic: WorkflowStep = {
+                    ...reviewStep, name: 'recheck', type: 'recheck', reviewer,
+                    when: undefined, instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+                  }
+                  const lastFix = steps.map(s => s.type).lastIndexOf('fix')
+                  steps = lastFix >= 0
+                    ? [...steps.slice(0, lastFix + 1), synthetic, ...steps.slice(lastFix + 1)]
+                    : [...steps, synthetic]
+                }
+              }
+              resolvedSteps = steps
+            }
           }
         } catch { /* best-effort — fall back to session-based detection */ }
       }
@@ -357,7 +400,10 @@ export async function runWatch(opts: WatchOpts = {}) {
         } catch { /* base unavailable — proceed with full review, skip cache update */ }
 
         const prev = newDiffHash ? diffHashes.get(prKey) : undefined
-        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha) {
+        // Comment-triggered runs (issue_comment bridge) must bypass the diff-hash skip:
+        // the annotation is the explicit signal to advance to fix, regardless of whether
+        // the diff changed since the last review (e.g. no-op rebase/amend).
+        if (newDiffHash && prev && prev.hash === newDiffHash && prev.sha !== params.headSha && params.action !== 'comment') {
           const prevShort = prev.sha.slice(0, 7)
           const nowShort = params.headSha.slice(0, 7)
           fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'no_diff_change', sha: params.headSha, prev_sha: prev.sha })
@@ -402,11 +448,12 @@ export async function runWatch(opts: WatchOpts = {}) {
           ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
           isRecheckRun,
           round,
-          trigger: params.action === 'backtrace' ? 'backtrace' : 'watch',
+          trigger: params.action === 'backtrace' ? 'backtrace' : params.action === 'comment' ? 'comment' : 'watch',
         })
 
         void verdict
         reviewedPRKeys.add(prKey)
+        reviewedPRShaKeys.add(key)  // key = "owner/repo#pr@sha"
         prRoundCounts.set(prKey, round)
         // Recompute the diff hash AFTER runWorkflow — workflow steps such as
         // `conflict-resolve` or `fix` followed by `recheck` can mutate the checkout,
@@ -492,6 +539,106 @@ export async function runWatch(opts: WatchOpts = {}) {
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
     fileLog,
+    async (event: IssueCommentEvent) => {
+      const owner = event.repository.owner.login
+      const repoName = event.repository.name
+      const prNumber = event.issue.number
+
+      // Human feedback in regular PR comments is always valued and never reaches
+      // this handler (webhook.ts only forwards comments that contain the hidden
+      // <!-- crosscheck: ... type=review --> automation marker). The concern is
+      // specifically annotation injection: someone deliberately embedding that
+      // marker to drive automated fix work. Guard against it by verifying the
+      // comment was posted by the account that owns the crosscheck token — the
+      // only entity that legitimately writes these automation markers.
+      // Fail closed: if we couldn't determine the token owner at startup, disable
+      // the bridge entirely rather than allowing any commenter to trigger fixes.
+      if (authenticatedLogin === null) {
+        fileLog({ level: 'warn', event: 'comment_trigger_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'authenticated_login_unavailable' })
+        return
+      }
+      if (event.comment.user.login !== authenticatedLogin) {
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'annotation_injection_blocked', author: event.comment.user.login })
+        return
+      }
+
+      // P2: the annotation embeds the SHA the review was written for. If the PR
+      // head is already past that SHA, the fix would apply to an unreviewed diff —
+      // let the synchronize event from the new commit handle it instead.
+      const commentAnnotation = parseAnnotation(event.comment.body)
+      const annotationSha = commentAnnotation?.sha  // may be short (7 chars)
+      const shaMatches = (a: string, b: string) => a.startsWith(b) || b.startsWith(a)
+
+      try {
+        const octokit = createGithubClient(token)
+        const initial = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+        let prData = initial.data
+
+        // merged_at is absent from the issue_comment webhook payload so we check
+        // PR state authoritatively here — skip closed or already-merged PRs.
+        if (prData.state !== 'open' || prData.merged) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_not_open', state: prData.state })
+          return
+        }
+
+        if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha, annotation_sha: annotationSha })
+          return
+        }
+
+        if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
+          fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
+          return
+        }
+
+        // GitHub can deliver issue_comment before ck run's finally block releases
+        // the remote lock. Retry with backoff; re-fetch the PR head on each attempt
+        // so we don't dispatch against a sha that advanced while we were waiting.
+        const RETRY_DELAYS_MS = [3_000, 10_000, 30_000]
+        for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]))
+            try {
+              const { data: fresh } = await octokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+              prData = fresh
+            } catch { /* best-effort — proceed with previous data */ }
+            // PR may have been closed or merged during the backoff window
+            if (prData.state !== 'open' || prData.merged) {
+              fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'pr_not_open', state: prData.state })
+              break
+            }
+            // PR advanced past the reviewed SHA during the wait — let synchronize handle it
+            if (annotationSha && !shaMatches(prData.head.sha, annotationSha)) {
+              fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_stale_sha', sha: prData.head.sha })
+              break
+            }
+          }
+
+          if (reviewedPRShaKeys.has(`${owner}/${repoName}#${prNumber}@${prData.head.sha}`)) {
+            fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'comment_self_trigger', sha: prData.head.sha })
+            break
+          }
+          if (await checkRemoteLock(octokit, owner, repoName, prData.head.sha).catch(() => false)) {
+            fileLog({ level: 'info', event: 'comment_trigger_deferred', repo: `${owner}/${repoName}`, pr: prNumber, reason: 'in_progress_remote', attempt })
+            continue
+          }
+          await reviewPR({
+            owner, repoName, prNumber,
+            title: prData.title,
+            body: prData.body ?? '',
+            author: prData.user?.login ?? '',
+            headSha: prData.head.sha,
+            headRef: prData.head.ref,
+            headRepo: prData.head.repo?.full_name ?? null,
+            baseRef: prData.base.ref,
+            action: 'comment',
+          })
+          break
+        }
+      } catch (err: unknown) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'comment_trigger' }, err)
+      }
+    },
   )
 
   await new Promise<void>((resolve, reject) => {
@@ -695,6 +842,10 @@ export async function runWatch(opts: WatchOpts = {}) {
     console.log()
     console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('No author filter set — all PRs in monitored orgs/repos will be reviewed.')}`)
     console.log(`     ${chalk.dim('Run')} ${chalk.cyan('crosscheck watch --reconfigure')} ${chalk.dim('to set up a deployment mode.')}`)
+    // Without an author filter on a public (or broadly accessible) repo, any commenter
+    // can post the hidden automation marker and attempt to trigger automated fix work.
+    console.log(`  ${chalk.yellow('⚠')}  ${chalk.yellow('Annotation injection risk: any commenter can post a hidden crosscheck annotation')}`)
+    console.log(`     ${chalk.yellow('to trigger the automated fix bridge. Restrict via')} ${chalk.cyan('routing.allowed_authors')} ${chalk.yellow('or keep repos private.')}`)
   }
 
   // Warn when author_routes will be silently bypassed (cross-vendor + both vendors enabled)
@@ -781,10 +932,12 @@ export async function runWatch(opts: WatchOpts = {}) {
         if ('org' in scope) {
           existing = await findOrgWebhook(scope.org, channelUrl, token)
           if (!existing) await registerOrgWebhook(scope.org, channelUrl, webhookSecret, token)
+          else await patchOrgWebhookEvents(scope.org, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
           succeededOrgs.add(scope.org)
         } else {
           existing = await findRepoWebhook(scope.owner, scope.repo, channelUrl, token)
           if (!existing) await registerRepoWebhook(scope.owner, scope.repo, channelUrl, webhookSecret, token)
+          else await patchRepoWebhookEvents(scope.owner, scope.repo, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
         }
         smeeOk++
         fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: label, url: channelUrl })
@@ -802,6 +955,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           try {
             const existing = await findRepoWebhook(owner, repo, channelUrl, token)
             if (!existing) await registerRepoWebhook(owner, repo, channelUrl, webhookSecret, token)
+            else await patchRepoWebhookEvents(owner, repo, existing, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
             smeeOk++
             fileLog({ level: 'info', event: existing ? 'webhook_active' : 'webhook_registered', scope: repoLabel, url: channelUrl, fallback_for_org: fallbackOrg })
           } catch (fallbackErr: unknown) {
@@ -935,6 +1089,13 @@ export async function runWatch(opts: WatchOpts = {}) {
           : { type: 'repo' as const, owner: scope.owner, repo: scope.repo, hookId: existingId })
         hookOk++
         fileLog({ level: 'info', event: 'webhook_active', scope: label, url: webhookUrl })
+        // Ensure the hook delivers issue_comment (may be missing on hooks created
+        // before this feature was added). Best-effort — a patch failure is non-fatal.
+        if ('org' in scope) {
+          patchOrgWebhookEvents(scope.org, existingId, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
+        } else {
+          patchRepoWebhookEvents(scope.owner, scope.repo, existingId, WEBHOOK_EVENTS, token).catch(() => {/* best-effort */})
+        }
         return
       }
 

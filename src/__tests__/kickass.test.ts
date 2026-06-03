@@ -51,12 +51,15 @@ function scan(prs: PRStatus[]): ScanResult {
 }
 
 describe('buildKickassRunArgs', () => {
-  it('targets review for PRs needing first CR', () => {
+  // No --steps in most dispatches: run.ts calls identifyNextWorkflowStep against live
+  // PR history so the correct step is determined from actual state, not the
+  // potentially-stale scan cache. Kickass kicks one step; watch takes over the rest.
+  // Exception: stale-sha re-reviews force --steps review (see below).
+
+  it('omits --steps for review actions — detect-step owns routing', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'review' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'review',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -64,7 +67,7 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches the fix leg first for commit-delivered fixes', () => {
+  it('omits --steps for commit-delivered fix actions', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
@@ -87,7 +90,7 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches fix only when fixes do not land on the PR head', () => {
+  it('omits --steps for non-commit fix actions', () => {
     const selected = pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
@@ -110,7 +113,37 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('targets only recheck when fix was applied externally', () => {
+  it('forces --steps review when review is needed for an unreviewed new HEAD sha', () => {
+    // PR has a review for an older SHA; kickass demotes action to review with
+    // explanation=no_usable_review_comment. Without --steps review, run.ts would
+    // re-detect from live history and choose the stale review's fix step, applying
+    // fixes to a diff that was never reviewed.
+    const plan = buildPreflightPlan([pr({
+      nextAction: 'fix',
+      reviewState: 'NEEDS_FIX',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+        // sha absent → hasUsableCurrentHeadReview returns false → demoted to review
+      },
+    })])
+    expect(plan[0].action).toBe('review')
+    expect(plan[0].explanation).toBe('no_usable_review_comment')
+    expect(buildKickassRunArgs(plan[0])).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'review',
+      '--expected-head-sha',
+      'abc123456789',
+      '--trigger',
+      'kickass',
+    ])
+  })
+
+  it('omits --steps for recheck actions', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'recheck' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
@@ -121,13 +154,14 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('does not append --crazy to the fix leg of a chained commit fix', () => {
+  it('uses --no-timeout instead of --crazy for fix actions in crazy round mode', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'crazy')
     expect(args).not.toContain('--steps')
+    expect(args).toContain('--no-timeout')
     expect(args).not.toContain('--crazy')
   })
 
@@ -141,13 +175,14 @@ describe('buildKickassRunArgs', () => {
     expect(args).not.toContain('--crazy')
   })
 
-  it('does not append round mode to deferred non-commit fixes', () => {
+  it('uses --no-timeout for fix actions even in PR-delivery mode with crazy', () => {
     const args = buildKickassRunArgs(pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     }), 'crazy')
     expect(args).not.toContain('--steps')
     expect(args).not.toContain('--crazy')
+    expect(args).toContain('--no-timeout')
   })
 })
 

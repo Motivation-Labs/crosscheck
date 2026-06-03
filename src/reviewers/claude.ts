@@ -38,7 +38,7 @@ export async function runClaudeReview(
   timeoutMs?: number,
   noBudgetCap?: boolean,
 ): Promise<ReviewResult> {
-  const model = resolveClaudeModel(quality)
+  const model = resolveClaudeModel(quality, vendor)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
   const focusLine = quality.focus.length > 0
     ? `Focus areas: ${quality.focus.join(', ')}.`

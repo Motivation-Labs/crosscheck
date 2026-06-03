@@ -1,4 +1,4 @@
-import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
+import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
 
 export const CLAUDE_TIER_MODELS: Record<string, string> = {
   fast: 'claude-haiku-4-5-20251001',
@@ -21,7 +21,11 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   'gpt-4o-mini': 'gpt-4o-mini',
 }
 
-export function resolveClaudeModel(quality: QualityConfig): string {
+export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig): string {
+  // An explicit vendors.claude.model wins over the tier mapping. The claude CLI
+  // accepts --model under both subscription and api-key auth (unlike Codex), so
+  // we honor it regardless of auth instead of silently dropping it.
+  if (vendor?.model) return vendor.model
   return CLAUDE_TIER_MODELS[quality.tier] ?? CLAUDE_TIER_MODELS.balanced
 }
 

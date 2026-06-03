@@ -402,17 +402,17 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 7.5 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
+**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
 
-**Step 7.7 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
+**Step 9 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
 
-**Step 8 — Connection type.** Choose how GitHub webhooks reach your local server:
+**Step 10 — Connection type.** Choose how GitHub webhooks reach your local server:
 - `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
 - `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
 
-**Step 9 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
+**Step 11 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
 
-**Step 10 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
+**Step 12 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
 
 ```
 crosscheck onboard
@@ -449,23 +449,23 @@ crosscheck onboard
   [1] review only  [2] review → fix  [3] review → fix → re-check
   Choice [2]: 3
 
-  Step 7.5 — fix → re-check rounds
+  Step 8 — fix → re-check rounds
   [1] 1 round  [2] 2 rounds  [3] 3 rounds
   Choice [1]: 1
 
-  Step 7.7 — auto conflict-resolve
+  Step 9 — auto conflict-resolve
   [1] disabled  [2] enabled
   Choice [1]: 1
 
-  Step 8 — connection type
+  Step 10 — connection type
   [1] localhost.run  [2] smee.io
   Choice [1]: 1
 
-  Step 9 — git clone protocol
+  Step 11 — git clone protocol
   [1] SSH  [2] HTTPS
   Choice [1]: 1
 
-  Step 10 — review and write config
+  Step 12 — review and write config
   deployment   personal
   connection   localhost.run
   clone        ssh

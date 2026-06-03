@@ -56,6 +56,8 @@ export interface ExecuteKickassDeps {
   onDispatchStart?: (item: PreflightItem, key: string, startedAt: number) => void
   /** Called after a successful dispatchRun — use to complete a board slot. */
   onDispatchEnd?: (item: PreflightItem, key: string, startedAt: number) => void
+  /** Called when dispatchRun throws — use to mark a board slot as failed. */
+  onDispatchFail?: (item: PreflightItem, key: string, error: unknown) => void
 }
 
 export interface KickassDeps {
@@ -298,6 +300,8 @@ export async function executeKickassPlan(
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
       log(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      const failKey = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      deps.onDispatchFail?.(item, failKey, err)
       // Classify execa errors using structured fields, not the raw message.
       // The raw message includes the full CLI invocation (e.g. "Command failed with exit
       // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
@@ -498,8 +502,22 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
     // When board is active always pipe so output routes through board.log scrollback.
     // Without board, pipe only for explicit concurrent mode; sequential streams inline.
     if (board || opts.concurrent !== undefined) {
-      const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
-      return result.all ?? ''
+      try {
+        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+        return result.all ?? ''
+      } catch (err: unknown) {
+        // Surface captured output before re-throwing so the board log includes
+        // the child's stdout/stderr (auth errors, model failures, etc.) that were
+        // previously visible via inherited stdio.
+        const e = err as Record<string, unknown>
+        const captured = typeof e.all === 'string' ? e.all.trim()
+          : typeof e.stderr === 'string' ? e.stderr.trim() : ''
+        if (captured) {
+          if (board) board.log(captured)
+          else console.error(captured)
+        }
+        throw err
+      }
     }
     await execa(invocation.command, args, { stdio: 'inherit' })
   }
@@ -536,6 +554,10 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
       onDispatchEnd: (item: PreflightItem, key: string, startedAt: number) => {
         board.updatePR(key, { phase: donePhase(item.action) as import('../lib/board.js').PRPhase })
         board.completePR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url })
+      },
+      onDispatchFail: (_item: PreflightItem, key: string, err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        board.failPR(key, msg)
       },
       onBeforeExecute: () => board.start(),
       onAfterExecute: () => board.stop(),

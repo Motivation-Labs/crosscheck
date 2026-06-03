@@ -277,9 +277,11 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
   let stepFilter = opts.steps?.split(',').map(s => s.trim().toLowerCase())
   let initialReviewComment = opts.initialReviewComment
 
-  // When running without an explicit --steps flag, traverse the PR comment
-  // history to determine which workflow step to run next — skipping steps that
-  // have already completed for the current HEAD SHA.
+  // When running without an explicit --steps flag, detect the next step from live
+  // PR comment history and run only that one step. Subsequent steps are handled by
+  // watch via the webhooks the completed step produces (issue_comment → fix,
+  // synchronize → recheck). Limiting to one step keeps each run atomic and lets
+  // watch own the full-pipeline continuation.
   if (!opts.steps) {
     try {
       const history = await fetchStepHistory(owner, repo, number, token)
@@ -289,18 +291,12 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
         return
       }
+      // Pin to exactly the detected step (type-based so synthesized steps resolve).
+      stepFilter = [nextResult.step.type]
       if (nextResult.hasExistingReview && nextResult.step.type !== 'review') {
-        // Resume from the identified step. Look up by type (not name) so synthesized
-        // steps (e.g. a recheck not present in allSteps) still route correctly.
-        // When the step isn't in allSteps at all, use [step.type] so resolveWorkflowSteps
-        // can synthesize it (e.g. synthesizeRecheckStep for the 'recheck' type).
-        const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
-        stepFilter = nextStepIdx >= 0
-          ? allSteps.slice(nextStepIdx).map(s => s.name)
-          : [nextResult.step.type]
         initialReviewComment = nextResult.reviewComment
-        console.log(chalk.dim(`  existing review found — resuming from ${nextResult.step.type} step`))
       }
+      console.log(chalk.dim(`  detected next step: ${nextResult.step.type}`))
     } catch { /* best-effort — fall through to normal review flow on API error */ }
   }
 

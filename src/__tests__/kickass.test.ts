@@ -51,12 +51,14 @@ function scan(prs: PRStatus[]): ScanResult {
 }
 
 describe('buildKickassRunArgs', () => {
-  it('targets review for PRs needing first CR', () => {
+  // No --steps in any dispatch: run.ts calls identifyNextWorkflowStep against live
+  // PR history so the correct step is determined from actual state, not the
+  // potentially-stale scan cache. Kickass kicks one step; watch takes over the rest.
+
+  it('omits --steps for review actions — detect-step owns routing', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'review' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'review',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -64,7 +66,7 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches the fix leg first for commit-delivered fixes', () => {
+  it('omits --steps for commit-delivered fix actions', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
@@ -80,8 +82,6 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(plan[0])).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'fix',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -89,7 +89,7 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('dispatches fix only when fixes do not land on the PR head', () => {
+  it('omits --steps for non-commit fix actions', () => {
     const selected = pr({
       nextAction: 'fix',
       reviewState: 'NEEDS_FIX',
@@ -105,8 +105,6 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(selected)).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'fix',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -114,12 +112,10 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('targets only recheck when fix was applied externally', () => {
+  it('omits --steps for recheck actions', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'recheck' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'recheck',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -127,13 +123,13 @@ describe('buildKickassRunArgs', () => {
     ])
   })
 
-  it('does not append --crazy to the fix leg of a chained commit fix', () => {
+  it('uses --no-timeout instead of --crazy for fix actions in crazy round mode', () => {
     const plan = buildPreflightPlan([pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'crazy')
-    expect(args).toContain('fix')
+    expect(args).toContain('--no-timeout')
     expect(args).not.toContain('--crazy')
   })
 
@@ -147,14 +143,13 @@ describe('buildKickassRunArgs', () => {
     expect(args).not.toContain('--crazy')
   })
 
-  it('does not append round mode to deferred non-commit fixes', () => {
+  it('uses --no-timeout for fix actions even in PR-delivery mode with crazy', () => {
     const args = buildKickassRunArgs(pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     }), 'crazy')
-    expect(args).toContain('fix')
-    expect(args).not.toContain('fix,recheck')
     expect(args).not.toContain('--crazy')
+    expect(args).toContain('--no-timeout')
   })
 })
 
@@ -314,8 +309,8 @@ describe('runKickassWithDeps', () => {
 
     expect(results).toEqual([{ pr: selected, status: 'executed' }])
     expect(dispatched).toEqual([
-      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789', '--no-timeout', '--trigger', 'kickass'] },
-      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--steps', 'recheck', '--expected-head-sha', 'def987654321', '--crazy', '--trigger', 'kickass'] },
+      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--expected-head-sha', 'abc123456789', '--no-timeout', '--trigger', 'kickass'] },
+      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--expected-head-sha', 'def987654321', '--crazy', '--trigger', 'kickass'] },
     ])
   })
 

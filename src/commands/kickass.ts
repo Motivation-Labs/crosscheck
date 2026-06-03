@@ -399,13 +399,9 @@ export function buildKickassRunArgs(
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
   const args = ['run', item.pr.url]
-  // Always pass an explicit --steps so run.ts skips the identifyNextWorkflowStep
-  // API call and goes directly to the intended step. Kickass has already resolved
-  // the correct action from live scan data; deferring to run.ts history detection
-  // would add a round-trip and could misroute when the scan cache is stale.
-  if (item.action === 'review') args.push('--steps', 'review')
-  else if (item.action === 'fix') args.push('--steps', 'fix')
-  else if (item.action === 'recheck') args.push('--steps', 'recheck')
+  // No --steps: run.ts calls identifyNextWorkflowStep against live PR history to
+  // determine the correct next step. This is more accurate than anything kickass
+  // could derive from the scan cache, which may be stale by dispatch time.
   args.push('--expected-head-sha', item.pr.headSha)
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')

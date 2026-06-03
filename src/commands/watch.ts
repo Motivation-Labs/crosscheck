@@ -1,7 +1,7 @@
 import { execSync, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import chalk from 'chalk'
-import { createWebhookServer, type PREvent } from '../github/webhook.js'
+import { createWebhookServer, type PREvent, type IssueCommentEvent } from '../github/webhook.js'
 import {
   createGithubClient,
   getCommitMessage,
@@ -32,6 +32,7 @@ import { isAuthorAllowed } from '../lib/filter.js'
 import { runWorkflow } from '../lib/runner.js'
 import { loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-state.js'
+import { parseAnnotation } from '../lib/annotation.js'
 import { PRBoard, fmtTime, FMT_TIME_WIDTH } from '../lib/board.js'
 import { clonePRForReview } from '../lib/clone.js'
 import {
@@ -402,7 +403,7 @@ export async function runWatch(opts: WatchOpts = {}) {
           ...(detectedReviewComment !== undefined && { initialReviewComment: detectedReviewComment }),
           isRecheckRun,
           round,
-          trigger: params.action === 'backtrace' ? 'backtrace' : 'watch',
+          trigger: params.action === 'backtrace' ? 'backtrace' : params.action === 'comment' ? 'comment' : 'watch',
         })
 
         void verdict
@@ -492,6 +493,29 @@ export async function runWatch(opts: WatchOpts = {}) {
     },
     (msg: string) => bLog(chalk.dim(fmtTime()) + '  ' + msg),
     fileLog,
+    async (event: IssueCommentEvent) => {
+      const owner = event.repository.owner.login
+      const repoName = event.repository.name
+      const prNumber = event.issue.number
+      try {
+        const { data: prData } = await createGithubClient(token).rest.pulls.get({
+          owner, repo: repoName, pull_number: prNumber,
+        })
+        await reviewPR({
+          owner, repoName, prNumber,
+          title: prData.title,
+          body: prData.body ?? '',
+          author: prData.user?.login ?? '',
+          headSha: prData.head.sha,
+          headRef: prData.head.ref,
+          headRepo: prData.head.repo?.full_name ?? null,
+          baseRef: prData.base.ref,
+          action: 'comment',
+        })
+      } catch (err: unknown) {
+        logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'comment_trigger' }, err)
+      }
+    },
   )
 
   await new Promise<void>((resolve, reject) => {

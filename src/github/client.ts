@@ -68,7 +68,7 @@ export async function registerRepoWebhook(
     body: JSON.stringify({
       name: 'web',
       active: true,
-      events: ['pull_request'],
+      events: ['pull_request', 'issue_comment'],
       config: { url: webhookUrl, content_type: 'json', secret },
     }),
   })
@@ -108,7 +108,7 @@ export async function registerOrgWebhook(
     body: JSON.stringify({
       name: 'web',
       active: true,
-      events: ['pull_request'],
+      events: ['pull_request', 'issue_comment'],
       config: { url: webhookUrl, content_type: 'json', secret },
     }),
   })

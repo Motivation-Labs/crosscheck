@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import type { Config } from '../config/schema.js'
 import { verifyWebhookSignature } from './client.js'
+import { parseAnnotation } from '../lib/annotation.js'
 
 export interface PREvent {
   action: string
@@ -20,6 +21,25 @@ export interface PREvent {
   }
 }
 
+export interface IssueCommentEvent {
+  action: string
+  issue: {
+    number: number
+    title: string
+    user: { login: string }
+    pull_request?: { merged_at: string | null }
+  }
+  comment: {
+    id: number
+    body: string
+    user: { login: string }
+  }
+  repository: {
+    name: string
+    owner: { login: string }
+  }
+}
+
 export interface WebhookFileLogEntry {
   level: 'info' | 'warn' | 'error'
   event: string
@@ -32,6 +52,7 @@ export function createWebhookServer(
   onPR: (event: PREvent) => void,
   onLog: (msg: string) => void,
   onFileLog?: (entry: WebhookFileLogEntry) => void,
+  onComment?: (event: IssueCommentEvent) => void,
 ) {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const { pathname } = new URL(req.url ?? '/', `http://localhost`)
@@ -59,6 +80,31 @@ export function createWebhookServer(
     }
 
     const event = req.headers['x-github-event'] as string
+
+    if (event === 'issue_comment' && onComment) {
+      let body: IssueCommentEvent
+      try {
+        body = JSON.parse(rawBody) as IssueCommentEvent
+      } catch {
+        onFileLog?.({ level: 'error', event: 'webhook_parse_error', ip: req.socket.remoteAddress })
+        res.writeHead(400).end()
+        return
+      }
+      // Only act on newly-created comments on open PRs whose body contains a
+      // crosscheck review annotation — this is how kickass-posted reviews signal
+      // watch to advance to the fix step without needing a new commit.
+      const annotation = body.action === 'created' && body.issue.pull_request
+        ? parseAnnotation(body.comment.body)
+        : null
+      if (annotation?.type === 'review' && !body.issue.pull_request?.merged_at) {
+        res.writeHead(200).end('ok')
+        setImmediate(() => onComment(body))
+      } else {
+        res.writeHead(200).end('ok')
+      }
+      return
+    }
+
     if (event !== 'pull_request') {
       res.writeHead(200).end('ok')
       return

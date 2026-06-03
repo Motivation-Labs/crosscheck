@@ -84,7 +84,7 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
 // How the workflow was triggered. Included in workflow_complete, review_complete,
 // fix_complete, and conflict_resolve_complete so log analysis can segment outcomes
 // by entry point (e.g. kickass vs webhook vs direct run).
-export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace'
+export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace' | 'comment'
 
 export interface WorkflowCompleteInputs {
   owner: string

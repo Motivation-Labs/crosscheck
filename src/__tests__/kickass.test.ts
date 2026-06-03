@@ -51,9 +51,10 @@ function scan(prs: PRStatus[]): ScanResult {
 }
 
 describe('buildKickassRunArgs', () => {
-  // No --steps in any dispatch: run.ts calls identifyNextWorkflowStep against live
+  // No --steps in most dispatches: run.ts calls identifyNextWorkflowStep against live
   // PR history so the correct step is determined from actual state, not the
   // potentially-stale scan cache. Kickass kicks one step; watch takes over the rest.
+  // Exception: stale-sha re-reviews force --steps review (see below).
 
   it('omits --steps for review actions — detect-step owns routing', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'review' }))).toEqual([
@@ -105,6 +106,36 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(selected)).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
+      '--expected-head-sha',
+      'abc123456789',
+      '--trigger',
+      'kickass',
+    ])
+  })
+
+  it('forces --steps review when review is needed for an unreviewed new HEAD sha', () => {
+    // PR has a review for an older SHA; kickass demotes action to review with
+    // explanation=no_usable_review_comment. Without --steps review, run.ts would
+    // re-detect from live history and choose the stale review's fix step, applying
+    // fixes to a diff that was never reviewed.
+    const plan = buildPreflightPlan([pr({
+      nextAction: 'fix',
+      reviewState: 'NEEDS_FIX',
+      latestAnnotation: {
+        origin: 'claude',
+        reviewer: 'codex',
+        verdict: 'NEEDS_WORK',
+        type: 'review',
+        // sha absent → hasUsableCurrentHeadReview returns false → demoted to review
+      },
+    })])
+    expect(plan[0].action).toBe('review')
+    expect(plan[0].explanation).toBe('no_usable_review_comment')
+    expect(buildKickassRunArgs(plan[0])).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--steps',
+      'review',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',

@@ -406,9 +406,15 @@ export function buildKickassRunArgs(
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
   const args = ['run', item.pr.url]
-  // No --steps: run.ts calls identifyNextWorkflowStep against live PR history to
-  // determine the correct next step. This is more accurate than anything kickass
-  // could derive from the scan cache, which may be stale by dispatch time.
+  // No --steps for normal review/recheck/fix actions: run.ts calls
+  // identifyNextWorkflowStep against live PR history to determine the correct
+  // next step. Exception: when kickass demoted a fix action to review because the
+  // latest annotation covers an older SHA (no_usable_review_comment), we must
+  // force --steps review so run.ts doesn't re-detect from live history and choose
+  // the stale review's fix step, applying fixes to the unreviewed new diff.
+  if (item.action === 'review' && item.explanation === 'no_usable_review_comment') {
+    args.push('--steps', 'review')
+  }
   args.push('--expected-head-sha', item.pr.headSha)
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')

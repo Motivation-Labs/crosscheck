@@ -336,9 +336,12 @@ export async function runWatch(opts: WatchOpts = {}) {
             const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
             if (nextStepIdx >= 0) {
               let steps = allSteps.slice(nextStepIdx)
-              // Synthesize a recheck step when one isn't explicitly in workflow.yml —
-              // fix must always be followed by recheck so the PR verdict stays current.
-              if (!steps.some(s => s.type === 'recheck')) {
+              // Synthesize a recheck step when one isn't explicitly in workflow.yml,
+              // but only for commit delivery mode. Under pull_request/comment delivery
+              // the fix does not push to the PR head, so a recheck would evaluate the
+              // un-fixed diff and post an incorrect verdict on the original PR.
+              const deliveryMode = config.post_review.auto_fix.delivery.mode
+              if (deliveryMode === 'commit' && !steps.some(s => s.type === 'recheck')) {
                 const reviewStep = allSteps.find(s => s.type === 'review')
                 if (reviewStep) {
                   const synthetic: WorkflowStep = {

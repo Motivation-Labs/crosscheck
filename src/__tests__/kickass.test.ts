@@ -176,7 +176,7 @@ describe('runKickassWithDeps', () => {
     expect(logs.join('\n')).toContain('Rerun with --force to refresh the queue.')
   })
 
-  it('warns that --force can refresh the queue when a fresh scan finds no PRs', async () => {
+  it('shows no --force hint when a fresh scan finds no PRs', async () => {
     const logs: string[] = []
     const logSpy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
       logs.push(String(message ?? ''))
@@ -196,8 +196,7 @@ describe('runKickassWithDeps', () => {
     }
 
     expect(logs.join('\n')).toContain('No actionable PRs found.')
-    expect(logs.join('\n')).toContain('A stale empty scan cache can hide newly opened or updated PRs.')
-    expect(logs.join('\n')).toContain('Rerun with --force to refresh the queue.')
+    expect(logs.join('\n')).not.toContain('--force')
   })
 
   it('dry-run scans, picks PRs, and prints preflight without mutating', async () => {

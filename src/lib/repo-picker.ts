@@ -239,7 +239,7 @@ export async function promptRepoPicker(
     let filterText = ''
     let filterMode = false
     let filtered: number[] = filterIndices(items, '')
-    let cursorPos = 0       // index into `filtered`
+    let cursorPos = opts.selectAllLabel && items.length > 0 ? 1 : 0       // index into `filtered`
     let windowStart = 0     // index into `filtered`
     let lastLineCount = 0
 

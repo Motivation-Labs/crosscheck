@@ -6,7 +6,7 @@
   <img src="./assets/logo.png" alt="crosscheck" width="160" />
 </p>
 
-<p align="center"><em>A HumanBased AI project, built with crosscheck.</em></p>
+<p align="center"><em>A Humanbased project, built with crosscheck.</em></p>
 
 # crosscheck
 
@@ -20,7 +20,7 @@ AI coding agents are fast, but they can still ship regressions, half-finished fi
 
 Define the workflow in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
 
-Built by [HumanBased AI](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
+Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
 
 ## Why crosscheck?
 
@@ -351,4 +351,4 @@ Issues and PRs welcome at [github.com/humanbased-ai/crosscheck](https://github.c
 
 ## License
 
-[MIT](./LICENSE) — Copyright (c) 2025–2026 HumanBased AI.
+[MIT](./LICENSE) — Copyright (c) 2025–2026 Humanbased PTE LTD.

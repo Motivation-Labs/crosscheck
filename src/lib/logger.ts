@@ -12,7 +12,9 @@ export interface LogEntry {
 export type ErrorCategory =
   | 'auth'        // bad credentials, token missing, not logged in
   | 'permission'  // insufficient scope, forbidden
-  | 'rate_limit'  // GitHub API rate limit
+  | 'rate_limit'  // 429 — GitHub or model API rate limit
+  | 'overloaded'  // 529 — upstream model API temporarily overloaded
+  | 'budget'      // per-review budget cap reached (claude --max-budget-usd)
   | 'timeout'     // subprocess or network timeout
   | 'network'     // connection refused, DNS failure
   | 'subprocess'  // CLI exited non-zero
@@ -77,9 +79,15 @@ export function isExtendedLoggingEnabled(): boolean {
 
 export function classifyError(message: string): ErrorCategory {
   const m = message.toLowerCase()
+  // Specific, transient model-API conditions are matched BEFORE the broad auth
+  // check below. Their error bodies routinely contain generic words like "token"
+  // (token usage, max_tokens) that the auth match would otherwise swallow, which
+  // mislabeled retryable 429/529/budget failures as `auth` and derailed triage (#191).
+  if (/rate limit|secondary rate|429/.test(m)) return 'rate_limit'
+  if (/529|overloaded/.test(m)) return 'overloaded'
+  if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/.test(m)) return 'budget'
   if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'
-  if (/rate limit|secondary rate|429/.test(m)) return 'rate_limit'
   // Network check must precede timeout: subprocess stderr containing 'fetch failed'
   // would otherwise be shadowed by '--no-timeout' in the CLI command string.
   if (/fetch failed|econnrefused|enotfound|network error|socket hang|socket timeout/.test(m)) return 'network'

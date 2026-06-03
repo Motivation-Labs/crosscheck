@@ -80,8 +80,6 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(plan[0])).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'fix',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -105,8 +103,6 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(selected)).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'fix',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -118,8 +114,6 @@ describe('buildKickassRunArgs', () => {
     expect(buildKickassRunArgs(pr({ nextAction: 'recheck' }))).toEqual([
       'run',
       'https://github.com/acme/web/pull/7',
-      '--steps',
-      'recheck',
       '--expected-head-sha',
       'abc123456789',
       '--trigger',
@@ -133,7 +127,7 @@ describe('buildKickassRunArgs', () => {
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
     const args = buildKickassRunArgs(plan[0], 'crazy')
-    expect(args).toContain('fix')
+    expect(args).not.toContain('--steps')
     expect(args).not.toContain('--crazy')
   })
 
@@ -152,13 +146,59 @@ describe('buildKickassRunArgs', () => {
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
     }), 'crazy')
-    expect(args).toContain('fix')
-    expect(args).not.toContain('fix,recheck')
+    expect(args).not.toContain('--steps')
     expect(args).not.toContain('--crazy')
   })
 })
 
 describe('runKickassWithDeps', () => {
+  it('warns to use --force when a cached scan finds no PRs', async () => {
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      logs.push(String(message ?? ''))
+    })
+    const deps: KickassDeps = {
+      loadScanResult: async () => ({ ...scan([]), cached: true }),
+      pickPRs: async () => [],
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    try {
+      await runKickassWithDeps({ staleAfter: '1m' }, deps)
+    } finally {
+      logSpy.mockRestore()
+    }
+
+    expect(logs.join('\n')).toContain('No actionable PRs found.')
+    expect(logs.join('\n')).toContain('This result came from the scan cache.')
+    expect(logs.join('\n')).toContain('Rerun with --force to refresh the queue.')
+  })
+
+  it('shows no --force hint when a fresh scan finds no PRs', async () => {
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((message?: unknown) => {
+      logs.push(String(message ?? ''))
+    })
+    const deps: KickassDeps = {
+      loadScanResult: async () => scan([]),
+      pickPRs: async () => [],
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    try {
+      await runKickassWithDeps({ staleAfter: '1m' }, deps)
+    } finally {
+      logSpy.mockRestore()
+    }
+
+    expect(logs.join('\n')).toContain('No actionable PRs found.')
+    expect(logs.join('\n')).not.toContain('--force')
+  })
+
   it('dry-run scans, picks PRs, and prints preflight without mutating', async () => {
     const selected = pr({
       latestAnnotation: {
@@ -314,8 +354,8 @@ describe('runKickassWithDeps', () => {
 
     expect(results).toEqual([{ pr: selected, status: 'executed' }])
     expect(dispatched).toEqual([
-      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--steps', 'fix', '--expected-head-sha', 'abc123456789', '--no-timeout', '--trigger', 'kickass'] },
-      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--steps', 'recheck', '--expected-head-sha', 'def987654321', '--crazy', '--trigger', 'kickass'] },
+      { action: 'fix', headSha: 'abc123456789', args: ['run', selected.url, '--expected-head-sha', 'abc123456789', '--no-timeout', '--trigger', 'kickass'] },
+      { action: 'recheck', headSha: 'def987654321', args: ['run', selected.url, '--expected-head-sha', 'def987654321', '--crazy', '--trigger', 'kickass'] },
     ])
   })
 

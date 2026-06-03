@@ -17,6 +17,13 @@ describe('classifyError — transient errors must not be mislabeled as auth', ()
     expect(classifyError('error_max_budget_usd: Reached maximum budget ($2)')).toBe('budget')
   })
 
+  it('does not match 429/529 digits embedded in durations or counts', () => {
+    // Without word boundaries, "5290ms" matched /529/ and a timeout read as `overloaded`.
+    expect(classifyError('Request timed out after 5290ms')).toBe('timeout')
+    expect(classifyError('operation timed out after 4290ms')).toBe('timeout')
+    expect(classifyError('processed 1529 records then exited with code 1')).toBe('subprocess')
+  })
+
   it('still classifies genuine credential failures as auth', () => {
     expect(classifyError('Bad credentials (401): GITHUB_TOKEN is invalid')).toBe('auth')
     expect(classifyError('You are not logged in')).toBe('auth')

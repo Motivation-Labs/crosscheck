@@ -83,8 +83,10 @@ export function classifyError(message: string): ErrorCategory {
   // check below. Their error bodies routinely contain generic words like "token"
   // (token usage, max_tokens) that the auth match would otherwise swallow, which
   // mislabeled retryable 429/529/budget failures as `auth` and derailed triage (#191).
-  if (/rate limit|secondary rate|429/.test(m)) return 'rate_limit'
-  if (/529|overloaded/.test(m)) return 'overloaded'
+  // Word-boundary the numeric codes so they don't match digits embedded in
+  // durations/counts/ports (e.g. "timed out after 5290ms" must not read as 529).
+  if (/rate limit|secondary rate|\b429\b/.test(m)) return 'rate_limit'
+  if (/\b529\b|overloaded/.test(m)) return 'overloaded'
   if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/.test(m)) return 'budget'
   if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'

@@ -13,6 +13,8 @@ import type { ErrorCategory } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
+import { PRBoard } from '../lib/board.js'
+import { loadWorkflow } from '../lib/workflow.js'
 
 export interface KickassOpts {
   force?: boolean
@@ -47,9 +49,15 @@ export interface KickassExecutionResult {
 
 export interface ExecuteKickassDeps {
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
-  // Returns buffered output string in concurrent mode (caller prints it);
-  // returns void in sequential mode (output streams inline via stdio inherit).
   dispatchRun: (item: PreflightItem) => Promise<string | void>
+  /** Route status messages through a custom sink (e.g. PRBoard scrollback). Defaults to console.log. */
+  log?: (msg: string) => void
+  /** Called just before dispatchRun — use to add a board slot. */
+  onDispatchStart?: (item: PreflightItem, key: string, startedAt: number) => void
+  /** Called after a successful dispatchRun — use to complete a board slot. */
+  onDispatchEnd?: (item: PreflightItem, key: string, startedAt: number) => void
+  /** Called when dispatchRun throws — use to mark a board slot as failed. */
+  onDispatchFail?: (item: PreflightItem, key: string, error: unknown) => void
 }
 
 export interface KickassDeps {
@@ -58,11 +66,17 @@ export interface KickassDeps {
   confirm: (message: string) => Promise<boolean>
   getFixDeliveryMode?: () => FixDeliveryMode | Promise<FixDeliveryMode>
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
+  onBeforeExecute?: () => void
+  onAfterExecute?: () => void
   dispatchRun: (item: PreflightItem) => Promise<string | void>
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
-  await runKickassWithDeps(opts, defaultKickassDeps(opts))
+  const config = loadConfig()
+  const workflow = loadWorkflow(process.cwd())
+  const board = new PRBoard()
+  board.setConfig(config, workflow)
+  await runKickassWithDeps(opts, defaultKickassDeps(opts, board))
 }
 
 export async function runKickassWithDeps(
@@ -144,7 +158,9 @@ export async function runKickassWithDeps(
     if (resolvedConcurrency > 1) {
       console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel (${resolvedStagger}ms stagger)`))
     }
+    deps.onBeforeExecute?.()
     const results = await executeKickassPlan(plan, deps, resolvedConcurrency, resolvedStagger)
+    deps.onAfterExecute?.()
     printExecutionSummary(results)
     if (results.some(result => result.status === 'failed')) {
       process.exitCode = 2
@@ -218,10 +234,10 @@ export function buildPreflightPlan(
   })
 }
 
-function printCapturedOutput(label: string, output: string): void {
+function printCapturedOutput(label: string, output: string, log = console.log): void {
   const lines = output.trimEnd().split('\n')
-  console.log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
-  for (const line of lines) console.log(`  ${line}`)
+  log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
+  for (const line of lines) log(`  ${line}`)
 }
 
 function printNoActionablePRsWarning(fromCache: boolean): void {
@@ -239,9 +255,11 @@ export async function executeKickassPlan(
 ): Promise<KickassExecutionResult[]> {
   const results: KickassExecutionResult[] = new Array(plan.length)
 
+  const log = deps.log ?? console.log
+
   const executeItem = async (item: PreflightItem, index: number, attempt = 1): Promise<void> => {
     if (item.action === 'skip') {
-      console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
+      log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
       results[index] = { pr: item.pr, status: 'skipped', reason: item.skipReason }
       return
     }
@@ -249,31 +267,41 @@ export async function executeKickassPlan(
     try {
       const currentHeadSha = await deps.getCurrentHeadSha(item)
       if (currentHeadSha !== item.pr.headSha) {
-        console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
+        log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
         results[index] = { pr: item.pr, status: 'skipped', reason: 'stale_signature' }
         return
       }
 
+      const key = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      const startedAt = Date.now()
       const attemptLabel = attempt > 1 ? ` (retry ${attempt - 1})` : ''
-      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
+      log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
+      deps.onDispatchStart?.(item, key, startedAt)
       const output = await deps.dispatchRun(item)
-      if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output)
+      deps.onDispatchEnd?.(item, key, startedAt)
+      if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output, log)
 
       if (item.action === 'fix' && item.chainRecheck === true) {
         const fixedHeadSha = await deps.getCurrentHeadSha(item)
         if (fixedHeadSha !== item.pr.headSha) {
           const recheckItem = buildPostFixRecheckItem(item, fixedHeadSha)
-          console.log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
+          const recheckKey = `${recheckItem.pr.owner}/${recheckItem.pr.repo}#${recheckItem.pr.number}@${recheckItem.pr.headSha}`
+          const recheckStart = Date.now()
+          log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
+          deps.onDispatchStart?.(recheckItem, recheckKey, recheckStart)
           const recheckOutput = await deps.dispatchRun(recheckItem)
-          if (typeof recheckOutput === 'string' && recheckOutput) printCapturedOutput(formatPRSignature(recheckItem.pr), recheckOutput)
+          deps.onDispatchEnd?.(recheckItem, recheckKey, recheckStart)
+          if (typeof recheckOutput === 'string' && recheckOutput) printCapturedOutput(formatPRSignature(recheckItem.pr), recheckOutput, log)
         } else {
-          console.log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
+          log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
         }
       }
       results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
-      console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      log(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      const failKey = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      deps.onDispatchFail?.(item, failKey, err)
       // Classify execa errors using structured fields, not the raw message.
       // The raw message includes the full CLI invocation (e.g. "Command failed with exit
       // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
@@ -333,7 +361,7 @@ export async function executeKickassPlan(
 
     const delaySec = delayMs / 1000
     const delayLabel = delaySec >= 60 ? `${delaySec / 60}m` : `${delaySec}s`
-    console.log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
+    log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
     await new Promise(resolve => setTimeout(resolve, delayMs))
     for (const { i } of retryItems) {
       const priorResult = results[i]
@@ -461,15 +489,46 @@ export function resolveCliInvocation(options: ResolveCliInvocationOptions = {}):
   throw new Error('Cannot resolve crosscheck CLI entrypoint. Run npm run build before kickass, or run from a source checkout with dev dependencies installed.')
 }
 
-function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
+function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDeps {
   let cli: CliInvocation | undefined
   const getCli = (): CliInvocation => {
     cli ??= resolveCliInvocation()
     return cli
   }
-  // opts.concurrent = 0 means "one per PR" (fully parallel); undefined means sequential.
-  // Any explicit --concurrent value uses buffered stdio; sequential streams inline.
-  const isParallel = opts.concurrent !== undefined
+
+  const dispatchRun = async (item: PreflightItem): Promise<string | void> => {
+    const invocation = getCli()
+    const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)]
+    // When board is active always pipe so output routes through board.log scrollback.
+    // Without board, pipe only for explicit concurrent mode; sequential streams inline.
+    if (board || opts.concurrent !== undefined) {
+      try {
+        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+        return result.all ?? ''
+      } catch (err: unknown) {
+        // Surface captured output before re-throwing so the board log includes
+        // the child's stdout/stderr (auth errors, model failures, etc.) that were
+        // previously visible via inherited stdio.
+        const e = err as Record<string, unknown>
+        const captured = typeof e.all === 'string' ? e.all.trim()
+          : typeof e.stderr === 'string' ? e.stderr.trim() : ''
+        if (captured) {
+          if (board) board.log(captured)
+          else console.error(captured)
+        }
+        throw err
+      }
+    }
+    await execa(invocation.command, args, { stdio: 'inherit' })
+  }
+
+  const actionPhase = (action: string) =>
+    action === 'fix' ? 'fixing' : action === 'recheck' ? 'rechecking' : 'reviewing'
+  const actionLabel = (action: string) =>
+    action === 'fix' ? 'applying fix...' : action === 'recheck' ? 'rechecking...' : 'reviewing...'
+  const donePhase = (action: string) =>
+    action === 'fix' ? 'fixed' : action === 'recheck' ? 'rechecked' : 'reviewed'
+
   return {
     loadScanResult,
     pickPRs,
@@ -485,15 +544,24 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
       })
       return data.head.sha
     },
-    dispatchRun: async (item) => {
-      const invocation = getCli()
-      const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)]
-      if (isParallel) {
-        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
-        return result.all ?? ''
-      }
-      await execa(invocation.command, args, { stdio: 'inherit' })
-    },
+    dispatchRun,
+    ...(board && {
+      log: (msg: string) => board.log(msg),
+      onDispatchStart: (item: PreflightItem, key: string, _startedAt: number) => {
+        board.addPR(key, item.pr.number, `${item.pr.owner}/${item.pr.repo}`, item.pr.headRef)
+        board.updatePR(key, { phase: actionPhase(item.action) as import('../lib/board.js').PRPhase, label: actionLabel(item.action) })
+      },
+      onDispatchEnd: (item: PreflightItem, key: string, startedAt: number) => {
+        board.updatePR(key, { phase: donePhase(item.action) as import('../lib/board.js').PRPhase })
+        board.completePR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url })
+      },
+      onDispatchFail: (_item: PreflightItem, key: string, err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        board.failPR(key, msg)
+      },
+      onBeforeExecute: () => board.start(),
+      onAfterExecute: () => board.stop(),
+    }),
   }
 }
 

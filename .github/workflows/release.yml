@@ -122,7 +122,7 @@ jobs:
       - name: Publish to npm @latest
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+          if npm view "@humanbased/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
             echo "Version ${VERSION} already on npm — skipping publish."
           else
             npm publish --access public
@@ -152,7 +152,7 @@ jobs:
           body: |
             crosscheck ${{ needs.compute.outputs.new_tag }} has been published to npm as @latest.
 
-            Install: npm install -g @motivation-labs/crosscheck@${{ needs.compute.outputs.new_tag }}
+            Install: npm install -g @humanbased/crosscheck@${{ needs.compute.outputs.new_tag }}
 
             GitHub Release: https://github.com/${{ github.repository }}/releases/tag/${{ needs.compute.outputs.new_tag }}
 

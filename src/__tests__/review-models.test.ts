@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { modelDisplayName, resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
-import type { CodexVendorConfig, QualityConfig } from '../config/schema.js'
+import type { CodexVendorConfig, QualityConfig, VendorConfig } from '../config/schema.js'
 
 const quality = (tier: QualityConfig['tier']): QualityConfig => ({
   tier,
@@ -16,11 +16,31 @@ const codexVendor = (auth: CodexVendorConfig['auth'], model: string | null = nul
   timeout_sec: null,
 })
 
+const claudeVendor = (model: string | null = null, auth: VendorConfig['auth'] = 'subscription'): VendorConfig => ({
+  enabled: true,
+  auth,
+  model,
+  effort: 'medium',
+  timeout_sec: null,
+})
+
 describe('review model resolution', () => {
   it('resolves Claude models by tier', () => {
     expect(resolveClaudeModel(quality('fast'))).toBe('claude-haiku-4-5-20251001')
     expect(resolveClaudeModel(quality('balanced'))).toBe('claude-sonnet-4-6')
     expect(resolveClaudeModel(quality('thorough'))).toBe('claude-opus-4-7')
+  })
+
+  it('honors an explicit vendors.claude.model over the tier mapping', () => {
+    // Regression for #176: vendors.claude.model was silently ignored.
+    expect(resolveClaudeModel(quality('balanced'), claudeVendor('opus'))).toBe('opus')
+    expect(resolveClaudeModel(quality('fast'), claudeVendor('claude-opus-4-7'))).toBe('claude-opus-4-7')
+    // Honored under both auth modes (claude CLI accepts --model for subscription too).
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor('sonnet', 'api-key'))).toBe('sonnet')
+  })
+
+  it('falls back to the tier mapping when vendors.claude.model is unset', () => {
+    expect(resolveClaudeModel(quality('thorough'), claudeVendor(null))).toBe('claude-opus-4-7')
   })
 
   it('resolves Codex API-key models by tier and configured override', () => {

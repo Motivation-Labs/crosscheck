@@ -28,41 +28,41 @@ describe('dedupScopes', () => {
 
   it('matches org and owner names case-insensitively while preserving display values', () => {
     const input: Scope[] = [
-      { org: 'motivation-labs' },
-      { owner: 'Motivation-Labs', repo: 'crosscheck' },
+      { org: 'humanbased-ai' },
+      { owner: 'humanbased-ai', repo: 'crosscheck' },
     ]
     const { scopes, dropped, fallbackRepos } = dedupScopes(input)
-    expect(scopes).toEqual([{ org: 'motivation-labs' }])
+    expect(scopes).toEqual([{ org: 'humanbased-ai' }])
     expect([...dropped.entries()]).toEqual([
-      ['motivation-labs', ['crosscheck']],
+      ['humanbased-ai', ['crosscheck']],
     ])
-    expect(fallbackRepos.get('motivation-labs')).toEqual([
-      { owner: 'Motivation-Labs', repo: 'crosscheck' },
+    expect(fallbackRepos.get('humanbased-ai')).toEqual([
+      { owner: 'humanbased-ai', repo: 'crosscheck' },
     ])
   })
 
   it('preserves order: orgs first, then surviving repos in original order', () => {
     const input: Scope[] = [
-      { org: 'Motivation-Labs' },
+      { org: 'humanbased-ai' },
       { owner: 'beingzy', repo: 'a' },
-      { owner: 'Motivation-Labs', repo: 'monorepo' },
+      { owner: 'humanbased-ai', repo: 'monorepo' },
       { owner: 'beingzy', repo: 'b' },
       { org: 'codatta' },
       { owner: 'codatta', repo: 'symphony' },
     ]
     const { scopes, dropped, fallbackRepos } = dedupScopes(input)
     expect(scopes).toEqual([
-      { org: 'Motivation-Labs' },
+      { org: 'humanbased-ai' },
       { owner: 'beingzy', repo: 'a' },
       { owner: 'beingzy', repo: 'b' },
       { org: 'codatta' },
     ])
     expect([...dropped.entries()]).toEqual([
-      ['Motivation-Labs', ['monorepo']],
+      ['humanbased-ai', ['monorepo']],
       ['codatta', ['symphony']],
     ])
     expect([...fallbackRepos.entries()]).toEqual([
-      ['Motivation-Labs', [{ owner: 'Motivation-Labs', repo: 'monorepo' }]],
+      ['humanbased-ai', [{ owner: 'humanbased-ai', repo: 'monorepo' }]],
       ['codatta', [{ owner: 'codatta', repo: 'symphony' }]],
     ])
   })

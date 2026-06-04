@@ -631,7 +631,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      const claudeFixModel = resolveClaudeModel(config.quality)
+      const claudeFixModel = resolveClaudeModel(config.quality, config.vendors.claude)
       const codexFixModel = resolveCodexModel(config.quality, config.vendors.codex)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
@@ -897,7 +897,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       const vendor = resolveReviewer(step.reviewer, origin, config, ctx.smartSwitchFallback)
       if (!vendor) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('no_vendor'); continue }
       if (vendor === 'codex') { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('codex_conflict_resolve_unsupported'); continue }
-      const conflictResolveModel = resolveClaudeModel(config.quality)
+      const conflictResolveModel = resolveClaudeModel(config.quality, config.vendors.claude)
 
       const isFork = pr.head.repo?.full_name !== pr.base.repo.full_name
       if (isFork) { try { execSync('git merge --abort', { cwd: tmpDir }) } catch { /* ignore */ }; skipConflictResolve('fork_pr'); continue }

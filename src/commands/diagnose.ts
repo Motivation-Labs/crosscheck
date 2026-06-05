@@ -6,7 +6,7 @@ import { INDICATORS } from '../lib/languages.js'
 
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 
-type ErrorPattern = 'command_not_found' | 'base_branch_missing' | 'timeout' | 'auth_failure' | 'other'
+type ErrorPattern = 'command_not_found' | 'base_branch_missing' | 'rate_limit' | 'overloaded' | 'budget' | 'timeout' | 'auth_failure' | 'other'
 
 interface ErrorEntry {
   pattern: ErrorPattern
@@ -20,6 +20,7 @@ interface ReviewerPerf {
   attempts: number
   successes: number
   failure_rate: number
+  by_step_type?: Record<string, { attempts: number; successes: number }>
 }
 
 interface Suggestion {
@@ -95,9 +96,16 @@ export function classifyError(message: string): { pattern: ErrorPattern; command
   const branchMatch = message.match(/fatal: no such branch:?\s*'?([^\s'"]+)'?/i)
   if (branchMatch) return { pattern: 'base_branch_missing', branch: branchMatch[1] }
 
+  // Transient model-API conditions must be checked before the broad auth check so that a
+  // 429/529/budget body that also mentions credentials isn't misclassified as auth_failure.
+  // Word-boundary the numeric codes so they don't match embedded digits (e.g. "timed out after 5290ms").
+  if (/rate limit|secondary rate|\b429\b/i.test(message)) return { pattern: 'rate_limit' }
+  if (/\b529\b|overloaded/i.test(message)) return { pattern: 'overloaded' }
+  if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/i.test(message)) return { pattern: 'budget' }
+
   if (/timed? ?out|etimedout/i.test(message)) return { pattern: 'timeout' }
 
-  if (/bad credentials|401|unauthorized/i.test(message)) return { pattern: 'auth_failure' }
+  if (/bad credentials|401|unauthorized|auth failure|authentication failed/i.test(message)) return { pattern: 'auth_failure' }
 
   return { pattern: 'other' }
 }
@@ -148,6 +156,22 @@ function buildSuggestions(errors: ErrorEntry[], languages: string[]): Suggestion
         reason: `review timed out ×${e.count} — consider lowering quality.tier to "fast" or "balanced"`,
       })
     }
+
+    if ((e.pattern === 'rate_limit' || e.pattern === 'overloaded') && e.count >= 2 && !seen.has('transient_capacity')) {
+      seen.add('transient_capacity')
+      suggestions.push({
+        type: 'investigate',
+        reason: `transient vendor-capacity errors (${e.pattern}) ×${e.count} — add retry/backoff or stagger concurrent reviews`,
+      })
+    }
+
+    if (e.pattern === 'budget' && !seen.has('budget')) {
+      seen.add('budget')
+      suggestions.push({
+        type: 'config_change',
+        reason: `per-review budget exhausted ×${e.count} — raise the budget cap or lower quality.tier`,
+      })
+    }
   }
 
   return suggestions
@@ -175,7 +199,7 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
   let verdictParseFailures = 0
   const reposSeen = new Set<string>()
   const languagesSeen = new Set<string>()   // from review_started log events
-  const reviewerStats = new Map<string, { attempts: number; successes: number }>()
+  const reviewerStats = new Map<string, { attempts: number; successes: number; byStepType: Map<string, { attempts: number; successes: number }> }>()
 
   for (const e of allEntries) {
     if (e.repo) reposSeen.add(e.repo)
@@ -184,8 +208,12 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
       const key = `${e.repo}#${e.pr}`
       started.set(key, e)
       const r = e.reviewer ?? 'unknown'
-      if (!reviewerStats.has(r)) reviewerStats.set(r, { attempts: 0, successes: 0 })
-      reviewerStats.get(r)!.attempts++
+      if (!reviewerStats.has(r)) reviewerStats.set(r, { attempts: 0, successes: 0, byStepType: new Map() })
+      const stats = reviewerStats.get(r)!
+      stats.attempts++
+      const stepType = (e['step_type'] as string | undefined) ?? 'other'
+      if (!stats.byStepType.has(stepType)) stats.byStepType.set(stepType, { attempts: 0, successes: 0 })
+      stats.byStepType.get(stepType)!.attempts++
       // Collect languages detected at review time
       if (Array.isArray(e['languages'])) {
         for (const lang of e['languages'] as string[]) languagesSeen.add(lang)
@@ -197,7 +225,12 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
       completed.add(key)
       const r = e.reviewer ?? 'unknown'
       const stats = reviewerStats.get(r)
-      if (stats) stats.successes++
+      if (stats) {
+        stats.successes++
+        const stepType = (started.get(key)?.['step_type'] as string | undefined) ?? 'other'
+        const stEntry = stats.byStepType.get(stepType)
+        if (stEntry) stEntry.successes++
+      }
       if (e.verdict) {
         const v = e.verdict as keyof typeof verdicts
         if (v in verdicts) verdicts[v]++
@@ -250,10 +283,15 @@ export function buildDiagnoseReport(since?: string, logDir?: string): DiagnoseRe
 
   const reviewer_performance: Record<string, ReviewerPerf> = {}
   for (const [name, stats] of reviewerStats.entries()) {
+    const by_step_type: Record<string, { attempts: number; successes: number }> = {}
+    for (const [st, stStats] of stats.byStepType.entries()) {
+      by_step_type[st] = { attempts: stStats.attempts, successes: stStats.successes }
+    }
     reviewer_performance[name] = {
       attempts: stats.attempts,
       successes: stats.successes,
       failure_rate: stats.attempts > 0 ? (stats.attempts - stats.successes) / stats.attempts : 0,
+      ...(stats.byStepType.size > 1 ? { by_step_type } : {}),
     }
   }
 
@@ -302,6 +340,13 @@ function printReport(report: DiagnoseReport): void {
       const rate = perf.attempts > 0 ? Math.round((perf.successes / perf.attempts) * 100) : 0
       const indicator = rate >= 80 ? chalk.green(`${rate}%`) : rate >= 50 ? chalk.yellow(`${rate}%`) : chalk.red(`${rate}%`)
       console.log(`    ${name.padEnd(8)} ${perf.successes}/${perf.attempts} success  ${indicator}`)
+      if (perf.by_step_type) {
+        for (const [st, stPerf] of Object.entries(perf.by_step_type)) {
+          const stRate = stPerf.attempts > 0 ? Math.round((stPerf.successes / stPerf.attempts) * 100) : 0
+          const stIndicator = stRate >= 80 ? chalk.green(`${stRate}%`) : stRate >= 50 ? chalk.yellow(`${stRate}%`) : chalk.red(`${stRate}%`)
+          console.log(`             ${chalk.dim(st.padEnd(10))} ${stPerf.successes}/${stPerf.attempts}  ${stIndicator}`)
+        }
+      }
     }
     console.log()
   }
@@ -319,6 +364,9 @@ function printReport(report: DiagnoseReport): void {
     for (const e of errors) {
       const label = e.pattern === 'command_not_found' ? `command not found: ${e.command}`
         : e.pattern === 'base_branch_missing' ? `base branch missing: ${e.branch}`
+        : e.pattern === 'rate_limit' ? 'rate limit (429)'
+        : e.pattern === 'overloaded' ? 'overloaded (529)'
+        : e.pattern === 'budget' ? 'budget exhausted'
         : e.pattern
       console.log(`    ${chalk.red('✗')} ${label.padEnd(40)} ×${e.count}${e.reviewer ? chalk.dim(`  (${e.reviewer})`) : ''}`)
     }

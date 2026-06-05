@@ -41,6 +41,37 @@ describe('classifyError', () => {
     expect(r.pattern).toBe('timeout')
   })
 
+  it('detects rate_limit on 429', () => {
+    const r = classifyError('Error: rate limit exceeded (429) — try again later')
+    expect(r.pattern).toBe('rate_limit')
+  })
+
+  it('detects rate_limit on "secondary rate"', () => {
+    const r = classifyError('You have exceeded a secondary rate limit')
+    expect(r.pattern).toBe('rate_limit')
+  })
+
+  it('detects overloaded on 529', () => {
+    const r = classifyError('API returned 529: service overloaded')
+    expect(r.pattern).toBe('overloaded')
+  })
+
+  it('detects budget exhausted', () => {
+    const r = classifyError('claude: error_max_budget: reached maximum budget')
+    expect(r.pattern).toBe('budget')
+  })
+
+  it('rate_limit takes precedence over auth_failure for ambiguous messages', () => {
+    // A 429 body that also triggers the auth regex should be rate_limit
+    const r = classifyError('429 Too Many Requests — unauthorized')
+    expect(r.pattern).toBe('rate_limit')
+  })
+
+  it('detects auth_failure on "auth failure" vendor message', () => {
+    const r = classifyError('codex auth failure during fix step — run: codex login')
+    expect(r.pattern).toBe('auth_failure')
+  })
+
   it('detects auth_failure on 401', () => {
     const r = classifyError('Response 401: bad credentials')
     expect(r.pattern).toBe('auth_failure')

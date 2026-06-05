@@ -368,9 +368,11 @@ export async function runOptimize(opts: {
   }
 
   // 6. Build full list of proposed changes
-  const instructionsDiff = newInstructions && newInstructions.length >= 20
-    ? unifiedDiff(currentInstructions, newInstructions)
-    : ''
+  if (!newInstructions || newInstructions.length < 20) {
+    console.error(chalk.red('✗ agent returned an unusable response (too short or empty) — cannot optimize instructions'))
+    process.exit(1)
+  }
+  const instructionsDiff = unifiedDiff(currentInstructions, newInstructions)
 
   const allChanges: ProposedChange[] = [
     ...configChanges,
@@ -409,8 +411,9 @@ export async function runOptimize(opts: {
       if (ch.target === 'config_field') {
         console.log(`    ${chalk.cyan(ch.label.padEnd(28))} ${chalk.red(ch.oldValue)} → ${chalk.green(ch.newValue)}`)
       } else {
-        const adds = instructionsDiff.split('\n').filter(l => l.startsWith('+')).length
-        const dels = instructionsDiff.split('\n').filter(l => l.startsWith('-')).length
+        const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
+        const adds = instructionsDiff.split('\n').filter(l => stripAnsi(l).startsWith('+')).length
+        const dels = instructionsDiff.split('\n').filter(l => stripAnsi(l).startsWith('-')).length
         console.log(`    ${chalk.cyan(ch.label.padEnd(28))} ${chalk.green(`+${adds}`)} ${chalk.red(`-${dels}`)} lines`)
       }
       console.log(`      ${chalk.dim(ch.reason)}`)

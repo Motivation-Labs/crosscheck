@@ -607,7 +607,8 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
     onTimeoutPump: async (currentMs, failures) => {
       if (board) board.stop()
       try {
-        return await promptTimeoutPump(currentMs, failures)
+        const activeMs = currentMs ?? (opts.timeout ? parseDuration(opts.timeout) : undefined)
+        return await promptTimeoutPump(activeMs, failures)
       } finally {
         if (board) board.start()
       }

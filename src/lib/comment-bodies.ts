@@ -36,6 +36,17 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
   ].join('\n')
 }
 
+// Prominent banner prepended to a review comment when the first review attempt
+// timed out but the delayed retry (same timeout) succeeded. Signals a transient
+// blip that resolved on its own — the user's timeout budget was respected.
+export function buildRetriedReviewBanner(timeoutMs: number, delayMs: number): string {
+  const timeoutSec = Math.round(timeoutMs / 1000)
+  const delaySec = Math.round(delayMs / 1000)
+  return `> ⏱ **Retried** — the first review attempt timed out at ${timeoutSec}s. ` +
+    `This review succeeded on the second attempt after a ${delaySec}s wait. ` +
+    `If this happens repeatedly the PR may genuinely need a longer \`timeout_sec\`.`
+}
+
 export interface ConflictResolvedCommentInput {
   owner: string
   repo: string

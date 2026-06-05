@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildFixAppliedCommentBody,
   buildConflictResolvedCommentBody,
+  buildRetriedReviewBanner,
 } from '../lib/comment-bodies.js'
 
 describe('buildFixAppliedCommentBody', () => {
@@ -82,3 +83,23 @@ describe('buildConflictResolvedCommentBody', () => {
     expect(body).not.toContain('more_')
   })
 })
+
+describe('buildRetriedReviewBanner', () => {
+  it('renders rounded seconds for the timeout and the retry delay', () => {
+    const banner = buildRetriedReviewBanner(180_000, 120_000)
+    expect(banner).toContain('⏱ **Retried**')
+    expect(banner).toContain('timed out at 180s')
+    expect(banner).toContain('120s wait')
+    expect(banner.startsWith('> ')).toBe(true)
+  })
+
+  it('rounds sub-second precision', () => {
+    expect(buildRetriedReviewBanner(1_500, 2_400)).toContain('timed out at 2s')
+  })
+
+  it('points the reader at the timeout_sec knob for repeat occurrences', () => {
+    const banner = buildRetriedReviewBanner(180_000, 120_000)
+    expect(banner).toContain('`timeout_sec`')
+  })
+})
+

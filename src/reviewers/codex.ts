@@ -6,6 +6,7 @@ import type { QualityConfig, CodexVendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveCodexModel } from '../lib/review-models.js'
 import type { ReviewResult } from './claude.js'
+import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
 import { tierTimeoutMs } from './tier-timeouts.js'
 
 // Codex review command outputs [P0]/[P1]/[P2]/[P3] priority markers but never a VERDICT line.
@@ -41,6 +42,10 @@ export async function runCodexReview(
   stepInstructions?: string,
   onLog?: (msg: string) => void,
   timeoutMs?: number,
+  // Fires once after the first attempt times out, before the delayed retry.
+  // Split from onLog so callers (e.g. runner) can stay silent on routine
+  // `running: ...` chatter while still surfacing the retry signal live.
+  onRetry?: (msg: string) => void,
 ): Promise<ReviewResult> {
   const model = resolveCodexModel(quality, vendor)
   const tmpFile = join(mkdtempSync(join(tmpdir(), 'crosscheck-')), 'review.md')
@@ -68,17 +73,24 @@ export async function runCodexReview(
     const modelArgs = model !== 'default' ? ['-c', `model="${model}"`] : []
     onLog?.(`  running: codex review --base ${baseBranch}${model !== 'default' ? ` -c model="${model}"` : ''}`)
 
-    const result = await execa(
-      'codex',
-      ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
-      {
-        cwd: repoDir,
-        timeout: resolvedTimeout,
-        env: {
-          ...process.env,
-          // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
-          PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+    const { result, retried } = await withTimeoutRetry(
+      resolvedTimeout,
+      (t) => execa(
+        'codex',
+        ['review', '--base', baseBranch, '--title', prTitle, ...modelArgs],
+        {
+          cwd: repoDir,
+          timeout: t,
+          env: {
+            ...process.env,
+            // Make local dev tools (tsc, jest, etc.) findable if node_modules exists
+            PATH: `${repoDir}/node_modules/.bin:${process.env.PATH ?? ''}`,
+          },
         },
+      ),
+      {
+        onRetry: (effectiveMs, delayMs) =>
+          (onRetry ?? onLog)?.(`  ⏱ codex timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
       },
     )
 
@@ -90,17 +102,21 @@ export async function runCodexReview(
     const review = rawReview.includes('VERDICT:')
       ? rawReview
       : `${rawReview}\n\nVERDICT: ${inferVerdictFromCodexOutput(rawReview)}`
-    return { review, tokensUsed, model }
+    return { review, tokensUsed, model, retried }
   } catch (err: unknown) {
-    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
     const rawStderr = execa.stderr ?? ''
+    const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
+    const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
     const summary = execa.timedOut
-      ? `timed out after ${resolvedTimeout !== undefined ? resolvedTimeout / 1000 : '?'}s — PR diff may be too large (tier: ${quality.tier})`
+      ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large (tier: ${quality.tier})`
       : (extractErrorSummary(rawStderr) ?? execa.message ?? 'unknown error')
     const thrown = Object.assign(new Error(`codex: ${summary}`), {
       exitCode: execa.exitCode,
       timedOut: execa.timedOut,
       stderr: rawStderr,
+      effectiveTimeoutMs: effectiveMs,
+      retryDelayMs: execa.retryDelayMs,
     })
     throw thrown
   } finally {

@@ -18,7 +18,7 @@ import { log as fileLog, logError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
-import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
+import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError } from '../lib/smart-switch.js'
@@ -480,13 +480,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let inputTokens: number | undefined
       let outputTokens: number | undefined
       let model = 'default'
+      let retried: { timeoutMs: number; delayMs: number } | undefined
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log))
         }
       }
 
@@ -519,13 +520,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         await runReviewWithVendor(reviewer)
       }
 
+      // First attempt timed out but the delayed retry succeeded — surface a
+      // soft notice on the review comment so the author knows it was a transient blip.
+      if (retried) {
+        fileLog({ level: 'info', event: 'review_retried', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, retry_timeout_sec: Math.round(retried.timeoutMs / 1000), retry_delay_sec: Math.round(retried.delayMs / 1000), ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+      }
+
       const { verdict, clean } = parseVerdict(rawReview)
       if (verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
-      const commentBody = verdict === null
+      const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
+      const commentBody = retried
+        ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
+        : baseBody
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 

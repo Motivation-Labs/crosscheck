@@ -1,6 +1,7 @@
 import chalk from 'chalk'
 import type { Config, DisplayTheme } from '../config/schema.js'
 import type { WorkflowStep } from './workflow.js'
+import { selectTip } from './tips.js'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 
@@ -648,7 +649,24 @@ export class PRBoard {
     const activeConn = this.connLog.filter(l => l.trim())
     lines.push(...activeConn)
 
+    lines.push(this.renderTipLine())
+
     return lines
+  }
+
+  private renderTipLine(): string {
+    const t = this.theme
+    const tip = selectTip(this.stats.sessionStart)
+
+    const badge = tip.badge === 'new'
+      ? chalk.bold.cyanBright('new') + chalk.dim('  ')
+      : chalk.dim('tip  ')
+
+    // Backtick-enclosed spans in accent colour; surrounding prose in dim
+    const parts = tip.text.split(/(`[^`]+`)/)
+    const formatted = parts.map(p => p.startsWith('`') ? t.accent(p) : t.dim(p)).join('')
+
+    return `  ${badge}${formatted}`
   }
 
   private renderPRWorkspace(): string[] {

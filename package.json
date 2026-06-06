@@ -16,6 +16,7 @@
     "README.zh.md",
     "get-started.md",
     "get-started.zh.md",
+    "docs",
     "assets"
   ],
   "engines": {

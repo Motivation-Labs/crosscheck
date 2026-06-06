@@ -22,6 +22,8 @@ Define the workflow in `workflow.yml`: review-only, review + fix, or the full re
 
 Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
 
+Read the field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/). It explains why Humanbased built Crosscheck after analyzing 295 agentic PRs and retained Crosscheck logs from real internal workflow.
+
 ## Why crosscheck?
 
 - **Combats AI slop before merge** — catches code regressions, incomplete fixes, hallucinated assumptions, and brittle "looks green" patches.
@@ -32,6 +34,33 @@ Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practic
 ---
 
 ## Quick start
+
+### First useful review in 10 minutes
+
+Start with one low-risk PR before turning on continuous watch mode. You only need GitHub CLI plus one authenticated reviewer CLI.
+
+```bash
+# 1. Install crosscheck
+npm install -g @humanbased/crosscheck
+
+# 2. Authenticate GitHub
+brew install gh && gh auth login
+
+# 3. Authenticate one reviewer
+npm install -g @openai/codex && codex login --device-auth
+# or:
+npm install -g @anthropic-ai/claude-code && claude
+
+# 4. Check your setup
+crosscheck status
+
+# 5. Review the public fixture PR
+crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
+```
+
+This fixture PR intentionally contains a realistic agentic-code regression, so you can see whether Crosscheck produces a useful review before pointing it at your own repo. Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the fixture review works, swap in one low-risk PR from your repo, then run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
+
+### Continuous mode
 
 ```bash
 # 1. Install crosscheck and the agent CLIs
@@ -258,6 +287,8 @@ crosscheck run <pr-url> --timeout 10m
 
 ## Configuration
 
+Crosscheck uses `~/.crosscheck/config.yml` by default. If that file exists, it wins over `./crosscheck.config.yml` unless you pass `--config ./crosscheck.config.yml`.
+
 ### Review depth (`quality.tier`)
 
 ```yaml
@@ -338,6 +369,8 @@ Full reference: [get-started.md](./get-started.md)
 | | |
 |---|---|
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all flags, complete config reference, FAQ |
+| **[What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/)** | Humanbased field report on agentic PR quality, review routing, and why Crosscheck exists |
+| **[docs/fixture-pr.md](./docs/fixture-pr.md)** | Safe public fixture PR for the first Crosscheck review |
 | **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config with every option |
 | **[CHANGELOG.md](./CHANGELOG.md)** | Release notes |
 

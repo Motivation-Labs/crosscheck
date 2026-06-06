@@ -87,8 +87,24 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
   try {
     clonePRForReview({
       owner, repo, prNumber: number, baseRef: pr.base.ref,
-      tmpDir, token, protocol: config.clone_protocol,
+      tmpDir, token, protocol: config.clone_protocol, git: config.git,
       onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repo}`, pr: number, base: pr.base.ref }),
+      onRetry: (event) => {
+        fileLog({
+          level: 'warn',
+          event: 'git_clone_retry',
+          repo: `${owner}/${repo}`,
+          pr: number,
+          phase: event.phase,
+          attempt: event.attempt,
+          max_attempts: event.maxAttempts,
+          delay_ms: event.delayMs,
+          reason: event.reason,
+          mitigation: event.mitigation,
+        })
+        const delaySec = Math.round(event.delayMs / 1000)
+        spinner2.text = `Cloning repo for review... retry ${event.nextAttempt}/${event.maxAttempts} in ${delaySec}s (${event.phase})`
+      },
     })
     spinner2.succeed('Repo ready')
 

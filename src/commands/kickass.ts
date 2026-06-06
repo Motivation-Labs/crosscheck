@@ -1,11 +1,13 @@
 import chalk from 'chalk'
 import { existsSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 import { stdin as input, stdout as output } from 'process'
 import { createInterface } from 'readline/promises'
 import { fileURLToPath } from 'url'
 import { execa } from 'execa'
 import { createGithubClient } from '../github/client.js'
-import { getGithubToken, loadConfig } from '../config/loader.js'
+import { getGithubToken, loadConfig, patchGitReliabilityConfig, resolveConfigPath } from '../config/loader.js'
 import type { Config } from '../config/schema.js'
 import { parseDuration } from '../lib/durations.js'
 import { classifyError, logError } from '../lib/logger.js'
@@ -15,6 +17,7 @@ import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
 import { PRBoard } from '../lib/board.js'
 import { loadWorkflow } from '../lib/workflow.js'
+import { isTransientGitTransportError } from '../lib/clone.js'
 
 export interface KickassOpts {
   force?: boolean
@@ -63,6 +66,7 @@ export interface ExecuteKickassDeps {
    * or null to skip. Omit to disable interactive pumping (e.g. in tests or CI).
    */
   onTimeoutPump?: (currentMs: number | undefined, failures: number) => Promise<number | null>
+  onGitReliabilityPump?: (failures: number) => Promise<void>
 }
 
 export interface KickassDeps {
@@ -75,6 +79,7 @@ export interface KickassDeps {
   onAfterExecute?: () => void
   dispatchRun: (item: PreflightItem, timeoutMs?: number) => Promise<string | void>
   onTimeoutPump?: (currentMs: number | undefined, failures: number) => Promise<number | null>
+  onGitReliabilityPump?: (failures: number) => Promise<void>
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
@@ -278,6 +283,8 @@ export async function executeKickassPlan(
   let effectiveTimeoutMs: number | undefined = undefined
   let timeoutFailures = 0
   let pumpLock: Promise<void> | null = null
+  let gitTransportFailures = 0
+  let gitReliabilityOffered = false
 
   const checkAndPump = async (): Promise<void> => {
     if (timeoutFailures < TIMEOUT_PUMP_THRESHOLD) return
@@ -359,6 +366,12 @@ export async function executeKickassPlan(
       if (category === 'timeout') {
         timeoutFailures++
         await checkAndPump()
+      } else if (category === 'network' && isTransientGitTransportError(msgForClassify)) {
+        gitTransportFailures++
+        if (!gitReliabilityOffered && gitTransportFailures >= 3 && deps.onGitReliabilityPump) {
+          gitReliabilityOffered = true
+          await deps.onGitReliabilityPump(gitTransportFailures)
+        }
       }
     }
   }
@@ -612,6 +625,14 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
         if (board) board.start()
       }
     },
+    onGitReliabilityPump: async (failures) => {
+      if (board) board.stop()
+      try {
+        await promptGitReliabilityProfile(failures)
+      } finally {
+        if (board) board.start()
+      }
+    },
   }
 }
 
@@ -655,6 +676,37 @@ async function promptTimeoutPump(currentMs: number | undefined, failures: number
       process.stderr.write(chalk.red(`  Invalid value "${raw}" — timeout unchanged.\n\n`))
       return null
     }
+  } finally {
+    rl.close()
+  }
+}
+
+async function promptGitReliabilityProfile(failures: number): Promise<void> {
+  if (!input.isTTY) return
+
+  const configPath = resolveConfigPath() ?? join(homedir(), '.crosscheck', 'config.yml')
+  process.stderr.write(
+    chalk.yellow(`\n  ⚠  Git clone/fetch failed ${failures} time(s) with transient transport errors.\n`) +
+    chalk.dim('     Recommended local profile: force HTTPS Git to HTTP/1.1, use 5 clone attempts,\n') +
+    chalk.dim('     and wait 5s before exponential clone retries. This helps with GitHub HTTP/2\n') +
+    chalk.dim('     CANCEL / early EOF / Recv failure patterns on unstable networks.\n') +
+    chalk.dim(`     Write this to ${configPath}? [Y/n]\n`) +
+    '  > ',
+  )
+
+  const rl = createInterface({ input, output })
+  try {
+    const raw = (await rl.question('')).trim().toLowerCase()
+    if (raw === 'n' || raw === 'no') {
+      process.stderr.write(chalk.dim('  Git reliability config unchanged.\n\n'))
+      return
+    }
+    patchGitReliabilityConfig(configPath, {
+      clone_attempts: 5,
+      retry_base_delay_ms: 5_000,
+      https_version: 'HTTP/1.1',
+    })
+    process.stderr.write(chalk.green('  ✓ Git reliability profile saved.\n') + chalk.dim('  Also reduce --concurrent if the link is saturated.\n\n'))
   } finally {
     rl.close()
   }

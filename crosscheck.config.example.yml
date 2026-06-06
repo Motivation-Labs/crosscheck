@@ -22,6 +22,14 @@ mode: cross-vendor
 # cannot access target repos. Independent of `gh config get git_protocol`.
 clone_protocol: ssh
 
+# ─── Git reliability ─────────────────────────────────────────────────────────
+# Retries required clone/fetch operations before a PR run fails. `auto` starts
+# with Git defaults and falls back to HTTP/1.1 after HTTP/2 transport errors.
+git:
+  clone_attempts: 4
+  retry_base_delay_ms: 2000
+  https_version: auto       # auto | HTTP/2 | HTTP/1.1
+
 # ─── Vendors ─────────────────────────────────────────────────────────────────
 vendors:
   codex:

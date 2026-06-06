@@ -118,6 +118,18 @@ export const BacktraceConfigSchema = z.object({
   enabled: z.boolean().default(false),
 })
 
+export const GitConfigSchema = z.object({
+  // Required clone/fetch operations are retried inside a single PR run before the
+  // parent kickass retry loop gets involved. This absorbs short GitHub/network
+  // transport flaps such as HTTP/2 CANCEL, early EOF, and Recv failure.
+  clone_attempts: z.number().int().min(1).max(10).default(4),
+  retry_base_delay_ms: z.number().int().min(0).max(60_000).default(2_000),
+  // auto = start with Git defaults, then force HTTP/1.1 after an HTTP/2 transport
+  // failure. Set HTTP/1.1 explicitly on networks where GitHub HTTP/2 clone/fetch
+  // is consistently unstable.
+  https_version: z.enum(['auto', 'HTTP/2', 'HTTP/1.1']).default('auto'),
+})
+
 export const PostReviewDeliverySchema = z.object({
   // pull_request → opens a fix PR targeting the original branch (human approves before merge)
   // commit       → pushes fixes directly onto the original PR branch
@@ -187,6 +199,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   backtrace: BacktraceConfigSchema.default({}),
+  git: GitConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
   brand: BrandConfigSchema.default({}),
@@ -205,3 +218,4 @@ export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
+export type GitConfig = z.infer<typeof GitConfigSchema>

@@ -210,6 +210,29 @@ describe('buildWorkflowCompleteEvent', () => {
     expect(ev.level).toBe('warn')
   })
 
+  it('reports workflow error details when a step fails', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      workflowFailed: true,
+      failedStep: 'fix',
+      workflowError: new Error('codex auth failure during fix step — run: codex login'),
+    })
+    expect(ev.ended_reason).toBe('error')
+    expect(ev.failed_step).toBe('fix')
+    expect(ev.error_message).toBe('codex auth failure during fix step — run: codex login')
+    expect(ev.error_category).toBe('auth')
+  })
+
+  it('truncates long workflow error messages in completion events', () => {
+    const ev = buildWorkflowCompleteEvent({
+      ...base,
+      workflowFailed: true,
+      workflowError: new Error('x'.repeat(600)),
+    })
+    expect(String(ev.error_message)).toHaveLength(513)
+    expect(String(ev.error_message)).toContain('[truncated]')
+  })
+
   // The verdict picked is the LATEST step that produced one, scanning in
   // reverse. This is how runWorkflow itself computes the return value, so
   // a downstream join on workflow_id <-> verdict stays consistent.

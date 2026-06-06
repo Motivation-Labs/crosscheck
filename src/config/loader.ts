@@ -382,3 +382,19 @@ export function patchBrandConfig(
   writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
   return true
 }
+
+export function patchGitReliabilityConfig(
+  configPath: string,
+  updates: Partial<Config['git']>,
+): boolean {
+  const raw = existsSync(configPath)
+    ? ((yaml.load(readFileSync(configPath, 'utf8')) ?? {}) as Record<string, unknown>)
+    : {}
+  const current = typeof raw.git === 'object' && raw.git !== null
+    ? raw.git as Record<string, unknown>
+    : {}
+  raw.git = { ...current, ...updates }
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, yaml.dump(raw, { lineWidth: -1, noRefs: true }))
+  return true
+}

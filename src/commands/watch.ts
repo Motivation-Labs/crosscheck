@@ -385,8 +385,25 @@ export async function runWatch(opts: WatchOpts = {}) {
       try {
         clonePRForReview({
           owner, repo: repoName, prNumber, baseRef: params.baseRef,
-          tmpDir, token, protocol: config.clone_protocol,
+          tmpDir, token, protocol: config.clone_protocol, git: config.git,
           onBaseFetchFailed: () => fileLog({ level: 'warn', event: 'base_branch_fetch_skipped', repo: `${owner}/${repoName}`, pr: prNumber, base: params.baseRef }),
+          onRetry: (event) => {
+            fileLog({
+              level: 'warn',
+              event: 'git_clone_retry',
+              repo: `${owner}/${repoName}`,
+              pr: prNumber,
+              phase: event.phase,
+              attempt: event.attempt,
+              max_attempts: event.maxAttempts,
+              delay_ms: event.delayMs,
+              reason: event.reason,
+              mitigation: event.mitigation,
+            })
+            const delaySec = Math.round(event.delayMs / 1000)
+            bLog(chalk.dim(fmtTime()) + '  ' + chalk.yellow(`git ${event.phase} failed; retry ${event.nextAttempt}/${event.maxAttempts} in ${delaySec}s`))
+            if (event.mitigation) bLog(`${' '.repeat(FMT_TIME_WIDTH + 2)}${chalk.dim(event.mitigation)}`)
+          },
         })
 
         // Diff-aware skip: a new HEAD SHA with the same patch vs base as the last

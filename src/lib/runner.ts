@@ -14,11 +14,11 @@ import { runConflictResolveStep, findConflictedFiles } from '../reviewers/confli
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
-import { log as fileLog, logError } from '../lib/logger.js'
+import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
-import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
+import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError } from '../lib/smart-switch.js'
@@ -98,6 +98,8 @@ export interface WorkflowCompleteInputs {
   round?: number
   trigger?: WorkflowTrigger
   qualityTier?: string
+  workflowError?: unknown
+  failedStep?: string
   now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
 }
 
@@ -121,6 +123,10 @@ export function buildWorkflowCompleteEvent(
   const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
   const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
   const now = inputs.now ?? Date.now()
+  const rawErrorMessage = inputs.workflowError instanceof Error ? inputs.workflowError.message : inputs.workflowError !== undefined ? String(inputs.workflowError) : undefined
+  const errorMessage = rawErrorMessage !== undefined && rawErrorMessage.length > 500
+    ? `${rawErrorMessage.slice(0, 500)} …[truncated]`
+    : rawErrorMessage
 
   const totalTokens = stepValues.reduce((s, r) => s + (r.tokens_used ?? 0), 0)
   // Only emit split fields when at least one step actually recorded them — avoid
@@ -146,6 +152,8 @@ export function buildWorkflowCompleteEvent(
     ...(inputs.qualityTier !== undefined && { quality_tier: inputs.qualityTier }),
     ...(inputs.round !== undefined && { round: inputs.round }),
     ...(inputs.trigger !== undefined && { trigger: inputs.trigger }),
+    ...(inputs.failedStep !== undefined && { failed_step: inputs.failedStep }),
+    ...(errorMessage !== undefined && { error_message: errorMessage, error_category: classifyError(rawErrorMessage ?? '') }),
   }
 }
 
@@ -413,6 +421,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
+  let workflowError: unknown = undefined
+  let failedStep: string | undefined = undefined
   // When a fix commits and a structural review/recheck step follows, we acquire
   // the remote lock on the pushed SHA. Track it here so the finally can detect
   // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
@@ -426,11 +436,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const workflowId = randomUUID()
   const workflowStart = Date.now()
   const stepsRun: string[] = []
+  let currentStepName: string | undefined
 
   emitPRComplexity(ctx, triggerField)
 
   try {
   for (const step of steps) {
+    currentStepName = step.name
     stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
@@ -480,13 +492,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let inputTokens: number | undefined
       let outputTokens: number | undefined
       let model = 'default'
+      let retried: { timeoutMs: number; delayMs: number } | undefined
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log))
         }
       }
 
@@ -519,13 +532,22 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         await runReviewWithVendor(reviewer)
       }
 
+      // First attempt timed out but the delayed retry succeeded — surface a
+      // soft notice on the review comment so the author knows it was a transient blip.
+      if (retried) {
+        fileLog({ level: 'info', event: 'review_retried', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, retry_timeout_sec: Math.round(retried.timeoutMs / 1000), retry_delay_sec: Math.round(retried.delayMs / 1000), ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+      }
+
       const { verdict, clean } = parseVerdict(rawReview)
       if (verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
-      const commentBody = verdict === null
+      const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
         : prependVerdictToComment(clean, verdict)
+      const commentBody = retried
+        ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
+        : baseBody
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
@@ -631,7 +653,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
       if (!vendor) { skipFix('no_vendor'); continue }
 
-      const claudeFixModel = resolveClaudeModel(config.quality)
+      const claudeFixModel = resolveClaudeModel(config.quality, config.vendors.claude)
       const codexFixModel = resolveCodexModel(config.quality, config.vendors.codex)
 
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
@@ -718,7 +740,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
         }
-        continue
+        throw fixErr
       }
 
       if (appliedCount === 0) {
@@ -1059,6 +1081,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
   } catch (err) {
     workflowFailed = true
+    workflowError = err
+    failedStep = currentStepName
     throw err
   } finally {
     if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
@@ -1108,6 +1132,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     fileLog(buildWorkflowCompleteEvent({
       owner, repoName, prNumber,
       workflowId, workflowStart, stepsRun, results, workflowFailed,
+      workflowError,
+      failedStep,
       round: ctx.round,
       trigger: ctx.trigger,
       qualityTier: config.quality.tier,

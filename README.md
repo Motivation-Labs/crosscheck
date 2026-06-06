@@ -33,6 +33,33 @@ Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practic
 
 ## Quick start
 
+### First useful review in 10 minutes
+
+Start with one low-risk PR before turning on continuous watch mode. You only need GitHub CLI plus one authenticated reviewer CLI.
+
+```bash
+# 1. Install crosscheck
+npm install -g @humanbased/crosscheck
+
+# 2. Authenticate GitHub
+brew install gh && gh auth login
+
+# 3. Authenticate one reviewer
+npm install -g @openai/codex && codex login --device-auth
+# or:
+npm install -g @anthropic-ai/claude-code && claude
+
+# 4. Check your setup
+crosscheck status
+
+# 5. Review one PR
+crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
+```
+
+Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the first useful review works, run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
+
+### Continuous mode
+
 ```bash
 # 1. Install crosscheck and the agent CLIs
 npm install -g @humanbased/crosscheck
@@ -57,7 +84,7 @@ crosscheck onboard                  # guided setup — pick repos, mode, and pip
 crosscheck watch                    # personal use — tunnel + webhook + listening on your laptop
 crosscheck serve                    # team use — fixed port, register webhook once
 crosscheck review <pr-url>          # one-shot review of a specific PR
-crosscheck run <pr-url>             # run the full workflow: review → fix → recheck
+crosscheck run <pr-url>             # run the full workflow: review → (fix → recheck) × max_rounds
 crosscheck scan                     # show open PR workflow state across monitored repos
 crosscheck detect-step <pr-url>     # explain the next workflow step for one PR
 crosscheck kickass                  # advance stale PRs from an interactive operator queue
@@ -173,7 +200,7 @@ crosscheck review <pr-url> --reviewer openai    # alias for Codex
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against one PR: review → fix → recheck. Same logic as `watch`/`serve`, but triggered manually.
+Runs the full configured workflow against one PR: review → (fix → recheck) × `max_rounds`. Same logic as `watch`/`serve`, but triggered manually.
 
 ```bash
 crosscheck run <pr-url>
@@ -232,6 +259,40 @@ crosscheck kickass --half-crazy          # 🔥  auto loop until not BLOCK
 
 Actions: `NEEDS_REVIEW → CR` · `NEEDS_FIX/BLOCK → Fix` · `NEEDS_RECHECK → Recheck` · `APPROVE → Merge`
 
+**`kickass` + `watch` combo**
+
+For the best recovery experience when a batch of PRs is stuck (timed out, stopped before `watch` was running), run both commands together. Each plays a distinct role:
+
+- `kickass` kicks each stuck PR **one step at a time** — it uses `detect-step` to read live PR history and dispatches only the next needed step (review, fix, or recheck).
+- `watch` owns **all continuation** — it listens for the webhooks each completed step produces and runs the full remaining pipeline from there.
+
+```
+crosscheck kickass
+  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
+       └─ detect-step → "review"      run review only → posts comment
+       └─ detect-step → "fix"         run fix only → pushes commit
+       └─ detect-step → "recheck"     run recheck only → posts verdict
+
+crosscheck watch
+  ├─ issue_comment (type=review) → pick up fix step automatically
+  └─ synchronize   (fix commit)  → pick up recheck step automatically
+```
+
+> **Note:** `crosscheck run <pr-url>` invoked directly runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it with `--trigger kickass`.
+
+Start `watch` first, then run `kickass` in a second terminal:
+
+```bash
+# terminal 1
+crosscheck watch
+
+# terminal 2
+crosscheck scan --force    # refresh PR state
+crosscheck kickass
+```
+
+> **How the review→fix bridge works:** after `kickass` posts a review comment, GitHub fires an `issue_comment` webhook (not a `pull_request` event). `watch` subscribes to `issue_comment` and, when it sees a crosscheck `type=review` annotation on an open PR, fetches the current PR head and runs the fix step automatically — no new commit required to wake it up. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
+
 **Autonomous loop modes**
 
 `--crazy` and `--half-crazy` turn `run` and `kickass` into autonomous fix→recheck loops that keep going until the verdict improves — no manual re-runs needed.
@@ -257,6 +318,8 @@ crosscheck run <pr-url> --timeout 10m
 ---
 
 ## Configuration
+
+Crosscheck uses `~/.crosscheck/config.yml` by default. If that file exists, it wins over `./crosscheck.config.yml` unless you pass `--config ./crosscheck.config.yml`.
 
 ### Review depth (`quality.tier`)
 

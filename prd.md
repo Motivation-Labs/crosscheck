@@ -99,6 +99,19 @@ by a **harness file**: a plain Markdown document that specifies what the agent r
 what it must do, and what format it must output. No agent behavior is hardcoded in
 TypeScript prompt strings. Logic lives in harness files.
 
+### P5 — Human feedback is always trusted; hidden automation markers are not
+
+Human comments expressing issues, errors, or concerns are inherently valuable and are never treated as adversarial input — they are the signal crosscheck exists to act on. Crosscheck should welcome and act on human review feedback regardless of who wrote it.
+
+The security concern is narrower: the **hidden automation annotation** (`<!-- crosscheck: ... type=review ... -->`) embedded in comment bodies is the mechanism that drives the automated fix pipeline. Posting this marker is an intentional, machine-targeted act — not a natural human expression. When this marker appears in a comment from an account other than the crosscheck token owner, it is likely annotation injection (an attempt to trigger automated fix work from an external actor) and must be rejected.
+
+**Practical consequence:**
+- Regular PR comments (no hidden annotation) → always trusted, always welcome as review input
+- Hidden `<!-- crosscheck: ... type=review -->` annotation from the token owner → legitimate automation trigger
+- Hidden `<!-- crosscheck: ... type=review -->` annotation from anyone else → annotation injection; blocked; logged as `annotation_injection_blocked`
+
+**Warning**: when `routing.allowed_authors` is unset on a public or broadly accessible repository, any commenter can attempt annotation injection. Surface this at `watch` startup so operators understand the risk.
+
 ---
 
 #### The three-layer stack

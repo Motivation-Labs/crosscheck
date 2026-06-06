@@ -1,7 +1,7 @@
 import { execSync } from 'child_process'
 import { existsSync, statSync } from 'fs'
 import chalk from 'chalk'
-import { loadConfig, getGithubTokenSource } from '../config/loader.js'
+import { loadConfig, getGithubTokenSource, getWebhookSecretPath, resolveConfigPath } from '../config/loader.js'
 import { checkCodexAuth } from '../reviewers/codex.js'
 import { checkClaudeAuth } from '../reviewers/claude.js'
 import { getLogDir, getTodayLogPath } from '../lib/logger.js'
@@ -14,6 +14,7 @@ function row(label: string, value: string, ok?: boolean) {
 
 export async function runStatus(configPath?: string) {
   const config = loadConfig(configPath)
+  const activeConfigPath = resolveConfigPath(configPath)
 
   console.log(chalk.bold('\ncrosscheck status\n'))
 
@@ -30,11 +31,18 @@ export async function runStatus(configPath?: string) {
   row('GITHUB_TOKEN', ghTokenDetail, tokenResult !== null)
 
   const webhookSecret = process.env.CROSSCHECK_WEBHOOK_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET
-  row('WEBHOOK_SECRET', webhookSecret ? 'set' : 'missing (needed for serve/watch)', !!webhookSecret)
+  const webhookSecretPath = getWebhookSecretPath()
+  const webhookSecretDetail = webhookSecret
+    ? 'set (env)'
+    : existsSync(webhookSecretPath)
+      ? `auto-managed at ${webhookSecretPath}`
+      : `auto-managed on first serve/watch at ${webhookSecretPath}`
+  row('WEBHOOK_SECRET', webhookSecretDetail, true)
 
   // Config
   console.log()
   console.log(chalk.dim('  Config'))
+  row('config path', activeConfigPath ?? 'defaults only')
   row('mode', config.mode)
   row('quality tier', config.quality.tier)
   row('codex auth', config.vendors.codex.auth)

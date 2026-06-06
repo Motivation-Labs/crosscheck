@@ -13,6 +13,8 @@ import type { ErrorCategory } from '../lib/logger.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
+import { PRBoard } from '../lib/board.js'
+import { loadWorkflow } from '../lib/workflow.js'
 
 export interface KickassOpts {
   force?: boolean
@@ -47,9 +49,20 @@ export interface KickassExecutionResult {
 
 export interface ExecuteKickassDeps {
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
-  // Returns buffered output string in concurrent mode (caller prints it);
-  // returns void in sequential mode (output streams inline via stdio inherit).
-  dispatchRun: (item: PreflightItem) => Promise<string | void>
+  dispatchRun: (item: PreflightItem, timeoutMs?: number) => Promise<string | void>
+  /** Route status messages through a custom sink (e.g. PRBoard scrollback). Defaults to console.log. */
+  log?: (msg: string) => void
+  /** Called just before dispatchRun — use to add a board slot. */
+  onDispatchStart?: (item: PreflightItem, key: string, startedAt: number) => void
+  /** Called after a successful dispatchRun — use to complete a board slot. verdict is parsed from subprocess output when available. */
+  onDispatchEnd?: (item: PreflightItem, key: string, startedAt: number, verdict?: string | null) => void
+  /** Called when dispatchRun throws — use to mark a board slot as failed. */
+  onDispatchFail?: (item: PreflightItem, key: string, error: unknown) => void
+  /**
+   * Called when timeout failures hit the pump threshold (3). Return new timeout in ms to apply,
+   * or null to skip. Omit to disable interactive pumping (e.g. in tests or CI).
+   */
+  onTimeoutPump?: (currentMs: number | undefined, failures: number) => Promise<number | null>
 }
 
 export interface KickassDeps {
@@ -58,11 +71,18 @@ export interface KickassDeps {
   confirm: (message: string) => Promise<boolean>
   getFixDeliveryMode?: () => FixDeliveryMode | Promise<FixDeliveryMode>
   getCurrentHeadSha: (item: PreflightItem) => Promise<string>
-  dispatchRun: (item: PreflightItem) => Promise<string | void>
+  onBeforeExecute?: () => void
+  onAfterExecute?: () => void
+  dispatchRun: (item: PreflightItem, timeoutMs?: number) => Promise<string | void>
+  onTimeoutPump?: (currentMs: number | undefined, failures: number) => Promise<number | null>
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
-  await runKickassWithDeps(opts, defaultKickassDeps(opts))
+  const config = loadConfig()
+  const workflow = loadWorkflow(process.cwd())
+  const board = new PRBoard()
+  board.setConfig(config, workflow)
+  await runKickassWithDeps(opts, defaultKickassDeps(opts, board))
 }
 
 export async function runKickassWithDeps(
@@ -106,7 +126,7 @@ export async function runKickassWithDeps(
     const mergeReady = scan.prs.filter(pr => pr.nextAction === 'merge')
 
     if (queue.length === 0 && mergeReady.length === 0) {
-      console.log(chalk.dim('No actionable PRs found.'))
+      printNoActionablePRsWarning(scan.cached)
       return
     }
     if (queue.length === 0) {
@@ -144,7 +164,9 @@ export async function runKickassWithDeps(
     if (resolvedConcurrency > 1) {
       console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel (${resolvedStagger}ms stagger)`))
     }
+    deps.onBeforeExecute?.()
     const results = await executeKickassPlan(plan, deps, resolvedConcurrency, resolvedStagger)
+    deps.onAfterExecute?.()
     printExecutionSummary(results)
     if (results.some(result => result.status === 'failed')) {
       process.exitCode = 2
@@ -218,11 +240,33 @@ export function buildPreflightPlan(
   })
 }
 
-function printCapturedOutput(label: string, output: string): void {
+function printCapturedOutput(label: string, output: string, log = console.log): void {
   const lines = output.trimEnd().split('\n')
-  console.log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
-  for (const line of lines) console.log(`  ${line}`)
+  log(chalk.dim(`\n── ${label} ${'─'.repeat(Math.max(0, 48 - label.length))}`))
+  for (const line of lines) log(`  ${line}`)
 }
+
+function printNoActionablePRsWarning(fromCache: boolean): void {
+  console.log(chalk.dim('No actionable PRs found.'))
+  if (fromCache) {
+    console.log(chalk.yellow(`⚠ This result came from the scan cache. Rerun with --force to refresh the queue.`))
+  }
+}
+
+function parseVerdictFromOutput(output: string | void): string | null {
+  if (!output) return null
+  const plain = output.replace(/\x1B\[[0-9;]*m/g, '')
+  const m = plain.match(/\bverdict\s+\S*\s*(APPROVE|NEEDS[\s_]+WORK|BLOCK)\b/i)
+  if (!m) return null
+  const raw = m[1].toUpperCase()
+  return raw.startsWith('NEEDS') ? 'NEEDS WORK' : raw
+}
+
+export function verdictBoardUpdateForAction(action: KickassAction, verdict: string): { verdict?: string; recheckVerdict?: string } {
+  return action === 'recheck' ? { recheckVerdict: verdict } : { verdict }
+}
+
+const TIMEOUT_PUMP_THRESHOLD = 3
 
 export async function executeKickassPlan(
   plan: PreflightItem[],
@@ -232,9 +276,28 @@ export async function executeKickassPlan(
 ): Promise<KickassExecutionResult[]> {
   const results: KickassExecutionResult[] = new Array(plan.length)
 
+  const log = deps.log ?? console.log
+
+  // Mutable timeout state: pumped by onTimeoutPump when failures accumulate.
+  let effectiveTimeoutMs: number | undefined = undefined
+  let timeoutFailures = 0
+  let pumpLock: Promise<void> | null = null
+
+  const checkAndPump = async (): Promise<void> => {
+    if (timeoutFailures < TIMEOUT_PUMP_THRESHOLD) return
+    if (!deps.onTimeoutPump) return
+    if (pumpLock) { await pumpLock; return }
+    pumpLock = (async () => {
+      const newMs = await deps.onTimeoutPump!(effectiveTimeoutMs, timeoutFailures)
+      if (newMs != null) effectiveTimeoutMs = newMs
+      timeoutFailures = 0
+    })().finally(() => { pumpLock = null })
+    await pumpLock
+  }
+
   const executeItem = async (item: PreflightItem, index: number, attempt = 1): Promise<void> => {
     if (item.action === 'skip') {
-      console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
+      log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${item.skipReason ?? 'skipped'}`))
       results[index] = { pr: item.pr, status: 'skipped', reason: item.skipReason }
       return
     }
@@ -242,31 +305,41 @@ export async function executeKickassPlan(
     try {
       const currentHeadSha = await deps.getCurrentHeadSha(item)
       if (currentHeadSha !== item.pr.headSha) {
-        console.log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
+        log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  stale_signature`))
         results[index] = { pr: item.pr, status: 'skipped', reason: 'stale_signature' }
         return
       }
 
+      const key = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      const startedAt = Date.now()
       const attemptLabel = attempt > 1 ? ` (retry ${attempt - 1})` : ''
-      console.log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
-      const output = await deps.dispatchRun(item)
-      if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output)
+      log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
+      deps.onDispatchStart?.(item, key, startedAt)
+      const output = await deps.dispatchRun(item, effectiveTimeoutMs)
+      deps.onDispatchEnd?.(item, key, startedAt, parseVerdictFromOutput(output))
+      if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output, log)
 
       if (item.action === 'fix' && item.chainRecheck === true) {
         const fixedHeadSha = await deps.getCurrentHeadSha(item)
         if (fixedHeadSha !== item.pr.headSha) {
           const recheckItem = buildPostFixRecheckItem(item, fixedHeadSha)
-          console.log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
-          const recheckOutput = await deps.dispatchRun(recheckItem)
-          if (typeof recheckOutput === 'string' && recheckOutput) printCapturedOutput(formatPRSignature(recheckItem.pr), recheckOutput)
+          const recheckKey = `${recheckItem.pr.owner}/${recheckItem.pr.repo}#${recheckItem.pr.number}@${recheckItem.pr.headSha}`
+          const recheckStart = Date.now()
+          log(chalk.cyan(`\n→ ${recheckItem.transition}  ${formatPRSignature(recheckItem.pr)}`))
+          deps.onDispatchStart?.(recheckItem, recheckKey, recheckStart)
+          const recheckOutput = await deps.dispatchRun(recheckItem, effectiveTimeoutMs)
+          deps.onDispatchEnd?.(recheckItem, recheckKey, recheckStart, parseVerdictFromOutput(recheckOutput))
+          if (typeof recheckOutput === 'string' && recheckOutput) printCapturedOutput(formatPRSignature(recheckItem.pr), recheckOutput, log)
         } else {
-          console.log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
+          log(chalk.dim(`  head SHA unchanged after fix — recheck deferred`))
         }
       }
       results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
-      console.error(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      log(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
+      const failKey = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      deps.onDispatchFail?.(item, failKey, err)
       // Classify execa errors using structured fields, not the raw message.
       // The raw message includes the full CLI invocation (e.g. "Command failed with exit
       // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
@@ -287,6 +360,10 @@ export async function executeKickassPlan(
       }
       const category = classifyError(msgForClassify)
       results[index] = { pr: item.pr, status: 'failed', reason: category }
+      if (category === 'timeout') {
+        timeoutFailures++
+        await checkAndPump()
+      }
     }
   }
 
@@ -326,7 +403,7 @@ export async function executeKickassPlan(
 
     const delaySec = delayMs / 1000
     const delayLabel = delaySec >= 60 ? `${delaySec / 60}m` : `${delaySec}s`
-    console.log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
+    log(chalk.dim(`\n  ${retryItems.length} transient failure(s) — retry ${attempt - 1}/${RETRY_DELAYS_MS.length} in ${delayLabel}...`))
     await new Promise(resolve => setTimeout(resolve, delayMs))
     for (const { i } of retryItems) {
       const priorResult = results[i]
@@ -399,12 +476,15 @@ export function buildKickassRunArgs(
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
   const args = ['run', item.pr.url]
-  // For an explicit review action, always force --steps review so run.ts doesn't
-  // skip it based on existing history.
-  // For fix/recheck, omit --steps and let run.ts detect the correct next step
-  // from live comment history — the scan cache can be stale by the time kickass
-  // dispatches, and identifyNextWorkflowStep reflects the actual PR state.
-  if (item.action === 'review') args.push('--steps', 'review')
+  // No --steps for normal review/recheck/fix actions: run.ts calls
+  // identifyNextWorkflowStep against live PR history to determine the correct
+  // next step. Exception: when kickass demoted a fix action to review because the
+  // latest annotation covers an older SHA (no_usable_review_comment), we must
+  // force --steps review so run.ts doesn't re-detect from live history and choose
+  // the stale review's fix step, applying fixes to the unreviewed new diff.
+  if (item.action === 'review' && item.explanation === 'no_usable_review_comment') {
+    args.push('--steps', 'review')
+  }
   args.push('--expected-head-sha', item.pr.headSha)
   if (item.action !== 'fix') {
     if (roundMode === 'crazy') args.push('--crazy')
@@ -451,15 +531,49 @@ export function resolveCliInvocation(options: ResolveCliInvocationOptions = {}):
   throw new Error('Cannot resolve crosscheck CLI entrypoint. Run npm run build before kickass, or run from a source checkout with dev dependencies installed.')
 }
 
-function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
+function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDeps {
   let cli: CliInvocation | undefined
   const getCli = (): CliInvocation => {
     cli ??= resolveCliInvocation()
     return cli
   }
-  // opts.concurrent = 0 means "one per PR" (fully parallel); undefined means sequential.
-  // Any explicit --concurrent value uses buffered stdio; sequential streams inline.
-  const isParallel = opts.concurrent !== undefined
+
+  const dispatchRun = async (item: PreflightItem, timeoutMs?: number): Promise<string | void> => {
+    const invocation = getCli()
+    // If a pumped timeout is active, convert it to a "Xs" string and forward it.
+    // Otherwise fall back to the user's --timeout flag (or no override).
+    const timeoutArg = timeoutMs != null ? `${Math.round(timeoutMs / 1000)}s` : opts.timeout
+    const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, timeoutArg)]
+    // When board is active always pipe so output routes through board.log scrollback.
+    // Without board, pipe only for explicit concurrent mode; sequential streams inline.
+    if (board || opts.concurrent !== undefined) {
+      try {
+        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
+        return result.all ?? ''
+      } catch (err: unknown) {
+        // Surface captured output before re-throwing so the board log includes
+        // the child's stdout/stderr (auth errors, model failures, etc.) that were
+        // previously visible via inherited stdio.
+        const e = err as Record<string, unknown>
+        const captured = typeof e.all === 'string' ? e.all.trim()
+          : typeof e.stderr === 'string' ? e.stderr.trim() : ''
+        if (captured) {
+          if (board) board.log(captured)
+          else console.error(captured)
+        }
+        throw err
+      }
+    }
+    await execa(invocation.command, args, { stdio: 'inherit' })
+  }
+
+  const actionPhase = (action: string) =>
+    action === 'fix' ? 'fixing' : action === 'recheck' ? 'rechecking' : 'reviewing'
+  const actionLabel = (action: string) =>
+    action === 'fix' ? 'applying fix...' : action === 'recheck' ? 'rechecking...' : 'reviewing...'
+  const donePhase = (action: string) =>
+    action === 'fix' ? 'fixed' : action === 'recheck' ? 'rechecked' : 'reviewed'
+
   return {
     loadScanResult,
     pickPRs,
@@ -475,14 +589,35 @@ function defaultKickassDeps(opts: KickassOpts = {}): KickassDeps {
       })
       return data.head.sha
     },
-    dispatchRun: async (item) => {
-      const invocation = getCli()
-      const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, opts.timeout)]
-      if (isParallel) {
-        const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
-        return result.all ?? ''
+    dispatchRun,
+    ...(board && {
+      log: (msg: string) => board.log(msg),
+      onDispatchStart: (item: PreflightItem, key: string, _startedAt: number) => {
+        board.addPR(key, item.pr.number, `${item.pr.owner}/${item.pr.repo}`, item.pr.headRef)
+        board.updatePR(key, { phase: actionPhase(item.action) as import('../lib/board.js').PRPhase, label: actionLabel(item.action) })
+      },
+      onDispatchEnd: (item: PreflightItem, key: string, startedAt: number, verdict?: string | null) => {
+        if (verdict != null) {
+          board.updatePR(key, verdictBoardUpdateForAction(item.action, verdict))
+        }
+        board.updatePR(key, { phase: donePhase(item.action) as import('../lib/board.js').PRPhase })
+        board.completePR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url })
+      },
+      onDispatchFail: (_item: PreflightItem, key: string, err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        board.failPR(key, msg)
+      },
+      onBeforeExecute: () => board.start(),
+      onAfterExecute: () => board.stop(),
+    }),
+    onTimeoutPump: async (currentMs, failures) => {
+      if (board) board.stop()
+      try {
+        const activeMs = currentMs ?? (opts.timeout ? parseDuration(opts.timeout) : undefined)
+        return await promptTimeoutPump(activeMs, failures)
+      } finally {
+        if (board) board.start()
       }
-      await execa(invocation.command, args, { stdio: 'inherit' })
     },
   }
 }
@@ -492,6 +627,41 @@ async function confirmMutation(message: string): Promise<boolean> {
   try {
     const answer = await rl.question(`${message} [y/N] `)
     return answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes'
+  } finally {
+    rl.close()
+  }
+}
+
+async function promptTimeoutPump(currentMs: number | undefined, failures: number): Promise<number | null> {
+  const currentSec = Math.round((currentMs ?? 180_000) / 1000)
+  const bumpSec = currentSec + 120
+  process.stderr.write(
+    chalk.yellow(`\n  ⚠  Timeout hit ${failures} time(s). Current timeout: ${currentSec}s\n`) +
+    chalk.dim(`     Bump to ${bumpSec}s? [Y/n]  or enter a specific value (e.g. 600s, 10m):\n`) +
+    '  > ',
+  )
+  const rl = createInterface({ input, output })
+  try {
+    const raw = (await rl.question('')).trim()
+    const lower = raw.toLowerCase()
+    if (lower === 'n' || lower === 'no') {
+      process.stderr.write(chalk.dim('  Timeout unchanged.\n\n'))
+      return null
+    }
+    if (raw === '' || lower === 'y' || lower === 'yes') {
+      process.stderr.write(chalk.green(`  Timeout bumped to ${bumpSec}s.\n\n`))
+      return bumpSec * 1000
+    }
+    // Accept bare integers as seconds, otherwise try parseDuration.
+    const asSeconds = /^\d+$/.test(raw) ? `${raw}s` : raw
+    try {
+      const parsed = parseDuration(asSeconds)
+      process.stderr.write(chalk.green(`  Timeout set to ${Math.round(parsed / 1000)}s.\n\n`))
+      return parsed
+    } catch {
+      process.stderr.write(chalk.red(`  Invalid value "${raw}" — timeout unchanged.\n\n`))
+      return null
+    }
   } finally {
     rl.close()
   }

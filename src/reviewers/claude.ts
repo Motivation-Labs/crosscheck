@@ -2,6 +2,8 @@ import { execa } from 'execa'
 import type { QualityConfig, VendorConfig } from '../config/schema.js'
 import { DEFAULT_REVIEW_INSTRUCTIONS } from '../lib/workflow.js'
 import { resolveClaudeModel } from '../lib/review-models.js'
+import { withTimeoutRetry } from '../lib/with-timeout-retry.js'
+import { tierTimeoutMs } from './tier-timeouts.js'
 
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
@@ -16,6 +18,10 @@ export interface ReviewResult {
   inputTokens?: number
   outputTokens?: number
   model: string
+  // Set only when the first attempt timed out and the delayed retry succeeded —
+  // signals a transient blip that resolved on its own. The runner surfaces this
+  // as a soft banner on the posted review comment.
+  retried?: { timeoutMs: number; delayMs: number }
 }
 
 interface ClaudeJsonOutput {
@@ -37,6 +43,10 @@ export async function runClaudeReview(
   onLog?: (msg: string) => void,
   timeoutMs?: number,
   noBudgetCap?: boolean,
+  // Fires once after the first attempt times out, before the delayed retry.
+  // Split from onLog so callers (e.g. runner) can stay silent on routine
+  // `running: ...` chatter while still surfacing the retry signal live.
+  onRetry?: (msg: string) => void,
 ): Promise<ReviewResult> {
   const model = resolveClaudeModel(quality, vendor)
   const effort = EFFORT_MAP[vendor.effort] ?? 'medium'
@@ -71,16 +81,18 @@ export async function runClaudeReview(
 
   onLog?.(`  running: claude --print --model ${model} --effort ${effort}`)
 
-  // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → 180s default; positive → user-specified
-  const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
+  // timeoutMs: 0 → no cap (crazy/halfcrazy); undefined → tier-based default (300/600/1200s); positive → user-specified
+  const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
 
   try {
-    const { stdout } = await execa('claude', args, {
-      cwd: repoDir,
-      timeout: resolvedTimeout,
-      input: prompt,
-      env: { ...process.env },
-    })
+    const { result: { stdout }, retried } = await withTimeoutRetry(
+      resolvedTimeout,
+      (t) => execa('claude', args, { cwd: repoDir, timeout: t, input: prompt, env: { ...process.env } }),
+      {
+        onRetry: (effectiveMs, delayMs) =>
+          (onRetry ?? onLog)?.(`  ⏱ claude timed out at ${effectiveMs / 1000}s — waiting ${delayMs / 1000}s and retrying once`),
+      },
+    )
     const raw = stdout.trim()
     try {
       const parsed: ClaudeJsonOutput = JSON.parse(raw)
@@ -88,18 +100,24 @@ export async function runClaudeReview(
       const inputTokens = typeof parsed.usage?.input_tokens === 'number' ? parsed.usage.input_tokens : undefined
       const outputTokens = typeof parsed.usage?.output_tokens === 'number' ? parsed.usage.output_tokens : undefined
       const tokensUsed = inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
-      return { review, tokensUsed, inputTokens, outputTokens, model }
+      return { review, tokensUsed, inputTokens, outputTokens, model, retried }
     } catch {
-      return { review: raw, model }
+      return { review: raw, model, retried }
     }
   } catch (err: unknown) {
-    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean }
+    const execa = err as { stdout?: string; stderr?: string; message?: string; exitCode?: number; timedOut?: boolean; effectiveTimeoutMs?: number; retryDelayMs?: number }
     const rawStderr = execa.stderr?.trim() ?? ''
-    const summary = (rawStderr.split('\n').filter(Boolean).at(-1)) ?? execa.message ?? 'unknown error'
+    const effectiveMs = execa.effectiveTimeoutMs ?? resolvedTimeout
+    const retryNote = execa.retryDelayMs !== undefined ? ' (retried once)' : ''
+    const summary = execa.timedOut
+      ? `timed out after ${effectiveMs !== undefined ? effectiveMs / 1000 : '?'}s${retryNote} — PR diff may be too large`
+      : (rawStderr.split('\n').filter(Boolean).at(-1)) ?? execa.message ?? 'unknown error'
     const thrown = Object.assign(new Error(`claude: ${summary}`), {
       exitCode: execa.exitCode,
       timedOut: execa.timedOut,
       stderr: rawStderr,
+      effectiveTimeoutMs: effectiveMs,
+      retryDelayMs: execa.retryDelayMs,
     })
     throw thrown
   }

@@ -11,14 +11,14 @@ import { runCodexReview } from '../reviewers/codex.js'
 import { runClaudeReview } from '../reviewers/claude.js'
 import { runFixStep, runCodexFixStep } from '../reviewers/fix.js'
 import { runConflictResolveStep, findConflictedFiles } from '../reviewers/conflict-resolve.js'
-import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
+import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
 import { log as fileLog, logError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
-import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody } from '../lib/comment-bodies.js'
+import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetriedReviewBanner } from '../lib/comment-bodies.js'
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError } from '../lib/smart-switch.js'
@@ -84,7 +84,7 @@ export function countCrosscheckCommitsForPR(tmpDir: string, baseRef: string): nu
 // How the workflow was triggered. Included in workflow_complete, review_complete,
 // fix_complete, and conflict_resolve_complete so log analysis can segment outcomes
 // by entry point (e.g. kickass vs webhook vs direct run).
-export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace'
+export type WorkflowTrigger = 'run' | 'kickass' | 'watch' | 'serve' | 'backtrace' | 'comment'
 
 export interface WorkflowCompleteInputs {
   owner: string
@@ -480,13 +480,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let inputTokens: number | undefined
       let outputTokens: number | undefined
       let model = 'default'
+      let retried: { timeoutMs: number; delayMs: number } | undefined
       const runReviewWithVendor = async (candidate: Vendor): Promise<void> => {
         if (candidate === 'codex') {
-          ;({ review: rawReview, tokensUsed, model } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec)))
+          ;({ review: rawReview, tokensUsed, model, retried } = await runCodexReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.codex, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec), log))
           inputTokens = undefined
           outputTokens = undefined
         } else {
-          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode))
+          ;({ review: rawReview, tokensUsed, inputTokens, outputTokens, model, retried } = await runClaudeReview(tmpDir, pr.base.ref, pr.title, config.quality, config.vendors.claude, config.budget.per_review_usd, step.instructions, undefined, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec), !!ctx.roundMode, log))
         }
       }
 
@@ -519,13 +520,30 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         await runReviewWithVendor(reviewer)
       }
 
-      const { verdict, clean } = parseVerdict(rawReview)
-      if (verdict === null) {
+      // First attempt timed out but the delayed retry succeeded — surface a
+      // soft notice on the review comment so the author knows it was a transient blip.
+      if (retried) {
+        fileLog({ level: 'info', event: 'review_retried', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, retry_timeout_sec: Math.round(retried.timeoutMs / 1000), retry_delay_sec: Math.round(retried.delayMs / 1000), ...(ctx.round !== undefined && { round: ctx.round }), ...triggerField })
+      }
+
+      const parsed = parseVerdict(rawReview)
+      const { clean } = parsed
+      if (parsed.verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
-      const commentBody = verdict === null
+      // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
+      // approved-with-comments so warning-only reviews stop driving the fix/recheck loop.
+      const gate = applySeverityGate(parsed.verdict, clean)
+      const verdict = gate.verdict
+      if (gate.downgraded) {
+        fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, raw_verdict: parsed.verdict, gated_verdict: verdict })
+      }
+      const baseBody = verdict === null
         ? `${NULL_VERDICT_WARNING}\n\n${clean}`
-        : prependVerdictToComment(clean, verdict)
+        : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
+      const commentBody = retried
+        ? `${buildRetriedReviewBanner(retried.timeoutMs, retried.delayMs)}\n\n${baseBody}`
+        : baseBody
       const commentCount = countComments(rawReview)
       fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, model, ...stepIdentity, verdict, duration_ms: Date.now() - stepStart, tokens_used: tokensUsed, ...(inputTokens !== undefined && { input_tokens: inputTokens }), ...(outputTokens !== undefined && { output_tokens: outputTokens }), ...(ctx.round !== undefined && { round: ctx.round }), ...(ctx.roundMode && { mode: ctx.roundMode }), ...triggerField })
 
@@ -574,6 +592,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           octokit, owner, repoName, prNumber, commentBody, reviewer, config.brand,
           origin, verdict ?? undefined, priorReviewId, isRecheck, model, effectiveType, ctx.round ?? 1, annotationSha,
           nextStepAnnotation,
+          ctx.trigger === 'kickass' ? 'kickass' : undefined,
         )
         const commentUrl = `github.com/${owner}/${repoName}/pull/${prNumber}`
         fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, url: `https://${commentUrl}` })

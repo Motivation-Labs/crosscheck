@@ -9,8 +9,8 @@
 - [Prerequisites](#prerequisites)
 - [Install](#install)
 - [Environment variables](#environment-variables)
-- [Step 1 — Check your environment](#step-1--check-your-environment)
-- [Step 2 — Test with a single PR](#step-2--test-with-a-single-pr)
+- [Step 1 — Check your setup](#step-1--check-your-setup)
+- [Step 2 — Get one useful review](#step-2--get-one-useful-review)
 - [Step 3 — Choose a deployment mode](#step-3--choose-a-deployment-mode)
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
@@ -34,7 +34,7 @@
 
 ## Prerequisites
 
-You need three CLIs installed and authenticated before crosscheck can run reviews.
+You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing.
 
 ### Claude Code
 
@@ -143,39 +143,49 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 
 ---
 
-## Step 1 — Set up crosscheck
+## Step 1 — Check your setup
 
 ```bash
-crosscheck onboard
+crosscheck status
 ```
 
-`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full six-step walkthrough.
+`crosscheck status` prints the active config path, GitHub auth source, usable reviewer CLIs, webhook-secret handling, and current logs. A webhook secret is auto-managed for `watch` and `serve`, so it does not need to be set before a one-shot review.
 
-Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
+If you prefer to create a starter config without the full wizard:
 
-> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
+```bash
+crosscheck init
+```
 
----
+## Step 2 — Get one useful review
 
-## Step 2 — Test with a single PR
-
-Before running continuously, verify end-to-end with one PR:
+Before running continuously, verify end-to-end with one low-risk PR:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
 
-This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. If it completes without error, your setup is working.
-
-Try Claude as reviewer too:
+This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. If Claude Code is your authenticated reviewer, use:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 ```
 
----
+If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch` or `serve`.
 
 ## Step 3 — Choose a deployment mode
+
+After one-shot review works, run the guided setup:
+
+```bash
+crosscheck onboard
+```
+
+`crosscheck onboard` checks your CLIs, walks you through deployment mode, repo selection, review mode, workflow pipeline, and connection settings, then writes a ready-to-use config. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full walkthrough.
+
+Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
+
+> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
 
 ### Personal vs team
 
@@ -344,7 +354,7 @@ crosscheck init
 crosscheck init --config /path/to/crosscheck.config.yml
 ```
 
-What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK_WEBHOOK_SECRET`.
+What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-secret handling. The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch` and `serve`.
 
 | Flag | Description |
 |---|---|
@@ -354,7 +364,7 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ### `crosscheck onboard`
 
-The recommended first-time setup command. Walks through seven steps interactively and writes a ready-to-use config.
+The recommended first-time setup command. Walks through ten steps interactively and writes a ready-to-use config.
 
 ```bash
 crosscheck onboard
@@ -364,7 +374,7 @@ crosscheck onboard --team         # force team mode for this session
 crosscheck onboard --reconfigure  # re-run setup even if config already exists
 ```
 
-**The seven steps:**
+**The ten steps:**
 
 **Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
 
@@ -378,7 +388,11 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 - `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
 - `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
 
-**Step 5 — Workflow pipeline.** Choose what happens after a review:
+**Step 5 — Primary author.** In personal cross-vendor mode, choose which agent usually authors your PRs so Crosscheck can route reviews to the other vendor.
+
+**Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
+
+**Step 7 — Workflow pipeline.** Choose what happens after a review:
 
 ```
   [1] review only              — AI posts a comment; you handle fixes
@@ -388,11 +402,17 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 6 — Connection type.** Choose how GitHub webhooks reach your local server:
+**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
+
+**Step 9 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
+
+**Step 10 — Connection type.** Choose how GitHub webhooks reach your local server:
 - `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
 - `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
 
-**Step 7 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+**Step 11 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
+
+**Step 12 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
 
 ```
 crosscheck onboard
@@ -417,21 +437,45 @@ crosscheck onboard
   [1] cross-vendor  [2] single-vendor
   Choice [1]: 1
 
-  Step 5 — workflow pipeline
+  Step 5 — primary author
+  [1] Claude  [2] Codex  [3] both
+  Choice [3]: 3
+
+  Step 6 — review quality
+  [1] fast  [2] balanced  [3] thorough
+  Choice [2]: 2
+
+  Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
   Choice [2]: 3
 
-  Step 6 — connection type
+  Step 8 — fix → re-check rounds
+  [1] 1 round  [2] 2 rounds  [3] 3 rounds
+  Choice [1]: 1
+
+  Step 9 — auto conflict-resolve
+  [1] disabled  [2] enabled
+  Choice [1]: 1
+
+  Step 10 — connection type
   [1] localhost.run  [2] smee.io
   Choice [1]: 1
 
-  Step 7 — review and write config
+  Step 11 — git clone protocol
+  [1] SSH  [2] HTTPS
+  Choice [1]: 1
+
+  Step 12 — review and write config
   deployment   personal
   connection   localhost.run
+  clone        ssh
   orgs         humanbased-ai
   users        your-github-login (8 repos)
   mode         cross-vendor
+  quality      balanced
   pipeline     review-fix-recheck
+  max rounds   1
+  conflict-resolve  no
   config       ~/.crosscheck/config.yml
 
   ✓ config written to ~/.crosscheck/config.yml
@@ -471,7 +515,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Executes the full configured workflow against a single PR: review → auto-fix → recheck. Where `crosscheck review` stops after posting a comment, `crosscheck run` closes the loop — if issues are found, the authoring agent opens a fix PR and crosscheck re-reviews it.
+Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -484,7 +528,7 @@ crosscheck run https://github.com/owner/repo/pull/123 --crazy   # loop until APP
 crosscheck run https://github.com/owner/repo/pull/123 --halfcrazy
 ```
 
-The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
+The workflow executed is loaded from `.crosscheck/workflow.yml` in the operator repo root if present, then `~/.crosscheck/workflow.yml`, and otherwise falls back to the built-in default pipeline: review, then fix when the verdict is not `APPROVE`. Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
 
 | Flag | Description |
 |---|---|
@@ -524,7 +568,7 @@ crosscheck scan --json
 
 Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
-Fix actions dispatch a full fix→recheck cycle in one invocation, honoring the `max_rounds` setting in your `workflow.yml`.
+Each PR dispatch uses `detect-step` to read live PR comment history and advances **exactly the next needed step** — kickass drives one step per PR, then `watch` picks up continuation via the webhooks that step produces.
 
 ```bash
 crosscheck kickass --dry-run
@@ -540,6 +584,42 @@ crosscheck kickass --halfcrazy    # loop until verdict is not BLOCK
 | `--stale-after <duration>` | Only show PRs stale for at least this duration |
 | `--crazy` | Autonomous loop: keep running fix→recheck cycles until APPROVE (ceiling: 2 rounds per PR) |
 | `--halfcrazy` | Autonomous loop: keep running until verdict is not BLOCK — NEEDS\_WORK is acceptable |
+
+#### `kickass` + `watch` combo
+
+When a batch of PRs is stuck — timed out, or stopped before `watch` was running — use both commands together for hands-free recovery:
+
+```bash
+# terminal 1 — keep running to handle continuations
+crosscheck watch
+
+# terminal 2 — kick each stuck PR one step forward
+crosscheck scan --force
+crosscheck kickass
+```
+
+How they divide the work:
+
+```
+crosscheck kickass
+  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
+       └─ detect-step → "review"      run review only → posts comment
+       └─ detect-step → "fix"         run fix only → pushes commit
+       └─ detect-step → "recheck"     run recheck only → posts verdict
+
+crosscheck watch
+  ├─ issue_comment (type=review) → pick up fix step automatically
+  └─ synchronize   (fix commit)  → pick up recheck step automatically
+```
+
+> **Note:** `ck run <url>` invoked directly (without `--trigger kickass`) runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it.
+
+`kickass` advances each PR exactly one step using live `detect-step` detection. `watch` owns all continuation via webhooks:
+
+- A posted review fires an `issue_comment` webhook → `watch` starts the fix step.
+- A fix commit fires a `synchronize` webhook → `watch` starts the recheck step.
+
+No second `kickass` run is needed. Once `kickass` kicks the first step, the pipeline advances on its own as long as `watch` is running. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
 
 ---
 
@@ -854,6 +934,8 @@ crosscheck stores its config in `~/.crosscheck/config.yml` by default — persis
 2. `./crosscheck.config.yml`
 3. `./.crosscheck.yml`
 
+If `~/.crosscheck/config.yml` exists, it wins over local project files. Pass `--config ./crosscheck.config.yml` when you deliberately want to test a project-local config.
+
 Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
 
 Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 days by default.
@@ -891,7 +973,7 @@ vendors:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
-    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:

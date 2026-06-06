@@ -1,7 +1,7 @@
 {
-  "name": "@motivation-labs/crosscheck",
+  "name": "@humanbased/crosscheck",
   "version": "1.0.0",
-  "description": "Cross-vendor AI code review orchestrator — Claude Code ↔ Codex",
+  "description": "AI code review pipeline that turns agent-written PRs into merge-ready patches",
   "bin": {
     "crosscheck": "dist/cli.js",
     "ck": "dist/ck.js"
@@ -16,6 +16,8 @@
     "README.zh.md",
     "get-started.md",
     "get-started.zh.md",
+    "docs/fixture-pr.md",
+    "docs/proof-demo.md",
     "assets"
   ],
   "engines": {
@@ -46,23 +48,30 @@
     "vitest": "^3.2.4"
   },
   "keywords": [
+    "ai-code-review",
     "code-review",
     "ai",
+    "ai-agents",
+    "agentic-coding",
     "claude",
+    "claude-code",
     "codex",
+    "codex-cli",
     "github",
     "pull-request",
+    "review-bot",
+    "code-quality",
     "automation",
     "cli"
   ],
-  "homepage": "https://github.com/Motivation-Labs/crosscheck",
+  "homepage": "https://github.com/humanbased-ai/crosscheck",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Motivation-Labs/crosscheck.git"
+    "url": "git+https://github.com/humanbased-ai/crosscheck.git"
   },
   "bugs": {
-    "url": "https://github.com/Motivation-Labs/crosscheck/issues"
+    "url": "https://github.com/humanbased-ai/crosscheck/issues"
   },
-  "author": "Motivation Labs",
+  "author": "Humanbased PTE LTD",
   "license": "MIT"
 }

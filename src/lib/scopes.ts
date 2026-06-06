@@ -17,7 +17,7 @@ export interface DedupResult {
 // unchanged, preserving original input order.
 //
 // Comparison is case-insensitive: GitHub owner names are case-insensitive, so
-// `orgs: [motivation-labs]` subsumes `repos: [Motivation-Labs/foo]`. The dropped map
+// `orgs: [humanbased-ai]` subsumes `repos: [humanbased-ai/foo]`. The dropped map
 // is keyed by the original-case org name from the `{org}` scope entry.
 export function dedupScopes(input: Scope[]): DedupResult {
   const orgs = new Map<string, string>()

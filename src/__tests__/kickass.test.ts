@@ -6,6 +6,7 @@ import {
   resolveCliInvocation,
   runKickassWithDeps,
   summarizeExecutionResults,
+  verdictBoardUpdateForAction,
   type KickassDeps,
 } from '../commands/kickass.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
@@ -599,6 +600,16 @@ describe('runKickassWithDeps', () => {
       expect(results.every(r => r.status === 'executed')).toBe(true)
       expect(dispatched.sort()).toEqual([1, 2])
     })
+  })
+})
+
+describe('verdictBoardUpdateForAction', () => {
+  it('stores review verdicts in the review slot', () => {
+    expect(verdictBoardUpdateForAction('review', 'APPROVE')).toEqual({ verdict: 'APPROVE' })
+  })
+
+  it('stores recheck verdicts in the recheck slot', () => {
+    expect(verdictBoardUpdateForAction('recheck', 'NEEDS WORK')).toEqual({ recheckVerdict: 'NEEDS WORK' })
   })
 })
 

@@ -1,7 +1,7 @@
 # ISSUE.md — crosscheck issue analysis harness
 
 You are analyzing `~/.crosscheck/logs/*.ndjson` to find bugs and improvement opportunities
-in the crosscheck project and draft GitHub issues for `Motivation-Labs/crosscheck`.
+in the crosscheck project and draft GitHub issues for `humanbased-ai/crosscheck`.
 
 Your job is to surface patterns that a simple error-count approach would miss: session
 instability, tunnel failure modes, process crash loops, and reliability regressions.

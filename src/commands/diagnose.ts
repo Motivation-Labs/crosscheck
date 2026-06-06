@@ -6,7 +6,15 @@ import { INDICATORS } from '../lib/languages.js'
 
 const LOG_DIR = join(homedir(), '.crosscheck', 'logs')
 
-type ErrorPattern = 'command_not_found' | 'base_branch_missing' | 'rate_limit' | 'overloaded' | 'budget' | 'timeout' | 'auth_failure' | 'other'
+type ErrorPattern =
+  | 'command_not_found'
+  | 'base_branch_missing'
+  | 'timeout'
+  | 'rate_limit'    // 429 - GitHub or model API rate limit
+  | 'overloaded'    // 529 - upstream model API temporarily overloaded
+  | 'budget'        // per-review budget cap reached
+  | 'auth_failure'
+  | 'other'
 
 interface ErrorEntry {
   pattern: ErrorPattern
@@ -96,9 +104,12 @@ export function classifyError(message: string): { pattern: ErrorPattern; command
   const branchMatch = message.match(/fatal: no such branch:?\s*'?([^\s'"]+)'?/i)
   if (branchMatch) return { pattern: 'base_branch_missing', branch: branchMatch[1] }
 
-  // Transient model-API conditions must be checked before the broad auth check so that a
-  // 429/529/budget body that also mentions credentials isn't misclassified as auth_failure.
-  // Word-boundary the numeric codes so they don't match embedded digits (e.g. "timed out after 5290ms").
+  // Transient model-API conditions are matched before the broad auth check so a
+  // 429/529/budget body that also mentions credentials isn't swallowed as an auth
+  // failure. Mirrors logger.classifyError so the issue/diagnose summary lines up
+  // with the categories recorded in the logs.
+  // Word-boundary the numeric codes so they don't match digits embedded in
+  // durations/counts/ports (e.g. "timed out after 5290ms" must not read as 529).
   if (/rate limit|secondary rate|\b429\b/i.test(message)) return { pattern: 'rate_limit' }
   if (/\b529\b|overloaded/i.test(message)) return { pattern: 'overloaded' }
   if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/i.test(message)) return { pattern: 'budget' }
@@ -365,7 +376,7 @@ function printReport(report: DiagnoseReport): void {
       const label = e.pattern === 'command_not_found' ? `command not found: ${e.command}`
         : e.pattern === 'base_branch_missing' ? `base branch missing: ${e.branch}`
         : e.pattern === 'rate_limit' ? 'rate limit (429)'
-        : e.pattern === 'overloaded' ? 'overloaded (529)'
+        : e.pattern === 'overloaded' ? 'API overloaded (529)'
         : e.pattern === 'budget' ? 'budget exhausted'
         : e.pattern
       console.log(`    ${chalk.red('✗')} ${label.padEnd(40)} ×${e.count}${e.reviewer ? chalk.dim(`  (${e.reviewer})`) : ''}`)

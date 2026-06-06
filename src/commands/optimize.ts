@@ -18,6 +18,8 @@ const PACKAGE_ROOT = resolve(__dirname, '..', '..')
 
 type Agent = 'claude' | 'codex'
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g
+
 export function selectOptimizeAgent(
   config: Config,
   report: DiagnoseReport,
@@ -143,6 +145,28 @@ function unifiedDiff(oldText: string, newText: string): string {
   return lines.filter(l => !l.startsWith(' ')).length > 0 ? lines.join('\n') : ''
 }
 
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '')
+}
+
+export function countInstructionDiffLines(diff: string): { additions: number; deletions: number } {
+  const plainLines = diff.split('\n').map(stripAnsi)
+  return {
+    additions: plainLines.filter(l => l.startsWith('+')).length,
+    deletions: plainLines.filter(l => l.startsWith('-')).length,
+  }
+}
+
+export function buildCodexOptimizeArgs(outputFile: string): string[] {
+  return [
+    'exec',
+    '--skip-git-repo-check',
+    '-o', outputFile,
+    'Read OPTIMIZE_PROMPT.md carefully and produce the new instructions.md content. ' +
+    'Output only the file content — no explanation, no markdown fences.',
+  ]
+}
+
 function setNestedPath(obj: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.')
   let cur = obj
@@ -186,12 +210,7 @@ async function runWithCodex(prompt: string): Promise<string> {
   const outputFile = join(tmpDir, 'output.txt')
   try {
     writeFileSync(join(tmpDir, 'OPTIMIZE_PROMPT.md'), prompt)
-    await execa('codex', [
-      'exec',
-      '-o', outputFile,
-      'Read OPTIMIZE_PROMPT.md carefully and produce the new instructions.md content. ' +
-      'Output only the file content — no explanation, no markdown fences.',
-    ], {
+    await execa('codex', buildCodexOptimizeArgs(outputFile), {
       cwd: tmpDir,
       timeout: 180_000,
       env: { ...process.env },
@@ -411,14 +430,18 @@ export async function runOptimize(opts: {
       if (ch.target === 'config_field') {
         console.log(`    ${chalk.cyan(ch.label.padEnd(28))} ${chalk.red(ch.oldValue)} → ${chalk.green(ch.newValue)}`)
       } else {
-        const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
-        const adds = instructionsDiff.split('\n').filter(l => stripAnsi(l).startsWith('+')).length
-        const dels = instructionsDiff.split('\n').filter(l => stripAnsi(l).startsWith('-')).length
+        const { additions: adds, deletions: dels } = countInstructionDiffLines(instructionsDiff)
         console.log(`    ${chalk.cyan(ch.label.padEnd(28))} ${chalk.green(`+${adds}`)} ${chalk.red(`-${dels}`)} lines`)
       }
       console.log(`      ${chalk.dim(ch.reason)}`)
     }
     console.log()
+
+    if (instructionsDiff) {
+      console.log(chalk.bold('  Instruction diff\n'))
+      console.log(instructionsDiff)
+      console.log()
+    }
 
     if (opts.dryRun) {
       console.log(chalk.dim('  Dry run — no changes written.'))

@@ -9,8 +9,8 @@
 - [Prerequisites](#prerequisites)
 - [Install](#install)
 - [Environment variables](#environment-variables)
-- [Step 1 — Check your environment](#step-1--check-your-environment)
-- [Step 2 — Test with a single PR](#step-2--test-with-a-single-pr)
+- [Step 1 — Check your setup](#step-1--check-your-setup)
+- [Step 2 — Get one useful review](#step-2--get-one-useful-review)
 - [Step 3 — Choose a deployment mode](#step-3--choose-a-deployment-mode)
 - [Step 4 — Verify it's working](#step-4--verify-its-working)
 - [Commands](#commands)
@@ -34,7 +34,7 @@
 
 ## Prerequisites
 
-You need three CLIs installed and authenticated before crosscheck can run reviews.
+You need GitHub CLI and at least one authenticated AI reviewer CLI before crosscheck can run a one-shot review. Install both Claude Code and Codex only if you want cross-vendor review routing.
 
 ### Claude Code
 
@@ -78,26 +78,26 @@ Used for cloning PR branches and (in watch mode) registering webhooks automatica
 **Stable (recommended):**
 
 ```bash
-npm install -g @motivation-labs/crosscheck
+npm install -g @humanbased/crosscheck
 ```
 
 **Beta (latest features, may have rough edges):**
 
 ```bash
-npm install -g @motivation-labs/crosscheck@beta
+npm install -g @humanbased/crosscheck@beta
 ```
 
 **npx — no install:**
 
 ```bash
-npx @motivation-labs/crosscheck <command>
-npx @motivation-labs/crosscheck@beta <command>
+npx @humanbased/crosscheck <command>
+npx @humanbased/crosscheck@beta <command>
 ```
 
 **From source:**
 
 ```bash
-git clone https://github.com/Motivation-Labs/crosscheck
+git clone https://github.com/humanbased-ai/crosscheck
 cd crosscheck
 npm install && npm run build && npm link
 ```
@@ -143,39 +143,49 @@ export CROSSCHECK_WEBHOOK_SECRET=your-secret
 
 ---
 
-## Step 1 — Set up crosscheck
+## Step 1 — Check your setup
 
 ```bash
-crosscheck onboard
+crosscheck status
 ```
 
-`crosscheck onboard` is the recommended first step. It checks your CLIs, walks you through deployment mode, repo selection, review mode, and workflow pipeline, then writes a ready-to-use config — all in one session. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full six-step walkthrough.
+`crosscheck status` prints the active config path, GitHub auth source, usable reviewer CLIs, webhook-secret handling, and current logs. A webhook secret is auto-managed for `watch` and `serve`, so it does not need to be set before a one-shot review.
 
-Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
+If you prefer to create a starter config without the full wizard:
 
-> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
+```bash
+crosscheck init
+```
 
----
+## Step 2 — Get one useful review
 
-## Step 2 — Test with a single PR
-
-Before running continuously, verify end-to-end with one PR:
+Before running continuously, verify end-to-end with one low-risk PR:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
 ```
 
-This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. If it completes without error, your setup is working.
-
-Try Claude as reviewer too:
+This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. If Claude Code is your authenticated reviewer, use:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 ```
 
----
+If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch` or `serve`.
 
 ## Step 3 — Choose a deployment mode
+
+After one-shot review works, run the guided setup:
+
+```bash
+crosscheck onboard
+```
+
+`crosscheck onboard` checks your CLIs, walks you through deployment mode, repo selection, review mode, workflow pipeline, and connection settings, then writes a ready-to-use config. See the [`crosscheck onboard`](#crosscheck-onboard) command reference for the full walkthrough.
+
+Once it completes, go straight to `crosscheck watch`. There is no separate init step required.
+
+> If you prefer to skip the wizard and configure manually, run `crosscheck init` to generate a starter config, then edit `~/.crosscheck/config.yml` directly.
 
 ### Personal vs team
 
@@ -229,14 +239,14 @@ cd /path/to/your/repo && crosscheck watch
 ```
 crosscheck watch
 
-  orgs      motivation-labs, codatta
+  orgs      humanbased-ai, codatta
   mode      cross-vendor
   quality   balanced
   config    ./crosscheck.config.yml  ← edit to change above
 
   ✓ tunnel ready: https://abc123.lhr.life
   tunnel    https://abc123.lhr.life
-  ✓ webhook registered for motivation-labs
+  ✓ webhook registered for humanbased-ai
 
 Waiting for PR events — Ctrl+C to stop.
 ```
@@ -247,7 +257,7 @@ When you press `Ctrl+C`, the SSH tunnel and any registered webhooks are cleaned 
 
 ### Serve mode [BETA] — for an always-on machine (mac-mini, home server)
 
-> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/Motivation-Labs/crosscheck/issues](https://github.com/Motivation-Labs/crosscheck/issues).
+> **Beta:** `serve` is functional but not yet battle-tested in production. Report issues at [github.com/humanbased-ai/crosscheck/issues](https://github.com/humanbased-ai/crosscheck/issues).
 
 Listens on a fixed port. You register the webhook(s) manually once and they stay registered.
 
@@ -257,7 +267,7 @@ crosscheck serve
 
 ```
 crosscheck serving
-⚠  serve is in beta — report issues at github.com/Motivation-Labs/crosscheck/issues
+⚠  serve is in beta — report issues at github.com/humanbased-ai/crosscheck/issues
 
   mode      cross-vendor
   quality   balanced
@@ -265,7 +275,7 @@ crosscheck serving
   endpoint  http://your-machine.local:7891/webhook
 
 Register the endpoint above as a GitHub org webhook (content-type: application/json).
-  → https://github.com/organizations/motivation-labs/settings/hooks
+  → https://github.com/organizations/humanbased-ai/settings/hooks
   → https://github.com/organizations/codatta/settings/hooks
 ```
 
@@ -344,7 +354,7 @@ crosscheck init
 crosscheck init --config /path/to/crosscheck.config.yml
 ```
 
-What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK_WEBHOOK_SECRET`.
+What it checks: `codex` CLI, `claude` CLI, `gh` CLI, GitHub auth, and webhook-secret handling. The webhook secret is auto-managed at `~/.crosscheck/webhook-secret` for `watch` and `serve`.
 
 | Flag | Description |
 |---|---|
@@ -354,7 +364,7 @@ What it checks: `codex` CLI, `claude` CLI, `gh` CLI, `GITHUB_TOKEN`, `CROSSCHECK
 
 ### `crosscheck onboard`
 
-The recommended first-time setup command. Walks through seven steps interactively and writes a ready-to-use config.
+The recommended first-time setup command. Walks through ten steps interactively and writes a ready-to-use config.
 
 ```bash
 crosscheck onboard
@@ -364,7 +374,7 @@ crosscheck onboard --team         # force team mode for this session
 crosscheck onboard --reconfigure  # re-run setup even if config already exists
 ```
 
-**The seven steps:**
+**The ten steps:**
 
 **Step 1 — Environment check.** Verifies codex CLI, claude CLI, gh CLI, and GitHub token. At least one AI CLI must be authenticated; gh auth is always required. Prints ✓/✗ with fix hints.
 
@@ -378,7 +388,11 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 - `cross-vendor` — Claude reviews Codex PRs; Codex reviews Claude PRs (recommended when using both agents)
 - `single-vendor` — one AI reviews all PRs (default when only one CLI is installed)
 
-**Step 5 — Workflow pipeline.** Choose what happens after a review:
+**Step 5 — Primary author.** In personal cross-vendor mode, choose which agent usually authors your PRs so Crosscheck can route reviews to the other vendor.
+
+**Step 6 — Review quality.** Choose the speed/thoroughness tier for review prompts and reviewer timeouts.
+
+**Step 7 — Workflow pipeline.** Choose what happens after a review:
 
 ```
   [1] review only              — AI posts a comment; you handle fixes
@@ -388,11 +402,17 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 6 — Connection type.** Choose how GitHub webhooks reach your local server:
+**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
+
+**Step 9 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
+
+**Step 10 — Connection type.** Choose how GitHub webhooks reach your local server:
 - `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
 - `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
 
-**Step 7 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` (and `workflow.yml` if re-check was selected).
+**Step 11 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
+
+**Step 12 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
 
 ```
 crosscheck onboard
@@ -408,7 +428,7 @@ crosscheck onboard
   Choice [1]: 1
 
   Step 3 — select repos to monitor
-  [1] motivation-labs (org · 12 repos)
+  [1] humanbased-ai (org · 12 repos)
   [2] codatta (org · 5 repos)
   [3] your-github-login (personal · 8 repos)
   Select [all]: 1,3
@@ -417,21 +437,45 @@ crosscheck onboard
   [1] cross-vendor  [2] single-vendor
   Choice [1]: 1
 
-  Step 5 — workflow pipeline
+  Step 5 — primary author
+  [1] Claude  [2] Codex  [3] both
+  Choice [3]: 3
+
+  Step 6 — review quality
+  [1] fast  [2] balanced  [3] thorough
+  Choice [2]: 2
+
+  Step 7 — workflow pipeline
   [1] review only  [2] review → fix  [3] review → fix → re-check
   Choice [2]: 3
 
-  Step 6 — connection type
+  Step 8 — fix → re-check rounds
+  [1] 1 round  [2] 2 rounds  [3] 3 rounds
+  Choice [1]: 1
+
+  Step 9 — auto conflict-resolve
+  [1] disabled  [2] enabled
+  Choice [1]: 1
+
+  Step 10 — connection type
   [1] localhost.run  [2] smee.io
   Choice [1]: 1
 
-  Step 7 — review and write config
+  Step 11 — git clone protocol
+  [1] SSH  [2] HTTPS
+  Choice [1]: 1
+
+  Step 12 — review and write config
   deployment   personal
   connection   localhost.run
-  orgs         motivation-labs
+  clone        ssh
+  orgs         humanbased-ai
   users        your-github-login (8 repos)
   mode         cross-vendor
+  quality      balanced
   pipeline     review-fix-recheck
+  max rounds   1
+  conflict-resolve  no
   config       ~/.crosscheck/config.yml
 
   ✓ config written to ~/.crosscheck/config.yml
@@ -484,7 +528,7 @@ crosscheck run https://github.com/owner/repo/pull/123 --crazy   # loop until APP
 crosscheck run https://github.com/owner/repo/pull/123 --halfcrazy
 ```
 
-The workflow executed is loaded from `.crosscheck/workflow.yml` in the repo root (if present) or falls back to the built-in default pipeline (review only). Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
+The workflow executed is loaded from `.crosscheck/workflow.yml` in the operator repo root if present, then `~/.crosscheck/workflow.yml`, and otherwise falls back to the built-in default pipeline: review, then fix when the verdict is not `APPROVE`. Use `crosscheck run` to test your full pipeline end-to-end against a real PR.
 
 | Flag | Description |
 |---|---|
@@ -799,7 +843,7 @@ The monetary estimate formula: `(hours_saved × hourly_rate_usd) + (issues_caugh
 
 ### `crosscheck issue`
 
-Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `Motivation-Labs/crosscheck` after you confirm. No manual log-digging or issue writing required.
+Reads recent error logs, uses your best-performing AI agent to draft a GitHub issue, asks three short follow-up questions, and submits to `humanbased-ai/crosscheck` after you confirm. No manual log-digging or issue writing required.
 
 ```bash
 crosscheck issue               # interactive — review draft before submitting
@@ -834,8 +878,8 @@ crosscheck issue
   When crosscheck runs a Codex review, the reviewer tries to execute `tsc`
   ...
 
-  Submit to Motivation-Labs/crosscheck? [y/N]: y
-  ✓ https://github.com/Motivation-Labs/crosscheck/issues/99
+  Submit to humanbased-ai/crosscheck? [y/N]: y
+  ✓ https://github.com/humanbased-ai/crosscheck/issues/99
 ```
 
 If no errors are found in recent logs, crosscheck prints `No errors found in recent logs — nothing to report` and exits cleanly.
@@ -890,6 +934,8 @@ crosscheck stores its config in `~/.crosscheck/config.yml` by default — persis
 2. `./crosscheck.config.yml`
 3. `./.crosscheck.yml`
 
+If `~/.crosscheck/config.yml` exists, it wins over local project files. Pass `--config ./crosscheck.config.yml` when you deliberately want to test a project-local config.
+
 Run `crosscheck init` to generate `~/.crosscheck/config.yml` with all options documented.
 
 Logs are written to `~/.crosscheck/logs/YYYY-MM-DD.ndjson` and retained for 30 days by default.
@@ -927,7 +973,7 @@ vendors:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
-    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:
@@ -946,7 +992,7 @@ budget:
 
 # ── Orgs — covers all repos in each org with one webhook ─────────────────────
 orgs:
-  - motivation-labs
+  - humanbased-ai
   - codatta
 
 # ── Users — monitors all repos owned by personal GitHub accounts (non-org) ───

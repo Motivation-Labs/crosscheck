@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     # id-token: write enables npm --provenance (signed attestation linking the
-    # tarball to this workflow run) and is also a prerequisite if the @motivation-labs
+    # tarball to this workflow run) and is also a prerequisite if the @humanbased
     # scope is ever migrated to npm Trusted Publishers (OIDC-only, no NPM_TOKEN).
     permissions:
       contents: read
@@ -78,7 +78,7 @@ jobs:
           # after a transient failure), skip the publish so we don't trip npm's
           # "cannot publish over existing version" error and surface a real failure as
           # if it were that one.
-          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+          if npm view "@humanbased/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
             echo "Version ${VERSION} already on npm — skipping publish."
             exit 0
           fi
@@ -143,7 +143,7 @@ jobs:
       - name: Publish to npm @alpha
         run: |
           VERSION="${{ steps.stamp.outputs.version }}"
-          if npm view "@motivation-labs/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
+          if npm view "@humanbased/crosscheck@${VERSION}" version 2>/dev/null | grep -qF "${VERSION}"; then
             echo "Version ${VERSION} already on npm — skipping publish."
             exit 0
           fi

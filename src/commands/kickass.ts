@@ -262,6 +262,10 @@ function parseVerdictFromOutput(output: string | void): string | null {
   return raw.startsWith('NEEDS') ? 'NEEDS WORK' : raw
 }
 
+export function verdictBoardUpdateForAction(action: KickassAction, verdict: string): { verdict?: string; recheckVerdict?: string } {
+  return action === 'recheck' ? { recheckVerdict: verdict } : { verdict }
+}
+
 const TIMEOUT_PUMP_THRESHOLD = 3
 
 export async function executeKickassPlan(
@@ -593,7 +597,9 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
         board.updatePR(key, { phase: actionPhase(item.action) as import('../lib/board.js').PRPhase, label: actionLabel(item.action) })
       },
       onDispatchEnd: (item: PreflightItem, key: string, startedAt: number, verdict?: string | null) => {
-        if (verdict != null) board.updatePR(key, { verdict })
+        if (verdict != null) {
+          board.updatePR(key, verdictBoardUpdateForAction(item.action, verdict))
+        }
         board.updatePR(key, { phase: donePhase(item.action) as import('../lib/board.js').PRPhase })
         board.completePR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url })
       },

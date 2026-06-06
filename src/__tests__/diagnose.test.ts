@@ -82,6 +82,25 @@ describe('classifyError', () => {
     expect(r.pattern).toBe('auth_failure')
   })
 
+  // IN-574: transient API conditions are first-class patterns, not "other"/"auth".
+  it('detects rate_limit on 429 even when the body mentions a token', () => {
+    expect(classifyError('api_error_status: 429 rate limit — check token usage').pattern).toBe('rate_limit')
+  })
+
+  it('detects overloaded on 529', () => {
+    expect(classifyError('API Error: 529 Overloaded. Please try again.').pattern).toBe('overloaded')
+  })
+
+  it('detects budget exhaustion', () => {
+    expect(classifyError('error_max_budget_usd: Reached maximum budget ($2)').pattern).toBe('budget')
+  })
+
+  it('does not match 429/529 digits embedded in durations or counts', () => {
+    // Without word boundaries, "5290ms" matched /529/ and a timeout read as `overloaded`.
+    expect(classifyError('Request timed out after 5290ms').pattern).toBe('timeout')
+    expect(classifyError('operation timed out after 4290ms').pattern).toBe('timeout')
+  })
+
   it('falls back to other for unrecognised message', () => {
     const r = classifyError('some completely unknown error')
     expect(r.pattern).toBe('other')
@@ -216,5 +235,29 @@ describe('buildDiagnoseReport', () => {
     const r = buildDiagnoseReport('2026-01-10', FIXTURES_DIR)
     const tscErr = r.errors.find(e => e.pattern === 'command_not_found' && e.command === 'tsc')
     expect(tscErr?.reviewer).toBe('codex')
+  })
+})
+
+// IN-574: transient API errors must surface as distinct, actionable patterns
+// (not lumped into "other"), and drive retry/budget suggestions.
+const FIXTURES_TRANSIENT_DIR = join(fileURLToPath(import.meta.url), '..', 'fixtures-transient')
+
+describe('buildDiagnoseReport — transient API error patterns', () => {
+  it('counts rate_limit, overloaded, and budget as distinct patterns', () => {
+    const r = buildDiagnoseReport(undefined, FIXTURES_TRANSIENT_DIR)
+    const rate = r.errors.find(e => e.pattern === 'rate_limit')
+    const overloaded = r.errors.find(e => e.pattern === 'overloaded')
+    const budget = r.errors.find(e => e.pattern === 'budget')
+    expect(rate?.count).toBe(2)
+    expect(overloaded?.count).toBe(1)
+    expect(budget?.count).toBe(1)
+    // None of them should fall through to the catch-all bucket.
+    expect(r.errors.some(e => e.pattern === 'other')).toBe(false)
+  })
+
+  it('suggests retry/backoff for repeated transient capacity errors and a budget fix', () => {
+    const r = buildDiagnoseReport(undefined, FIXTURES_TRANSIENT_DIR)
+    expect(r.suggestions.some(s => /retry\/backoff|stagger/.test(s.reason))).toBe(true)
+    expect(r.suggestions.some(s => /budget/.test(s.reason))).toBe(true)
   })
 })

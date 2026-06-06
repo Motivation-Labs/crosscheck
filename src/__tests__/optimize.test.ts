@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { selectOptimizeAgent, deriveConfigChanges } from '../commands/optimize.js'
+import {
+  buildCodexOptimizeArgs,
+  countInstructionDiffLines,
+  deriveConfigChanges,
+  selectOptimizeAgent,
+} from '../commands/optimize.js'
 import type { Config } from '../config/schema.js'
 import type { DiagnoseReport } from '../commands/diagnose.js'
 
@@ -185,5 +190,23 @@ describe('deriveConfigChanges', () => {
     ])
     const changes = deriveConfigChanges(report, makeFullConfig('thorough'))
     expect(changes).toHaveLength(0)
+  })
+})
+
+describe('optimize helpers', () => {
+  it('runs codex optimize from a temporary non-git directory', () => {
+    const args = buildCodexOptimizeArgs('/tmp/out.txt')
+    expect(args).toContain('--skip-git-repo-check')
+    expect(args).toEqual(expect.arrayContaining(['-o', '/tmp/out.txt']))
+  })
+
+  it('counts ANSI-colored instruction diff changes', () => {
+    const diff = [
+      '\u001b[32m+new instruction\u001b[39m',
+      '\u001b[31m-old instruction\u001b[39m',
+      ' unchanged',
+    ].join('\n')
+
+    expect(countInstructionDiffLines(diff)).toEqual({ additions: 1, deletions: 1 })
   })
 })

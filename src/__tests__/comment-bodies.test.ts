@@ -3,6 +3,7 @@ import {
   buildFixAppliedCommentBody,
   buildConflictResolvedCommentBody,
   buildRetriedReviewBanner,
+  buildReviewFailedCommentBody,
 } from '../lib/comment-bodies.js'
 
 describe('buildFixAppliedCommentBody', () => {
@@ -100,6 +101,69 @@ describe('buildRetriedReviewBanner', () => {
   it('points the reader at the timeout_sec knob for repeat occurrences', () => {
     const banner = buildRetriedReviewBanner(180_000, 120_000)
     expect(banner).toContain('`timeout_sec`')
+  })
+})
+
+describe('buildReviewFailedCommentBody', () => {
+  const PR_URL = 'https://github.com/o/r/pull/42'
+
+  it('renders the timeout reason with summary, retry hint, and the non-review marker', () => {
+    const body = buildReviewFailedCommentBody({
+      prUrl: PR_URL,
+      reason: 'timeout',
+      summary: 'claude reviewer subprocess timed out after 180s',
+      details: 'Vendor: `claude`\nConfigured timeout: 180s',
+    })
+    expect(body).toContain('### ⏱️ Review failed — timed out')
+    expect(body).toContain('**Reason**: claude reviewer subprocess timed out after 180s')
+    expect(body).toContain('crosscheck run https://github.com/o/r/pull/42')
+    expect(body).toContain('<!-- crosscheck: review_failed -->')
+    // Distinct from a review annotation so Phase 1 detection ignores it.
+    expect(body).not.toContain('origin=')
+  })
+
+  it('uses the usage_limit title and renders the summary verbatim', () => {
+    const body = buildReviewFailedCommentBody({
+      prUrl: PR_URL,
+      reason: 'usage_limit',
+      summary: 'claude reviewer hit a usage / rate limit',
+    })
+    expect(body).toContain('### 🚫 Review failed — reviewer hit usage limit')
+    expect(body).toContain('**Reason**: claude reviewer hit a usage / rate limit')
+  })
+
+  it('uses the generic subprocess_error title for unspecified failures', () => {
+    const body = buildReviewFailedCommentBody({
+      prUrl: PR_URL,
+      reason: 'subprocess_error',
+      summary: 'codex reviewer subprocess failed',
+    })
+    expect(body).toContain('### ❌ Review failed')
+    expect(body).not.toContain('timed out')
+  })
+
+  it('wraps non-empty details in a collapsible <details> block', () => {
+    const body = buildReviewFailedCommentBody({
+      prUrl: PR_URL,
+      reason: 'timeout',
+      summary: 's',
+      details: 'Vendor: `claude`\nConfigured timeout: 180s',
+    })
+    expect(body).toContain('<details>')
+    expect(body).toContain('<summary>Details</summary>')
+    expect(body).toContain('Vendor: `claude`')
+    expect(body).toContain('</details>')
+  })
+
+  it('omits the <details> block entirely when details is missing or blank', () => {
+    const noDetails = buildReviewFailedCommentBody({
+      prUrl: PR_URL, reason: 'subprocess_error', summary: 's',
+    })
+    const blank = buildReviewFailedCommentBody({
+      prUrl: PR_URL, reason: 'subprocess_error', summary: 's', details: '   \n  ',
+    })
+    expect(noDetails).not.toContain('<details>')
+    expect(blank).not.toContain('<details>')
   })
 })
 

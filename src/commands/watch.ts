@@ -46,6 +46,8 @@ import {
   stopSmartSwitch,
 } from '../lib/smart-switch.js'
 import type { Config } from '../config/schema.js'
+import { buildReviewFailedCommentBody } from '../lib/comment-bodies.js'
+import { classifyReviewerError } from '../lib/reviewer-error.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -481,6 +483,29 @@ export async function runWatch(opts: WatchOpts = {}) {
         const message = err instanceof Error ? err.message : String(err)
         if (boardAdded) board.failPR(key, message)
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'review' }, err)
+        // Post a PR-visible failure comment when the error came from a reviewer
+        // subprocess (timeout / usage limit / subprocess crash). Non-reviewer
+        // errors (fix, conflict-resolve, GitHub API) return `null` from the
+        // classifier and skip the comment — those have their own handling.
+        // The comment uses a bareword marker so Phase 1 detection ignores it
+        // and the next push still triggers a fresh review.
+        const classified = classifyReviewerError(err)
+        if (classified) {
+          try {
+            await lockOctokit.rest.issues.createComment({
+              owner, repo: repoName, issue_number: prNumber,
+              body: buildReviewFailedCommentBody({
+                prUrl: `https://github.com/${owner}/${repoName}/pull/${prNumber}`,
+                reason: classified.reason,
+                summary: classified.summary,
+                ...(classified.details !== undefined && { details: classified.details }),
+              }),
+            })
+            fileLog({ level: 'info', event: 'review_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, reason: classified.reason })
+          } catch (postErr) {
+            fileLog({ level: 'warn', event: 'review_failed_comment_failed', repo: `${owner}/${repoName}`, pr: prNumber, error: postErr instanceof Error ? postErr.message : String(postErr) })
+          }
+        }
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'failure')
         // Smart-switch: when a reviewer hits a subscription limit in cross-vendor mode,
         // degrade to single-vendor with the healthy vendor for the next 30 minutes.

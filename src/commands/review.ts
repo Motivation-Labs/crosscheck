@@ -10,7 +10,7 @@ import { runClaudeReview } from '../reviewers/claude.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT } from '../lib/vendor.js'
 import { initLogger, log as fileLog, logError } from '../lib/logger.js'
-import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING } from '../lib/verdict.js'
+import { parseVerdict, formatVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { clonePRForReview } from '../lib/clone.js'
 
 function parsePRUrl(url: string): { owner: string; repo: string; number: number } | null {
@@ -135,15 +135,23 @@ export async function runReview(prUrl: string, configPath?: string, forceReviewe
     }
 
     reviewSpinner.succeed(`Review complete (${elapsed}s)`)
-    const { verdict, clean } = parseVerdict(reviewText)
-    if (verdict === null) {
+    const parsed = parseVerdict(reviewText)
+    const { clean } = parsed
+    if (parsed.verdict === null) {
       fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repo}`, pr: number, reviewer, output_length: reviewText.length })
+    }
+    // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
+    // approved-with-comments (matches the runner's gating so both paths converge).
+    const gate = applySeverityGate(parsed.verdict, clean)
+    const verdict = gate.verdict
+    if (gate.downgraded) {
+      fileLog({ level: 'info', event: 'verdict_severity_gated', repo: `${owner}/${repo}`, pr: number, reviewer, raw_verdict: parsed.verdict, gated_verdict: verdict })
     }
     fileLog({ level: 'info', event: 'review_complete', repo: `${owner}/${repo}`, pr: number, reviewer, model, verdict: verdict ?? undefined, duration_ms: Date.now() - reviewStart, tokens_used: tokensUsed })
     console.log(`  ${formatVerdict(verdict)}`)
     const commentBody = verdict === null
       ? `${NULL_VERDICT_WARNING}\n\n${clean}`
-      : prependVerdictToComment(clean, verdict)
+      : prependVerdictToComment(gate.downgraded ? `${SEVERITY_GATE_NOTE}\n\n${clean}` : clean, verdict)
     await postReviewComment(octokit, owner, repo, number, commentBody, reviewer, config.brand, origin, verdict ?? undefined, undefined, false, model, 'review', 1, pr.head.sha)
     fileLog({ level: 'info', event: 'comment_posted', repo: `${owner}/${repo}`, pr: number, url: prUrl })
     console.log(chalk.green(`\n✓ Review posted to ${prUrl}\n`))

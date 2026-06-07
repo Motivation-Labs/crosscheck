@@ -749,7 +749,10 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
         }
-        throw fixErr
+        // The review was already posted — treat fix failure as a skipped step so the
+        // workflow completes with the review's verdict rather than exiting non-zero and
+        // releasing the remote lock as a workflow failure.
+        continue
       }
 
       if (appliedCount === 0) {

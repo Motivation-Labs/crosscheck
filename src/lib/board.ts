@@ -282,6 +282,18 @@ export class PRBoard {
   }
 
   addPR(key: string, prNumber: number, repo: string, branch: string, round?: number): void {
+    // When a new round starts for a PR that already has a completed slot in the
+    // workspace, evict the prior-round slot to scrollback so only the current
+    // round is shown. Prior-round slots always have a different key (different
+    // SHA suffix) but the same prNumber + repo combination.
+    if ((round ?? 1) >= 2) {
+      for (const [existingKey, slot] of this.slots) {
+        if (existingKey !== key && slot.prNumber === prNumber && slot.repo === repo && slot.completedAt !== undefined) {
+          this.printStatic(this.renderPRSlotFolded(slot))
+          this.slots.delete(existingKey)
+        }
+      }
+    }
     this.slots.set(key, { prNumber, repo, branch, label: 'cloning...', startedAt: Date.now(), phase: 'queued', round: round ?? 1 })
     this.stats.prsReceived++
   }
@@ -557,7 +569,9 @@ export class PRBoard {
         const label = this.crLabelFn(slot.recheckVerdict)
         const tokRaw = fmtTokensRaw(slot.recheckTokens)
         const roundLabel = tokRaw ? `${slot.recheckVerdict}, ${tokRaw}` : slot.recheckVerdict
-        return `${roundsLabel} ${makeBar(0, 5, fill, t.barEmpty)} ${label(roundLabel)}`
+        // Fill bar fully on APPROVE (clean pass), partially on NEEDS WORK, empty on BLOCK.
+        const barFilled = slot.recheckVerdict === 'APPROVE' ? 5 : slot.recheckVerdict === 'NEEDS WORK' ? 3 : 0
+        return `${roundsLabel} ${makeBar(barFilled, 5, fill, t.barEmpty)} ${label(roundLabel)}`
       }
       return `${roundsLabel} ${makeBar(0, 5, t.barPRFill, t.barEmpty)} ${t.dim('queued')}`
     }

@@ -161,6 +161,39 @@ describe('PRBoard — TTY workspace retention', () => {
     expect(output).toContain('https://github.com/acme/api/pull/142')
   })
 
+  it('evicts the prior-round completed slot when round 2 starts for the same PR', () => {
+    // Round 1 — BLOCK, fix skipped, recheck skipped (the stale slot the user saw)
+    board.addPR('k1@sha1', 214, 'owner/repo', 'fix/branch', 1)
+    board.updatePR('k1@sha1', { verdict: 'BLOCK', commentCount: 1, fixCount: 0 })
+    board.completePR('k1@sha1', { elapsedMs: 344_000, url: 'https://github.com/owner/repo/pull/214' })
+    expect(slots().has('k1@sha1')).toBe(true)
+
+    // Round 2 — new SHA push: board must evict round 1 and add round 2
+    board.addPR('k1@sha2', 214, 'owner/repo', 'fix/branch', 2)
+    expect(slots().has('k1@sha1')).toBe(false)   // prior round evicted
+    expect(slots().has('k1@sha2')).toBe(true)    // new round present
+
+    board.updatePR('k1@sha2', { recheckVerdict: 'APPROVE' })
+    board.completePR('k1@sha2', { elapsedMs: 362_000, url: 'https://github.com/owner/repo/pull/214' })
+
+    const output = stripAnsi(invokeRender())
+    expect(output).not.toContain('BLOCK')
+    expect(output).toContain('APPROVE')
+  })
+
+  it('does not evict active slots when round 2 starts', () => {
+    // Active round 1 for a different PR — must not be touched
+    board.addPR('other@sha', 99, 'owner/repo', 'other-branch', 1)
+    // Completed round 1 for PR 214
+    board.addPR('k1@sha1', 214, 'owner/repo', 'fix/branch', 1)
+    board.completePR('k1@sha1', { elapsedMs: 1_000, url: 'u' })
+
+    board.addPR('k1@sha2', 214, 'owner/repo', 'fix/branch', 2)
+    expect(slots().has('other@sha')).toBe(true)   // untouched
+    expect(slots().has('k1@sha1')).toBe(false)    // evicted
+    expect(slots().has('k1@sha2')).toBe(true)
+  })
+
   it('orders sections top-to-bottom: config → stats → PR workspace', () => {
     board.addPR('k1', 1, 'acme/api', 'feat/x')
     const output = stripAnsi(invokeRender())

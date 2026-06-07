@@ -14,7 +14,7 @@ import { runConflictResolveStep, findConflictedFiles } from '../reviewers/confli
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
-import { log as fileLog, logError } from '../lib/logger.js'
+import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
@@ -98,6 +98,8 @@ export interface WorkflowCompleteInputs {
   round?: number
   trigger?: WorkflowTrigger
   qualityTier?: string
+  workflowError?: unknown
+  failedStep?: string
   now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
 }
 
@@ -121,6 +123,10 @@ export function buildWorkflowCompleteEvent(
   const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
   const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
   const now = inputs.now ?? Date.now()
+  const rawErrorMessage = inputs.workflowError instanceof Error ? inputs.workflowError.message : inputs.workflowError !== undefined ? String(inputs.workflowError) : undefined
+  const errorMessage = rawErrorMessage !== undefined && rawErrorMessage.length > 500
+    ? `${rawErrorMessage.slice(0, 500)} …[truncated]`
+    : rawErrorMessage
 
   const totalTokens = stepValues.reduce((s, r) => s + (r.tokens_used ?? 0), 0)
   // Only emit split fields when at least one step actually recorded them — avoid
@@ -146,6 +152,8 @@ export function buildWorkflowCompleteEvent(
     ...(inputs.qualityTier !== undefined && { quality_tier: inputs.qualityTier }),
     ...(inputs.round !== undefined && { round: inputs.round }),
     ...(inputs.trigger !== undefined && { trigger: inputs.trigger }),
+    ...(inputs.failedStep !== undefined && { failed_step: inputs.failedStep }),
+    ...(errorMessage !== undefined && { error_message: errorMessage, error_category: classifyError(rawErrorMessage ?? '') }),
   }
 }
 
@@ -413,6 +421,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
+  let workflowError: unknown = undefined
+  let failedStep: string | undefined = undefined
   // When a fix commits and a structural review/recheck step follows, we acquire
   // the remote lock on the pushed SHA. Track it here so the finally can detect
   // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
@@ -426,11 +436,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const workflowId = randomUUID()
   const workflowStart = Date.now()
   const stepsRun: string[] = []
+  let currentStepName: string | undefined
 
   emitPRComplexity(ctx, triggerField)
 
   try {
   for (const step of steps) {
+    currentStepName = step.name
     stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
@@ -531,8 +543,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (parsed.verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
-      // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
-      // approved-with-comments so warning-only reviews stop driving the fix/recheck loop.
+      // Severity gate: NEEDS WORK with only P3 nits is downgraded to APPROVE so
+      // suggestion-only reviews don't drive the fix/recheck loop. P2 (correctness)
+      // and above keep NEEDS WORK and require human attention before merge.
       const gate = applySeverityGate(parsed.verdict, clean)
       const verdict = gate.verdict
       if (gate.downgraded) {
@@ -736,6 +749,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
         }
+        // The review was already posted — treat fix failure as a skipped step so the
+        // workflow completes with the review's verdict rather than exiting non-zero and
+        // releasing the remote lock as a workflow failure.
         continue
       }
 
@@ -1077,6 +1093,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
   } catch (err) {
     workflowFailed = true
+    workflowError = err
+    failedStep = currentStepName
     throw err
   } finally {
     if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
@@ -1126,6 +1144,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     fileLog(buildWorkflowCompleteEvent({
       owner, repoName, prNumber,
       workflowId, workflowStart, stepsRun, results, workflowFailed,
+      workflowError,
+      failedStep,
       round: ctx.round,
       trigger: ctx.trigger,
       qualityTier: config.quality.tier,

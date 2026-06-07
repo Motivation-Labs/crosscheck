@@ -111,15 +111,17 @@ program
 program
   .command('scan')
   .description('Scan monitored open PRs and show stale crosscheck workflow state')
+  .option('-c, --config <path>', 'config file path')
   .option('--tidy', 'show only stale PRs that need attention')
   .option('--force', 'bypass the 1-minute scan cache')
   .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
   .option('--json', 'emit raw scan result for scripts')
-  .action((opts: { tidy?: boolean; force?: boolean; staleAfter?: string; json?: boolean }) => void runScan(opts))
+  .action((opts: { config?: string; tidy?: boolean; force?: boolean; staleAfter?: string; json?: boolean }) => void runScan(opts))
 
 program
   .command('kickass')
   .description('Select actionable PRs from the operator queue and advance them')
+  .option('-c, --config <path>', 'config file path')
   .option('--force', 'bypass the 1-minute scan cache')
   .option('--stale-after <duration>', 'duration like 30m, 2h, 1d', '24h')
   .option('--dry-run', 'print selected actions without running them')
@@ -127,15 +129,18 @@ program
   .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK; disables all timeout constraints')
   .option('--halfcrazy', '(deprecated alias for --half-crazy)')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
+  .option('--no-timeout', 'remove the reviewer subprocess timeout cap')
   .option('--concurrent [n]', 'run PRs in parallel; omit n for one agent per selected PR, or set a cap (e.g. --concurrent 3)')
   .option('--stagger <ms>', 'ms delay between concurrent worker starts; default 2000 when --concurrent is set')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true; stagger?: string }) => {
+  .action((opts: { config?: string; force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string | false; noTimeout?: boolean; concurrent?: string | true; stagger?: string }) => {
     const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
+    // Commander sets opts.timeout = false (not opts.noTimeout) when --no-timeout is passed.
+    const noTimeout = opts.noTimeout || opts.timeout === false
     const concurrent = opts.concurrent === undefined ? undefined
       : opts.concurrent === true ? 0
       : Number(opts.concurrent)
     const staggerMs = opts.stagger !== undefined ? Number(opts.stagger) : undefined
-    void runKickass({ ...opts, roundMode, concurrent, staggerMs })
+    void runKickass({ ...opts, roundMode, noTimeout, timeout: typeof opts.timeout === 'string' ? opts.timeout : undefined, concurrent, staggerMs })
   })
 
 program

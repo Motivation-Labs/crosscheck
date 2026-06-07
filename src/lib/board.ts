@@ -55,6 +55,7 @@ interface PRSlot {
   crReviewer?: string       // vendor that ran the CR step (claude | codex)
   recheckReviewer?: string  // vendor that ran the recheck step
   qualityTier?: string      // quality tier used for this run
+  skipReason?: string
 }
 
 export interface PRUpdate {
@@ -72,11 +73,16 @@ export interface PRUpdate {
   crReviewer?: string
   recheckReviewer?: string
   qualityTier?: string
+  skipReason?: string
 }
 
 export interface PRCompletionData {
   elapsedMs: number
   url: string
+}
+
+export interface PRSkipData extends PRCompletionData {
+  reason: string
 }
 
 interface Stats {
@@ -303,6 +309,7 @@ export class PRBoard {
     if (updates.crReviewer !== undefined) slot.crReviewer = updates.crReviewer
     if (updates.recheckReviewer !== undefined) slot.recheckReviewer = updates.recheckReviewer
     if (updates.qualityTier !== undefined) slot.qualityTier = updates.qualityTier
+    if (updates.skipReason !== undefined) slot.skipReason = updates.skipReason
   }
 
   completePR(key: string, data: PRCompletionData): void {
@@ -323,6 +330,21 @@ export class PRBoard {
     if (fixCount !== undefined && fixCount > 0) this.stats.fixesApplied++
 
     // Non-TTY has no live block to re-render — emit the folded line to scrollback and drop the slot.
+    if (!this.isTTY) {
+      process.stdout.write(this.renderPRSlotFolded(slot) + '\n')
+      this.slots.delete(key)
+    }
+  }
+
+  skipPR(key: string, data: PRSkipData): void {
+    const slot = this.slots.get(key)
+    if (!slot) return
+
+    slot.completedAt = Date.now()
+    slot.url = data.url
+    slot.label = 'skipped'
+    slot.skipReason = data.reason
+
     if (!this.isTTY) {
       process.stdout.write(this.renderPRSlotFolded(slot) + '\n')
       this.slots.delete(key)
@@ -441,7 +463,7 @@ export class PRBoard {
 
     // ── Line 1: identity  <pad>  started·elapsed  phase-label ────────────────
     const branch = truncate(slot.branch, 22)
-    const icon = isCompleted ? t.success('✓') : t.spinner(frame)
+    const icon = isCompleted && slot.skipReason ? t.warning('↷') : isCompleted ? t.success('✓') : t.spinner(frame)
     const phaseLabel = this.phaseLine1Label(slot, frame)
     const timePart = isCompleted
       ? t.dim(eSuffix)
@@ -461,14 +483,19 @@ export class PRBoard {
       ? `PR ${makeBar(locToFilled(slot.prLoc), 10, t.barPRFill, t.barEmpty)} ${t.dim(String(slot.prLoc) + 'loc')}`
       : `PR ${makeBar(0, 10, t.barPRFill, t.barEmpty)} ${t.dim('—')}`
 
-    const crSection = this.renderCRSection(slot, frame)
-
     // URL line — only shown for completed slots that have a URL. Without this,
     // expanded completions (≤ FOLD_THRESHOLD) never surface the PR link in the
     // live block; the URL is otherwise only rendered in the folded form.
     const urlLine = isCompleted && slot.url
       ? `\n    ${t.dim('→')} ${t.accent(slot.url)}`
       : ''
+
+    if (slot.skipReason) {
+      const reason = `Skip ${t.warning(slot.skipReason)}`
+      return `${l1}\n${reason}${urlLine}`
+    }
+
+    const crSection = this.renderCRSection(slot, frame)
 
     // Round 2+: skip Fix, collapse into compact recheck display
     const round = slot.round ?? 1
@@ -490,7 +517,7 @@ export class PRBoard {
 
   private phaseLine1Label(slot: PRSlot, frame: string): string {
     const t = this.theme
-    if (slot.completedAt !== undefined) return t.dim('done')
+    if (slot.completedAt !== undefined) return slot.skipReason ? t.dim(`skipped ${slot.skipReason}`) : t.dim('done')
     switch (slot.phase) {
       case 'reviewing':
       case 'rechecking':
@@ -737,9 +764,12 @@ export class PRBoard {
     }
 
     const urlPart = slot.url ? `  ${t.dim('→')} ${t.accent(slot.url)}` : ''
-    const partsStr = parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
+    const partsStr = slot.skipReason
+      ? t.warning(`skipped: ${slot.skipReason}`)
+      : parts.length > 0 ? parts.join(t.dim(' · ')) : t.dim('—')
+    const icon = slot.skipReason ? t.warning('↷') : t.success('✓')
 
-    return `  ${t.success('✓')} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
+    return `  ${icon} ${t.dim(`#${slot.prNumber}`)}  ${t.dim(slot.repo)}  ${t.dim(branch)}  ${partsStr}  ${t.dim(`(${elapsed})`)}${urlPart}`
   }
 
   // ── Overflow eviction ──────────────────────────────────────────────────────

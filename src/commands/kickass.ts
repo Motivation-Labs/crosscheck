@@ -20,17 +20,19 @@ import { loadWorkflow } from '../lib/workflow.js'
 import { isTransientGitTransportError } from '../lib/clone.js'
 
 export interface KickassOpts {
+  config?: string
   force?: boolean
   staleAfter?: string
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
   timeout?: string
+  noTimeout?: boolean
   concurrent?: number  // parallel agents; 0 = one per selected PR; undefined/1 = sequential
   staggerMs?: number  // ms delay between concurrent worker starts; default 2000 when concurrent > 1
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
-export type KickassSkipReason = 'fork_pr' | 'stale_signature'
+export type KickassSkipReason = 'fork_pr' | 'stale_signature' | 'workflow_complete' | 'in_progress_local' | 'in_progress_remote' | 'no_reviewer'
 export type KickassFailureReason = ErrorCategory
 export type FixDeliveryMode = Config['post_review']['auto_fix']['delivery']['mode']
 
@@ -59,6 +61,8 @@ export interface ExecuteKickassDeps {
   onDispatchStart?: (item: PreflightItem, key: string, startedAt: number) => void
   /** Called after a successful dispatchRun — use to complete a board slot. verdict is parsed from subprocess output when available. */
   onDispatchEnd?: (item: PreflightItem, key: string, startedAt: number, verdict?: string | null) => void
+  /** Called when the delegated run exits successfully without doing work. */
+  onDispatchSkip?: (item: PreflightItem, key: string, startedAt: number, reason: KickassSkipReason) => void
   /** Called when dispatchRun throws — use to mark a board slot as failed. */
   onDispatchFail?: (item: PreflightItem, key: string, error: unknown) => void
   /**
@@ -70,7 +74,7 @@ export interface ExecuteKickassDeps {
 }
 
 export interface KickassDeps {
-  loadScanResult: (options: { force?: boolean; staleAfterMs: number }) => Promise<ScanResult>
+  loadScanResult: (options: { config?: string; force?: boolean; staleAfterMs: number }) => Promise<ScanResult>
   pickPRs: (prs: PRStatus[]) => Promise<PRStatus[]>
   confirm: (message: string) => Promise<boolean>
   getFixDeliveryMode?: () => FixDeliveryMode | Promise<FixDeliveryMode>
@@ -83,7 +87,7 @@ export interface KickassDeps {
 }
 
 export async function runKickass(opts: KickassOpts = {}): Promise<void> {
-  const config = loadConfig()
+  const config = loadConfig(opts.config)
   const workflow = loadWorkflow(process.cwd())
   const board = new PRBoard()
   board.setConfig(config, workflow)
@@ -102,7 +106,7 @@ export async function runKickassWithDeps(
     process.exit(1)
   }
 
-  if (opts.timeout) {
+  if (opts.timeout && !opts.noTimeout) {
     try {
       parseDuration(opts.timeout)
     } catch {
@@ -117,7 +121,11 @@ export async function runKickassWithDeps(
   }
 
   try {
-    const scan = await deps.loadScanResult({ force: opts.force, staleAfterMs })
+    let scan = await deps.loadScanResult({ config: opts.config, force: opts.force, staleAfterMs })
+    if (!opts.force && !opts.dryRun && scan.cached && scan.summary.actionable > 0) {
+      console.log(chalk.dim('cached actionable queue found — refreshing before mutation'))
+      scan = await deps.loadScanResult({ config: opts.config, force: true, staleAfterMs })
+    }
 
     // Actionable = nextAction is set and is not merge (merge not dispatched in v1).
     // Stale PRs shown first; not-stale actionable PRs follow.
@@ -267,6 +275,17 @@ function parseVerdictFromOutput(output: string | void): string | null {
   return raw.startsWith('NEEDS') ? 'NEEDS WORK' : raw
 }
 
+function parseSkipReasonFromOutput(output: string | void): KickassSkipReason | null {
+  if (!output) return null
+  const plain = output.replace(/\x1B\[[0-9;]*m/g, '')
+  if (/workflow already complete\b.*\bnothing to do\b/i.test(plain)) return 'workflow_complete'
+  if (/\bskipping stale_signature\b/i.test(plain)) return 'stale_signature'
+  if (/already being reviewed by another process on this machine\b.*\bskipping\b/i.test(plain)) return 'in_progress_local'
+  if (/already being reviewed on another machine\b.*\bskipping\b/i.test(plain)) return 'in_progress_remote'
+  if (/\bno reviewer assigned\b/i.test(plain)) return 'no_reviewer'
+  return null
+}
+
 const TIMEOUT_PUMP_THRESHOLD = 3
 
 export async function executeKickassPlan(
@@ -319,6 +338,15 @@ export async function executeKickassPlan(
       log(chalk.cyan(`\n→ ${item.transition}  ${formatPRSignature(item.pr)}${attemptLabel}`))
       deps.onDispatchStart?.(item, key, startedAt)
       const output = await deps.dispatchRun(item, effectiveTimeoutMs)
+      const skipReason = parseSkipReasonFromOutput(output)
+      if (skipReason) {
+        log(chalk.yellow(`↷ skip ${formatPRSignature(item.pr)}  ${skipReason}`))
+        deps.onDispatchSkip?.(item, key, startedAt, skipReason)
+        if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output, log)
+        results[index] = { pr: item.pr, status: 'skipped', reason: skipReason }
+        return
+      }
+
       deps.onDispatchEnd?.(item, key, startedAt, parseVerdictFromOutput(output))
       if (typeof output === 'string' && output) printCapturedOutput(formatPRSignature(item.pr), output, log)
 
@@ -470,7 +498,20 @@ export function summarizeExecutionResults(results: KickassExecutionResult[]): st
   const executed = results.filter(result => result.status === 'executed').length
   const skipped = results.filter(result => result.status === 'skipped').length
   const failed = results.filter(result => result.status === 'failed').length
-  return `Execution summary: ${executed} executed, ${skipped} skipped, ${failed} failed`
+  const skipReasons = summarizeReasons(results.filter(result => result.status === 'skipped').map(result => result.reason))
+  const failReasons = summarizeReasons(results.filter(result => result.status === 'failed').map(result => result.reason))
+  const skipPart = skipReasons ? `${skipped} skipped (${skipReasons})` : `${skipped} skipped`
+  const failPart = failReasons ? `${failed} failed (${failReasons})` : `${failed} failed`
+  return `Execution summary: ${executed} executed, ${skipPart}, ${failPart}`
+}
+
+function summarizeReasons(reasons: Array<string | undefined>): string {
+  const counts = new Map<string, number>()
+  for (const reason of reasons) {
+    if (!reason) continue
+    counts.set(reason, (counts.get(reason) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([reason, count]) => `${reason} ${count}`).join(', ')
 }
 
 export function printExecutionSummary(results: KickassExecutionResult[]): void {
@@ -479,12 +520,12 @@ export function printExecutionSummary(results: KickassExecutionResult[]): void {
 
 export function buildKickassRunArgs(
   itemOrPR: PreflightItem | PRStatus,
-  roundMode?: 'crazy' | 'halfcrazy',
-  timeout?: string,
+  opts: Pick<KickassOpts, 'config' | 'roundMode' | 'timeout' | 'noTimeout'> = {},
 ): string[] {
   const item = 'action' in itemOrPR ? itemOrPR : buildPreflightPlan([itemOrPR])[0]
   if (item.action === 'skip') return []
   const args = ['run', item.pr.url]
+  if (opts.config) args.push('--config', opts.config)
   // No --steps for normal review/recheck/fix actions: run.ts calls
   // identifyNextWorkflowStep against live PR history to determine the correct
   // next step. Exception: when kickass demoted a fix action to review because the
@@ -496,14 +537,15 @@ export function buildKickassRunArgs(
   }
   args.push('--expected-head-sha', item.pr.headSha)
   if (item.action !== 'fix') {
-    if (roundMode === 'crazy') args.push('--crazy')
-    else if (roundMode === 'halfcrazy') args.push('--half-crazy')
-  } else if (roundMode) {
+    if (opts.roundMode === 'crazy') args.push('--crazy')
+    else if (opts.roundMode === 'halfcrazy') args.push('--half-crazy')
+    else if (opts.noTimeout) args.push('--no-timeout')
+  } else if (opts.roundMode || opts.noTimeout) {
     // fix legs don't loop, but still need the no-timeout constraint lifted
     args.push('--no-timeout')
   }
-  // forward user-specified --timeout for runs that aren't already in a round mode
-  if (timeout && !roundMode) args.push('--timeout', timeout)
+  // forward user-specified --timeout for runs that aren't already unconstrained
+  if (opts.timeout && !opts.roundMode && !opts.noTimeout) args.push('--timeout', opts.timeout)
   args.push('--trigger', 'kickass')
   return args
 }
@@ -552,7 +594,7 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
     // If a pumped timeout is active, convert it to a "Xs" string and forward it.
     // Otherwise fall back to the user's --timeout flag (or no override).
     const timeoutArg = timeoutMs != null ? `${Math.round(timeoutMs / 1000)}s` : opts.timeout
-    const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, timeoutArg)]
+    const args = [...invocation.args, ...buildKickassRunArgs(item, { ...opts, timeout: timeoutArg })]
     // When board is active always pipe so output routes through board.log scrollback.
     // Without board, pipe only for explicit concurrent mode; sequential streams inline.
     if (board || opts.concurrent !== undefined) {
@@ -587,7 +629,7 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
     loadScanResult,
     pickPRs,
     confirm: confirmMutation,
-    getFixDeliveryMode: () => loadConfig().post_review.auto_fix.delivery.mode,
+    getFixDeliveryMode: () => loadConfig(opts.config).post_review.auto_fix.delivery.mode,
     getCurrentHeadSha: async (item) => {
       const token = getGithubToken()
       const octokit = createGithubClient(token)
@@ -609,6 +651,9 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
         if (verdict != null) board.updatePR(key, { verdict })
         board.updatePR(key, { phase: donePhase(item.action) as import('../lib/board.js').PRPhase })
         board.completePR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url })
+      },
+      onDispatchSkip: (item: PreflightItem, key: string, startedAt: number, reason: KickassSkipReason) => {
+        board.skipPR(key, { elapsedMs: Date.now() - startedAt, url: item.pr.url, reason })
       },
       onDispatchFail: (_item: PreflightItem, key: string, err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err)

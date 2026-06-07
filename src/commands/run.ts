@@ -288,6 +288,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       const nextResult = identifyNextWorkflowStep(history, allSteps, prData.head.sha)
       if (nextResult.step === null) {
         // Workflow already complete for this SHA
+        fileLog({ level: 'info', event: 'pr_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'workflow_complete', sha: prData.head.sha, trigger: opts.trigger ?? 'run' })
         console.log(chalk.dim('  workflow already complete for this SHA — nothing to do'))
         return
       }

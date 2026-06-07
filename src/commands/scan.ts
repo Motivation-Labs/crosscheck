@@ -9,6 +9,7 @@ import { scanOpenPRStatuses, type ScanPRStatus as PRStatus, type ScanResult } fr
 import { readScanCache, writeScanCache, type ScanCachePayload } from '../lib/scan-cache.js'
 
 export interface ScanOpts {
+  config?: string
   tidy?: boolean
   force?: boolean
   staleAfter?: string
@@ -16,12 +17,13 @@ export interface ScanOpts {
 }
 
 interface LoadScanOptions {
+  config?: string
   force?: boolean
   staleAfterMs: number
 }
 
 export async function loadScanResult(options: LoadScanOptions): Promise<ScanResult> {
-  const config = loadConfig()
+  const config = loadConfig(options.config)
   initLogger(config.logs)
   const token = getGithubToken()
   const now = new Date()
@@ -55,7 +57,7 @@ export async function runScan(opts: ScanOpts = {}): Promise<void> {
   }
 
   try {
-    const result = await loadScanResult({ force: opts.force, staleAfterMs })
+    const result = await loadScanResult({ config: opts.config, force: opts.force, staleAfterMs })
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2))
       return

@@ -159,7 +159,7 @@ describe('buildKickassRunArgs', () => {
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'NEEDS_WORK', type: 'review', sha: 'abc1234' },
     })], 'crazy', 'commit')
-    const args = buildKickassRunArgs(plan[0], 'crazy')
+    const args = buildKickassRunArgs(plan[0], { roundMode: 'crazy' })
     expect(args).not.toContain('--steps')
     expect(args).toContain('--no-timeout')
     expect(args).not.toContain('--crazy')
@@ -170,16 +170,35 @@ describe('buildKickassRunArgs', () => {
       nextAction: 'recheck',
       reviewState: 'NEEDS_RECHECK',
     })], 'halfcrazy', 'commit')
-    const args = buildKickassRunArgs(plan[0], 'halfcrazy')
+    const args = buildKickassRunArgs(plan[0], { roundMode: 'halfcrazy' })
     expect(args).toContain('--half-crazy')
     expect(args).not.toContain('--crazy')
+  })
+
+  it('forwards --config to delegated run commands', () => {
+    expect(buildKickassRunArgs(pr({ nextAction: 'review' }), { config: 'custom.yml' })).toEqual([
+      'run',
+      'https://github.com/acme/web/pull/7',
+      '--config',
+      'custom.yml',
+      '--expected-head-sha',
+      'abc123456789',
+      '--trigger',
+      'kickass',
+    ])
+  })
+
+  it('forwards --no-timeout when kickass disables reviewer timeout caps', () => {
+    const args = buildKickassRunArgs(pr({ nextAction: 'review' }), { noTimeout: true, timeout: '300s' })
+    expect(args).toContain('--no-timeout')
+    expect(args).not.toContain('--timeout')
   })
 
   it('uses --no-timeout for fix actions even in PR-delivery mode with crazy', () => {
     const args = buildKickassRunArgs(pr({
       nextAction: 'fix',
       latestAnnotation: { origin: 'claude', reviewer: 'codex', verdict: 'BLOCK', type: 'review', sha: 'abc1234' },
-    }), 'crazy')
+    }), { roundMode: 'crazy' })
     expect(args).not.toContain('--steps')
     expect(args).not.toContain('--crazy')
     expect(args).toContain('--no-timeout')
@@ -272,6 +291,30 @@ describe('runKickassWithDeps', () => {
     expect(calls).toEqual(['scan', 'pick:1'])
   })
 
+  it('refreshes an actionable cached queue before mutating', async () => {
+    const staleQueued = pr({ number: 1, nextAction: 'review' })
+    const freshQueued = pr({ number: 2, nextAction: 'review' })
+    const loadCalls: Array<{ force?: boolean }> = []
+    let queueSeen: PRStatus[] = []
+    const deps: KickassDeps = {
+      loadScanResult: async (options) => {
+        loadCalls.push({ force: options.force })
+        return options.force
+          ? scan([freshQueued])
+          : { ...scan([staleQueued]), cached: true }
+      },
+      pickPRs: async (queue) => { queueSeen = queue; return [] },
+      confirm: async () => false,
+      dispatchRun: async () => {},
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+    }
+
+    await runKickassWithDeps({ staleAfter: '1m' }, deps)
+
+    expect(loadCalls).toEqual([{ force: undefined }, { force: true }])
+    expect(queueSeen.map(p => p.number)).toEqual([2])
+  })
+
   it('includes not-stale actionable PRs in the queue (stale first)', async () => {
     const stalePR = pr({ number: 1, freshness: 'stale', nextAction: 'review' })
     const freshPR = pr({ number: 2, freshness: 'not_stale', nextAction: 'recheck' })
@@ -322,6 +365,21 @@ describe('runKickassWithDeps', () => {
 
     expect(dispatched).toEqual([])
     expect(results).toEqual([{ pr: selected, status: 'skipped', reason: 'stale_signature' }])
+  })
+
+  it('marks delegated run no-ops as skipped instead of executed with no verdict', async () => {
+    const selected = pr({ nextAction: 'review', reviewState: 'NEEDS_REVIEW' })
+    const skipEvents: string[] = []
+
+    const results = await executeKickassPlan(buildPreflightPlan([selected]), {
+      getCurrentHeadSha: async (item) => item.pr.headSha,
+      dispatchRun: async () => '  workflow already complete for this SHA — nothing to do\n',
+      onDispatchSkip: (_item, _key, _startedAt, reason) => { skipEvents.push(reason) },
+      onDispatchEnd: () => { throw new Error('should not complete no-op dispatch') },
+    })
+
+    expect(skipEvents).toEqual(['workflow_complete'])
+    expect(results).toEqual([{ pr: selected, status: 'skipped', reason: 'workflow_complete' }])
   })
 
   it('downgrades NEEDS_WORK fix to CR when no current-head review comment is usable', () => {
@@ -382,7 +440,7 @@ describe('runKickassWithDeps', () => {
     const results = await executeKickassPlan(plan, {
       getCurrentHeadSha: async () => head,
       dispatchRun: async (item) => {
-        dispatched.push({ action: item.action, headSha: item.pr.headSha, args: buildKickassRunArgs(item, 'crazy') })
+        dispatched.push({ action: item.action, headSha: item.pr.headSha, args: buildKickassRunArgs(item, { roundMode: 'crazy' }) })
         if (item.action === 'fix') head = 'def987654321'
       },
     })
@@ -560,7 +618,7 @@ describe('runKickassWithDeps', () => {
       { pr: pr({ number: 1 }), status: 'executed' },
       { pr: pr({ number: 2 }), status: 'skipped', reason: 'stale_signature' },
       { pr: pr({ number: 3 }), status: 'failed', reason: 'unknown' },
-    ])).toBe('Execution summary: 1 executed, 1 skipped, 1 failed')
+    ])).toBe('Execution summary: 1 executed, 1 skipped (stale_signature 1), 1 failed (unknown 1)')
   })
 
   describe('stagger', () => {

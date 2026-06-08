@@ -22,6 +22,8 @@ Define the workflow in `workflow.yml`: review-only, review + fix, or the full re
 
 Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
 
+Read the field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/). It explains why Humanbased built Crosscheck after analyzing 295 agentic PRs and retained Crosscheck logs from real internal workflow.
+
 ## Why crosscheck?
 
 - **Combats AI slop before merge** — catches code regressions, incomplete fixes, hallucinated assumptions, and brittle "looks green" patches.
@@ -52,11 +54,11 @@ npm install -g @anthropic-ai/claude-code && claude
 # 4. Check your setup
 crosscheck status
 
-# 5. Review one PR
-crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
+# 5. Review the public fixture PR
+crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
 ```
 
-Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the first useful review works, run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
+This fixture PR intentionally contains a realistic agentic-code regression, so you can see whether Crosscheck produces a useful review before pointing it at your own repo. Use `--reviewer claude` if Claude Code is the authenticated reviewer. After the fixture review works, swap in one low-risk PR from your repo, then run `crosscheck onboard` to configure repos, workflow mode, and continuous monitoring.
 
 ### Continuous mode
 
@@ -401,6 +403,8 @@ Full reference: [get-started.md](./get-started.md)
 | | |
 |---|---|
 | **[get-started.md](./get-started.md)** | Full setup guide — prerequisites, all flags, complete config reference, FAQ |
+| **[What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/)** | Humanbased field report on agentic PR quality, review routing, and why Crosscheck exists |
+| **[docs/fixture-pr.md](./docs/fixture-pr.md)** | Safe public fixture PR for the first Crosscheck review |
 | **[crosscheck.config.example.yml](./crosscheck.config.example.yml)** | Annotated config with every option |
 | **[CHANGELOG.md](./CHANGELOG.md)** | Release notes |
 

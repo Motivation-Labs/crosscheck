@@ -91,8 +91,9 @@ Week 1:
 
 Week 2:
 
-- Write and publish the launch essay: "Stop Letting One Agent Review Its Own Code".
-- Post demo clips to X, LinkedIn, Hacker News Show HN, `r/ClaudeAI`, `r/ChatGPTCoding`, and agentic coding communities.
+- Use the published field report, [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/), as the primary proof asset.
+- Every distribution post should send readers to the blog, then to the fixture review path.
+- Post demo clips to X, LinkedIn, Hacker News Show HN, `r/ClaudeAI`, `r/ChatGPTCoding`, and agentic coding communities after the fixture proof loop is recorded.
 - Ask every installer for first-run feedback in issues or discussions.
 
 Week 3:

@@ -16,8 +16,7 @@
     "README.zh.md",
     "get-started.md",
     "get-started.zh.md",
-    "docs/fixture-pr.md",
-    "docs/proof-demo.md",
+    "docs",
     "assets"
   ],
   "engines": {

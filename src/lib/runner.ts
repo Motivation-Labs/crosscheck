@@ -22,6 +22,7 @@ import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetr
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError } from '../lib/smart-switch.js'
+import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -683,16 +684,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let fixErr: unknown = undefined
       let activeVendor = vendor
 
+      const tierMs = tierTimeoutMs(config.quality.tier)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec),
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs,
           )
         }
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
         )
       }
 
@@ -713,6 +715,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             activeVendor = fallbackVendor
           } catch (fallbackErr) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
+            activeVendor = fallbackVendor  // retry uses the fallback vendor since primary already failed
             fixErr = fallbackErr
           }
         } else {

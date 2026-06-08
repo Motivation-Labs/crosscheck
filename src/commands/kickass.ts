@@ -10,6 +10,7 @@ import type { Config } from '../config/schema.js'
 import { parseDuration } from '../lib/durations.js'
 import { classifyError, logError } from '../lib/logger.js'
 import type { ErrorCategory } from '../lib/logger.js'
+import { hintForError } from '../lib/remediation.js'
 import { pickPRs } from '../lib/pr-picker.js'
 import type { ScanPRStatus as PRStatus, ScanResult } from '../lib/pr-status.js'
 import { handleScanError, loadScanResult } from './scan.js'
@@ -337,9 +338,6 @@ export async function executeKickassPlan(
       results[index] = { pr: item.pr, status: 'executed' }
     } catch (err: unknown) {
       logError({ event: 'kickass_pr_failed', owner: item.pr.owner, repo: item.pr.repo, pr: item.pr.number, ...(attempt > 1 && { attempt }) }, err)
-      log(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`))
-      const failKey = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
-      deps.onDispatchFail?.(item, failKey, err)
       // Classify execa errors using structured fields, not the raw message.
       // The raw message includes the full CLI invocation (e.g. "Command failed with exit
       // code 1: node crosscheck run --timeout 300s --no-timeout"), so a text match against
@@ -359,6 +357,11 @@ export async function executeKickassPlan(
         msgForClassify = err instanceof Error ? err.message : String(err)
       }
       const category = classifyError(msgForClassify)
+      const hint = hintForError(category, msgForClassify)
+      const hintLine = hint ? `\n    ${chalk.yellow('→')} ${hint}` : ''
+      log(chalk.red(`✗ failed ${formatPRSignature(item.pr)}`) + chalk.dim(` [${category}]`) + hintLine)
+      const failKey = `${item.pr.owner}/${item.pr.repo}#${item.pr.number}@${item.pr.headSha}`
+      deps.onDispatchFail?.(item, failKey, err)
       results[index] = { pr: item.pr, status: 'failed', reason: category }
       if (category === 'timeout') {
         timeoutFailures++
@@ -466,6 +469,19 @@ export function summarizeExecutionResults(results: KickassExecutionResult[]): st
 
 export function printExecutionSummary(results: KickassExecutionResult[]): void {
   console.log(chalk.dim(`\n${summarizeExecutionResults(results)}`))
+  const failures = results.filter(r => r.status === 'failed')
+  if (failures.length === 0) return
+  const seenHints = new Set<string>()
+  for (const r of failures) {
+    const category = (r.reason as ErrorCategory | undefined) ?? 'unknown'
+    const hint = hintForError(category, category)
+    const sig = `${r.pr.owner}/${r.pr.repo}#${r.pr.number}`
+    console.log(chalk.red(`  ✗ ${sig}`) + chalk.dim(` [${category}]`))
+    if (hint && !seenHints.has(hint)) {
+      seenHints.add(hint)
+      console.log(`    ${chalk.yellow('→')} ${hint}`)
+    }
+  }
 }
 
 export function buildKickassRunArgs(

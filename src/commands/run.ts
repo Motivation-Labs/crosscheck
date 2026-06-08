@@ -9,7 +9,8 @@ import { fetchStepHistory, identifyNextWorkflowStep } from '../lib/pr-workflow-s
 import { detectOriginFull, assignReviewer } from '../github/detector.js'
 import { loadConfig, getGithubToken } from '../config/loader.js'
 import { normalizeVendor, VENDOR_ALIAS_HINT, type Vendor } from '../lib/vendor.js'
-import { initLogger, log as fileLog, logError } from '../lib/logger.js'
+import { initLogger, log as fileLog, logError, classifyError } from '../lib/logger.js'
+import { hintForError } from '../lib/remediation.js'
 import { runWorkflow } from '../lib/runner.js'
 import { DEFAULT_RECHECK_INSTRUCTIONS, loadWorkflow, type WorkflowStep } from '../lib/workflow.js'
 import { formatVerdict, type Verdict } from '../lib/verdict.js'
@@ -575,7 +576,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
     } catch (err: unknown) {
       workflowError = err
       logError({ repo: `${owner}/${repo}`, pr: number, phase: 'run' }, err)
-      console.error(chalk.red(`\n✗ ${err instanceof Error ? err.message : String(err)}\n`))
+      const errMsg = err instanceof Error ? err.message : String(err)
+      const category = classifyError(errMsg)
+      const hint = hintForError(category, errMsg)
+      console.error(chalk.red(`\n✗ ${errMsg}`) + chalk.dim(` [${category}]`) + (hint ? `\n  ${chalk.yellow('→')} ${hint}` : '') + '\n')
     } finally {
       stopHeartbeat()
       if (!opts.dryRun && lockAttemptStarted) {

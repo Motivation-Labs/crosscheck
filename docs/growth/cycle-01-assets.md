@@ -19,6 +19,7 @@ npm install -g @humanbased/crosscheck
 gh auth login
 codex login --device-auth
 crosscheck status
+crosscheck onboard
 crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
 ```
 

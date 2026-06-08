@@ -402,17 +402,17 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 7.5 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
+**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
 
-**Step 7.7 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
+**Step 9 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
 
-**Step 8 — Connection type.** Choose how GitHub webhooks reach your local server:
+**Step 10 — Connection type.** Choose how GitHub webhooks reach your local server:
 - `localhost.run` — zero-config SSH tunnel; reconnects automatically, no install required *(default)*
 - `smee.io` — webhook relay; events queued while offline, stable channel URL (requires `npm install -g smee-client` and `tunnel.smee_channel` in config)
 
-**Step 9 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
+**Step 11 — Git clone protocol.** Choose SSH or HTTPS for PR checkout.
 
-**Step 10 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
+**Step 12 — Review and write config.** Shows a summary of all choices and writes `~/.crosscheck/config.yml` and `~/.crosscheck/workflow.yml`.
 
 ```
 crosscheck onboard
@@ -449,23 +449,23 @@ crosscheck onboard
   [1] review only  [2] review → fix  [3] review → fix → re-check
   Choice [2]: 3
 
-  Step 7.5 — fix → re-check rounds
+  Step 8 — fix → re-check rounds
   [1] 1 round  [2] 2 rounds  [3] 3 rounds
   Choice [1]: 1
 
-  Step 7.7 — auto conflict-resolve
+  Step 9 — auto conflict-resolve
   [1] disabled  [2] enabled
   Choice [1]: 1
 
-  Step 8 — connection type
+  Step 10 — connection type
   [1] localhost.run  [2] smee.io
   Choice [1]: 1
 
-  Step 9 — git clone protocol
+  Step 11 — git clone protocol
   [1] SSH  [2] HTTPS
   Choice [1]: 1
 
-  Step 10 — review and write config
+  Step 12 — review and write config
   deployment   personal
   connection   localhost.run
   clone        ssh
@@ -515,7 +515,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Executes the full configured workflow against a single PR: review → auto-fix → recheck. Where `crosscheck review` stops after posting a comment, `crosscheck run` closes the loop — if issues are found, the authoring agent opens a fix PR and crosscheck re-reviews it.
+Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -568,7 +568,7 @@ crosscheck scan --json
 
 Selects all actionable PRs (any PR where a next step is needed: review, fix, recheck) and advances each one. Stale PRs are shown first. APPROVE PRs appear as a read-only "needs merge (manual)" section — visible so you know what's ready, but not dispatched automatically. The command revalidates the PR head before each mutation and prints an execution summary when it finishes.
 
-Fix actions dispatch a full fix→recheck cycle in one invocation, honoring the `max_rounds` setting in your `workflow.yml`.
+Each PR dispatch uses `detect-step` to read live PR comment history and advances **exactly the next needed step** — kickass drives one step per PR, then `watch` picks up continuation via the webhooks that step produces.
 
 ```bash
 crosscheck kickass --dry-run
@@ -584,6 +584,42 @@ crosscheck kickass --halfcrazy    # loop until verdict is not BLOCK
 | `--stale-after <duration>` | Only show PRs stale for at least this duration |
 | `--crazy` | Autonomous loop: keep running fix→recheck cycles until APPROVE (ceiling: 2 rounds per PR) |
 | `--halfcrazy` | Autonomous loop: keep running until verdict is not BLOCK — NEEDS\_WORK is acceptable |
+
+#### `kickass` + `watch` combo
+
+When a batch of PRs is stuck — timed out, or stopped before `watch` was running — use both commands together for hands-free recovery:
+
+```bash
+# terminal 1 — keep running to handle continuations
+crosscheck watch
+
+# terminal 2 — kick each stuck PR one step forward
+crosscheck scan --force
+crosscheck kickass
+```
+
+How they divide the work:
+
+```
+crosscheck kickass
+  └─ ck run <url>  --trigger kickass  (one step; detect-step finds where to start)
+       └─ detect-step → "review"      run review only → posts comment
+       └─ detect-step → "fix"         run fix only → pushes commit
+       └─ detect-step → "recheck"     run recheck only → posts verdict
+
+crosscheck watch
+  ├─ issue_comment (type=review) → pick up fix step automatically
+  └─ synchronize   (fix commit)  → pick up recheck step automatically
+```
+
+> **Note:** `ck run <url>` invoked directly (without `--trigger kickass`) runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it.
+
+`kickass` advances each PR exactly one step using live `detect-step` detection. `watch` owns all continuation via webhooks:
+
+- A posted review fires an `issue_comment` webhook → `watch` starts the fix step.
+- A fix commit fires a `synchronize` webhook → `watch` starts the recheck step.
+
+No second `kickass` run is needed. Once `kickass` kicks the first step, the pipeline advances on its own as long as `watch` is running. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
 
 ---
 
@@ -937,7 +973,7 @@ vendors:
     enabled: true
     model: sonnet           # haiku | sonnet | opus
     effort: medium          # low | medium | high | max
-    # timeout_sec: 1200     # max seconds per CLI call; unset = 180. Raise for large PRs.
+    # timeout_sec: 1200     # max seconds per CLI call; unset = tier-based (300/600/1200)
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 quality:

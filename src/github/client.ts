@@ -68,7 +68,7 @@ export async function registerRepoWebhook(
     body: JSON.stringify({
       name: 'web',
       active: true,
-      events: ['pull_request'],
+      events: ['pull_request', 'issue_comment'],
       config: { url: webhookUrl, content_type: 'json', secret },
     }),
   })
@@ -78,6 +78,28 @@ export async function registerRepoWebhook(
   }
   const data = await res.json() as { id: number }
   return data.id
+}
+
+export async function patchRepoWebhookEvents(
+  owner: string,
+  repo: string,
+  hookId: number,
+  events: string[],
+  token: string,
+): Promise<void> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/hooks/${hookId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ events }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to patch repo webhook [${res.status}]: ${err.message ?? res.statusText}`)
+  }
 }
 
 export async function deleteRepoWebhook(
@@ -108,7 +130,7 @@ export async function registerOrgWebhook(
     body: JSON.stringify({
       name: 'web',
       active: true,
-      events: ['pull_request'],
+      events: ['pull_request', 'issue_comment'],
       config: { url: webhookUrl, content_type: 'json', secret },
     }),
   })
@@ -118,6 +140,27 @@ export async function registerOrgWebhook(
   }
   const data = await res.json() as { id: number }
   return data.id
+}
+
+export async function patchOrgWebhookEvents(
+  org: string,
+  hookId: number,
+  events: string[],
+  token: string,
+): Promise<void> {
+  const res = await fetch(`https://api.github.com/orgs/${org}/hooks/${hookId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ events }),
+  })
+  if (!res.ok) {
+    const err = await res.json() as { message?: string }
+    throw new Error(`Failed to patch org webhook [${res.status}]: ${err.message ?? res.statusText}`)
+  }
 }
 
 export async function deleteOrgWebhook(
@@ -961,6 +1004,8 @@ export interface ReviewCommentBodyInput {
   sha?: string
   /** Pre-computed next workflow step embedded in the annotation for fast-path reads. */
   nextStep?: string
+  /** Workflow trigger (e.g. 'kickass') embedded so the issue_comment bridge only fires for one-step dispatches. */
+  trigger?: string
 }
 
 export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
@@ -996,6 +1041,7 @@ export function buildReviewCommentBody(input: ReviewCommentBodyInput): string {
     service: serviceName,
     ...(input.sha && { sha: input.sha }),
     ...(input.nextStep !== undefined && { next_step: input.nextStep }),
+    ...(input.trigger !== undefined && { trigger: input.trigger }),
   })}`
 
   const replyPrefix = input.replyToCommentId
@@ -1022,6 +1068,7 @@ export async function postReviewComment(
   round = 1,
   sha?: string,
   nextStep?: string,
+  trigger?: string,
 ): Promise<number> {
 
   const { data: comment } = await octokit.rest.issues.createComment({
@@ -1041,6 +1088,7 @@ export async function postReviewComment(
       round,
       sha,
       nextStep,
+      trigger,
     }),
   })
   return comment.id

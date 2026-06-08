@@ -39,6 +39,60 @@ export function parseVerdict(text: string): { verdict: Verdict | null; clean: st
 export const NULL_VERDICT_WARNING =
   '> ⚠️ crosscheck could not extract a verdict from this review.'
 
+// Posted when the severity gate downgrades a NEEDS WORK review to APPROVE because
+// it carries no blocking finding — keeps the notes visible without driving the loop.
+export const SEVERITY_GATE_NOTE =
+  '> ℹ️ No blocking (Critical/High) findings — approving with comments. The notes below are non-blocking; address at your discretion.'
+
+// A list of "no findings" phrasings, reduced to letters-only (punctuation, bullets,
+// and whitespace stripped) so "- None.", "N/A", and "None found" all compare equal.
+const EMPTY_SECTION_PHRASES = new Set([
+  'none', 'nonefound', 'noneidentified', 'nonenoted', 'nonidentified', 'na',
+  'nocritical', 'nocriticalissues', 'nocriticalissuesfound', 'noblocking',
+  'noblockingissues', 'noissues', 'noissuesfound',
+])
+
+// Whether the review's "Critical Issues" section (Claude's mandated format) lists a
+// real finding rather than an explicit "None". Returns false when the section is
+// absent — a NEEDS WORK without an explicit Critical section is, by the reviewer's
+// own definition, non-blocking.
+function criticalSectionHasContent(text: string): boolean {
+  const heading = text.match(/^#{1,6}\s*Critical(?:\s+Issues?)?\b.*$/im)
+  if (!heading) return false
+  const rest = text.slice((heading.index ?? 0) + heading[0].length)
+  const next = rest.match(/^#{1,6}\s+\S/m)
+  const body = (next ? rest.slice(0, next.index) : rest)
+  const letters = body.replace(/[^a-z]/gi, '').toLowerCase()
+  if (letters === '') return false
+  return !EMPTY_SECTION_PHRASES.has(letters)
+}
+
+// A review blocks merge only when it contains a Critical/High-severity finding.
+// Recognizes both the Claude structured format (a non-empty "## Critical Issues"
+// section) and Codex priority markers ([P0]/[P1] = critical/high; [P2]/[P3] don't block).
+export function hasBlockingFindings(reviewText: string): boolean {
+  if (/\[P[01]\]/i.test(reviewText)) return true
+  return criticalSectionHasContent(reviewText)
+}
+
+export interface SeverityGateResult {
+  verdict: Verdict | null
+  // True when the gate changed the verdict (NEEDS WORK → APPROVE).
+  downgraded: boolean
+}
+
+// Severity gate: only Critical/High findings should block a merge. A NEEDS WORK
+// verdict whose review carries no blocking finding is downgraded to APPROVE, so
+// warning/suggestion-only reviews stop driving the fix/recheck loop and stop
+// signalling "needs work" to the orchestrator. BLOCK and APPROVE are never altered
+// (BLOCK is the reviewer's explicit serious flag; APPROVE already passes).
+export function applySeverityGate(verdict: Verdict | null, reviewText: string): SeverityGateResult {
+  if (verdict === 'NEEDS WORK' && !hasBlockingFindings(reviewText)) {
+    return { verdict: 'APPROVE', downgraded: true }
+  }
+  return { verdict, downgraded: false }
+}
+
 export function formatVerdict(verdict: Verdict | null): string {
   if (!verdict) return chalk.dim('verdict  —')
   if (verdict === 'APPROVE')    return `verdict  ${chalk.green('✅ APPROVE')}`

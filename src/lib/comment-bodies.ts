@@ -36,6 +36,72 @@ export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): strin
   ].join('\n')
 }
 
+// Prominent banner prepended to a review comment when the first review attempt
+// timed out but the delayed retry (same timeout) succeeded. Signals a transient
+// blip that resolved on its own — the user's timeout budget was respected.
+export function buildRetriedReviewBanner(timeoutMs: number, delayMs: number): string {
+  const timeoutSec = Math.round(timeoutMs / 1000)
+  const delaySec = Math.round(delayMs / 1000)
+  return `> ⏱ **Retried** — the first review attempt timed out at ${timeoutSec}s. ` +
+    `This review succeeded on the second attempt after a ${delaySec}s wait. ` +
+    `If this happens repeatedly the PR may genuinely need a longer \`timeout_sec\`.`
+}
+
+export type ReviewFailedReason = 'timeout' | 'usage_limit' | 'subprocess_error'
+
+export interface ReviewFailedCommentInput {
+  prUrl: string
+  reason: ReviewFailedReason
+  // One-line user-facing description rendered after `**Reason**:`.
+  summary: string
+  // Optional context block (timeout cap, retry info, stderr tail). When set,
+  // rendered inside a collapsible <details> block so the timeline stays compact.
+  details?: string
+}
+
+// Posted on the PR by watch.ts when a reviewer subprocess fails after retry
+// exhaustion (timeout) or on a non-recoverable error (auth, usage limit,
+// subprocess crash). Uses a bareword marker (not a review annotation) so
+// Phase 1 detection ignores it — the next push still triggers a fresh review.
+export function buildReviewFailedCommentBody(input: ReviewFailedCommentInput): string {
+  const { prUrl, reason, summary, details } = input
+  const title = TITLE_BY_REASON[reason]
+  const lines: string[] = [
+    title,
+    '',
+    `crosscheck couldn't finish reviewing this PR.`,
+    '',
+    `**Reason**: ${summary}`,
+  ]
+  if (details && details.trim().length > 0) {
+    lines.push(
+      '',
+      '<details>',
+      '<summary>Details</summary>',
+      '',
+      details.trim(),
+      '',
+      '</details>',
+    )
+  }
+  lines.push(
+    '',
+    `Push a new commit, or run \`crosscheck run ${prUrl}\` to retry.`,
+    '',
+    '---',
+    `_Reported by [Crosscheck](${CROSSCHECK_REPO_URL})._`,
+    '',
+    '<!-- crosscheck: review_failed -->',
+  )
+  return lines.join('\n')
+}
+
+const TITLE_BY_REASON: Record<ReviewFailedReason, string> = {
+  timeout: '### ⏱️ Review failed — timed out',
+  usage_limit: '### 🚫 Review failed — reviewer hit usage limit',
+  subprocess_error: '### ❌ Review failed',
+}
+
 export interface ConflictResolvedCommentInput {
   owner: string
   repo: string

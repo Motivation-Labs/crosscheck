@@ -528,7 +528,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
           const freshSha = freshPR.head.sha
           const priorRoundRanFix = fixAppliedCount !== undefined
-          if (freshSha === loopSha && priorRoundRanFix) {
+          if (freshSha === loopSha && priorRoundRanFix && fixAppliedCount !== 0) {
             // Head didn't advance — fix made no changes despite applied_count > 0 (edge case)
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
             console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))

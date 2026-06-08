@@ -486,8 +486,10 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
       if (opts.roundMode) {
         const mode = opts.roundMode
         const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
+        let activeFixRecheckSteps = fixRecheckSteps
         let loopRound = 1
         let loopSha = sha
+        let consecutiveNoProgress = 0
 
         // Continue when the verdict hasn't met the stop condition OR when the
         // initial workflow applied fixes that still need a follow-up recheck.
@@ -495,11 +497,25 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         // NEEDS_WORK review (which is its stop condition) even when the workflow's
         // fix step already pushed a commit — leaving the new head unrechecked.
         while (!meetsCrazyStopCondition(verdict, mode) || (fixAppliedCount !== undefined && fixAppliedCount > 0)) {
-          // No-progress guard: if fix ran but applied nothing, looping is futile
+          // No-progress guard: fix ran but applied nothing.
+          // First occurrence: escalate fix instructions and retry.
+          // Second consecutive occurrence: give up — reviewer issues are beyond fix capability.
           if (fixAppliedCount === 0) {
-            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
-            console.log(chalk.dim(`  no progress in round ${loopRound} — stopping`))
-            break
+            consecutiveNoProgress++
+            if (consecutiveNoProgress >= 2) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', mode, round: loopRound })
+              console.log(chalk.dim(`  no progress in round ${loopRound} — stopping`))
+              break
+            }
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress_escalate', mode, round: loopRound })
+            console.log(chalk.yellow(`⚠  no progress in round ${loopRound} — escalating fix instructions...`))
+            activeFixRecheckSteps = activeFixRecheckSteps.map(s => s.type !== 'fix' ? s : {
+              ...s,
+              instructions: (s.instructions ?? '') +
+                '\n\nEscalation: the previous fix attempt made no changes. You MUST modify at least one file. Address all issues from the review, including those requiring business logic understanding. Do not skip any item.',
+            })
+          } else if (fixAppliedCount !== undefined) {
+            consecutiveNoProgress = 0
           }
 
           loopRound++
@@ -538,7 +554,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
             pr: loopPR,
             tmpDir,
             reviewStart: Date.now(),
-            steps: fixRecheckSteps,
+            steps: activeFixRecheckSteps,
             initialReviewComment: latestReviewComment,
             round: loopRound,
           })
@@ -547,12 +563,18 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
 
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
 
-          // Fix step was structurally skipped (unsupported vendor, fork PR, commit limit, etc.) —
-          // the head won't advance so looping cannot make progress.
+          // Fix step was structurally skipped — head won't advance so looping cannot make progress.
+          // Transient errors (fix_error, vendor_limit) are retried on the next round;
+          // structural skips (fork_pr, commit_limit_reached, no_vendor) stop the loop immediately.
           if (fixAppliedCount === undefined) {
-            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', mode, round: loopRound })
-            console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
-            break
+            const transientSkip = ['fix_error', 'vendor_limit'].includes(workflowResult.fixSkipReason ?? '')
+            if (!transientSkip) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', mode, round: loopRound })
+              console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
+              break
+            }
+            fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'fix_error_transient', mode, round: loopRound, skip_reason: workflowResult.fixSkipReason })
+            console.log(chalk.yellow(`⚠  fix errored in round ${loopRound} (${workflowResult.fixSkipReason}) — continuing`))
           }
 
           // Explicit stop when the recheck satisfies the condition, so the

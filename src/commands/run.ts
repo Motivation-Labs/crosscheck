@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -573,6 +574,18 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
               fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', mode, round: loopRound })
               console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
               break
+            }
+            // fix_error can leave partial file edits; reset before retrying so the
+            // next attempt starts from a clean state. vendor_limit never touches files.
+            if (workflowResult.fixSkipReason === 'fix_error') {
+              try {
+                execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: tmpDir, stdio: 'pipe' })
+                execFileSync('git', ['clean', '-fd'], { cwd: tmpDir, stdio: 'pipe' })
+              } catch (resetErr) {
+                fileLog({ level: 'warn', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'worktree_reset_failed', mode, round: loopRound })
+                console.log(chalk.red(`✗  could not reset worktree after fix_error — stopping`))
+                break
+              }
             }
             consecutiveFixErrors++
             if (consecutiveFixErrors >= 3) {

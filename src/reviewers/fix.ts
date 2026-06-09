@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { execa } from 'execa'
 import type { Config } from '../config/schema.js'
+import { tierTimeoutMs } from './tier-timeouts.js'
 
 interface ClaudeJsonOutput {
   result?: unknown
@@ -80,7 +81,7 @@ export async function runFixStep(
   config: Config,
   model = 'default',
   timeoutMs?: number,
-): Promise<{ appliedCount: number; tokensUsed?: number }> {
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -100,7 +101,7 @@ export async function runFixStep(
   let tokensUsed: number | undefined
   try {
     const modelArgs = model !== 'default' ? ['--model', model] : []
-    const resolvedTimeout = timeoutMs === undefined ? 180_000 : timeoutMs === 0 ? undefined : timeoutMs
+    const resolvedTimeout = timeoutMs === undefined ? tierTimeoutMs(config.quality.tier) : timeoutMs === 0 ? undefined : timeoutMs
     const { stdout } = await execa('claude', ['--print', '--output-format', 'json', ...modelArgs], {
       input: prompt,
       timeout: resolvedTimeout,
@@ -124,7 +125,7 @@ export async function runFixStep(
     throw err
   }
 
-  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, tokensUsed }
+  if (!output || output === 'NO_CHANGES') return { appliedCount: 0, changedFiles: [], tokensUsed }
 
   let appliedCount = 0
 
@@ -176,12 +177,14 @@ export async function runFixStep(
     fileEdits.set(filePath, updated)
   }
 
+  const writtenFiles: string[] = []
   for (const [filePath, content] of fileEdits) {
     const absPath = join(tmpDir, filePath)
     try {
       mkdirSync(dirname(absPath), { recursive: true })
       writeFileSync(absPath, content)
       appliedCount++
+      writtenFiles.push(filePath)
     } catch { /* skip unwritable paths */ }
   }
 
@@ -206,11 +209,12 @@ export async function runFixStep(
         }
         writeFileSync(absPath, newContent)
         appliedCount++
+        writtenFiles.push(filePath)
       } catch { /* skip unwritable paths */ }
     }
   }
 
-  return { appliedCount, tokensUsed }
+  return { appliedCount, changedFiles: writtenFiles, tokensUsed }
 }
 
 // Codex fix: codex is an agentic tool that edits files directly on disk.
@@ -246,7 +250,7 @@ export async function runCodexFixStep(
   instructions: string,
   model = 'default',
   timeoutMs?: number,
-): Promise<{ appliedCount: number; tokensUsed?: number }> {
+): Promise<{ appliedCount: number; changedFiles: string[]; tokensUsed?: number }> {
   let diff = ''
   try {
     diff = execSync(`git diff origin/${baseRef}...HEAD`, { cwd: tmpDir, encoding: 'utf8' })
@@ -290,5 +294,5 @@ export async function runCodexFixStep(
     ...(changedOutput ? changedOutput.split('\n').filter(Boolean) : []),
     ...(untrackedOutput ? untrackedOutput.split('\n').filter(Boolean) : []),
   ]
-  return { appliedCount: changedFiles.length }
+  return { appliedCount: changedFiles.length, changedFiles }
 }

@@ -64,10 +64,26 @@ export function classifyReviewerError(err: unknown): ClassifiedReviewerError | n
     }
   }
 
-  // Catch-all: auth failure, network, subprocess crash, garbled output, etc.
+  // Auth failure — surface a specific login command rather than a generic message.
+  const msgBody = stripVendorPrefix(err.message)
+  if (/not logged in|auth failure|authentication required|bad credentials|unauthorized/i.test(msgBody)) {
+    const loginCmd = vendor === 'claude' ? 'claude auth login' : 'codex login'
+    return {
+      reason: 'subprocess_error',
+      summary: `${vendor} auth expired — run \`${loginCmd}\` on the crosscheck host`,
+      details: [
+        `Vendor: \`${vendor}\``,
+        `Fix: run \`${loginCmd}\` on the machine running crosscheck to re-authenticate.`,
+        '',
+        `Error: ${msgBody}`,
+      ].join('\n'),
+    }
+  }
+
+  // Catch-all: network, subprocess crash, garbled output, etc.
   const detailLines = [`Vendor: \`${vendor}\``]
   if (ann.exitCode !== undefined) detailLines.push(`Exit code: ${ann.exitCode}`)
-  detailLines.push(`Error: ${stripVendorPrefix(err.message)}`)
+  detailLines.push(`Error: ${msgBody}`)
   if (ann.stderr && ann.stderr.trim().length > 0) {
     const tail = ann.stderr.trim().split('\n').slice(-5).join('\n')
     detailLines.push('', '```', tail, '```')

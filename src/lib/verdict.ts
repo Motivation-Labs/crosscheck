@@ -42,7 +42,7 @@ export const NULL_VERDICT_WARNING =
 // Posted when the severity gate downgrades a NEEDS WORK review to APPROVE because
 // it carries no blocking finding — keeps the notes visible without driving the loop.
 export const SEVERITY_GATE_NOTE =
-  '> ℹ️ No blocking (Critical/High) findings — approving with comments. The notes below are non-blocking; address at your discretion.'
+  '> ℹ️ No blocking (Critical/High/Medium) findings — approving with comments. The notes below are non-blocking; address at your discretion.'
 
 // A list of "no findings" phrasings, reduced to letters-only (punctuation, bullets,
 // and whitespace stripped) so "- None.", "N/A", and "None found" all compare equal.
@@ -67,11 +67,12 @@ function criticalSectionHasContent(text: string): boolean {
   return !EMPTY_SECTION_PHRASES.has(letters)
 }
 
-// A review blocks merge only when it contains a Critical/High-severity finding.
-// Recognizes both the Claude structured format (a non-empty "## Critical Issues"
-// section) and Codex priority markers ([P0]/[P1] = critical/high; [P2]/[P3] don't block).
+// A review blocks merge when it contains a P0/P1 (critical/high) or P2 (medium/correctness)
+// finding. Only P3 nits (style, naming) are non-blocking.
+// Recognises both Codex priority markers ([P0]/[P1]/[P2]) and Claude's structured
+// "## Critical Issues" section.
 export function hasBlockingFindings(reviewText: string): boolean {
-  if (/\[P[01]\]/i.test(reviewText)) return true
+  if (/\[P[012]\]/i.test(reviewText)) return true
   return criticalSectionHasContent(reviewText)
 }
 
@@ -81,11 +82,10 @@ export interface SeverityGateResult {
   downgraded: boolean
 }
 
-// Severity gate: only Critical/High findings should block a merge. A NEEDS WORK
-// verdict whose review carries no blocking finding is downgraded to APPROVE, so
-// warning/suggestion-only reviews stop driving the fix/recheck loop and stop
-// signalling "needs work" to the orchestrator. BLOCK and APPROVE are never altered
-// (BLOCK is the reviewer's explicit serious flag; APPROVE already passes).
+// Severity gate: only P3-only (nit/style) reviews are downgraded from NEEDS WORK to
+// APPROVE, preventing review-loop churn on trivial suggestions. P2 (medium/correctness)
+// findings keep the NEEDS WORK verdict and require human attention before merge.
+// BLOCK and APPROVE are never altered.
 export function applySeverityGate(verdict: Verdict | null, reviewText: string): SeverityGateResult {
   if (verdict === 'NEEDS WORK' && !hasBlockingFindings(reviewText)) {
     return { verdict: 'APPROVE', downgraded: true }

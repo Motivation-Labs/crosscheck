@@ -25,11 +25,13 @@ function extractErrorSummary(stderr: string): string | undefined {
     const l = lines[i]
     if (/^(fatal|error):/i.test(l)) return l
   }
-  // Fall back to last non-boilerplate line
+  // Fall back to last non-boilerplate line, excluding log noise that is not an error
   return lines.filter(l =>
     !l.startsWith('---') &&
     !/^(workdir|model|provider|approval|sandbox|reasoning|session\s+id):/i.test(l) &&
-    !/^OpenAI Codex/i.test(l)
+    !/^OpenAI Codex/i.test(l) &&
+    !/ WARN /i.test(l) &&
+    !/^\d{4}-\d{2}-\d{2}T\d/.test(l)
   ).at(-1)
 }
 

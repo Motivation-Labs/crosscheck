@@ -10,6 +10,8 @@ import { buildDiagnoseReport } from './diagnose.js'
 import { selectOptimizeAgent } from './optimize.js'
 import { sanitizeEntry, loadErrorEntriesForPattern, sanitizeDraftContent } from '../lib/log-analysis.js'
 import type { RawLogEntry } from '../lib/log-analysis.js'
+import { loadIssueQueue, markQueueItemDone } from '../lib/issue-queue.js'
+import type { IssueQueueRecord } from '../lib/issue-queue.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -258,14 +260,126 @@ function errorLabel(e: { pattern: string; command?: string; branch?: string }): 
   return e.pattern
 }
 
+function buildQueueItemPrompt(record: IssueQueueRecord, mode: string): string {
+  return [
+    'You are drafting a GitHub issue for the crosscheck project (a cross-vendor AI code review CLI tool).',
+    '',
+    `Context: ${record.context}`,
+    '',
+    `User anticipation: ${record.user_anticipation}`,
+    '',
+    `Current status: ${record.current_status}`,
+    '',
+    `Environment: crosscheck ${PKG_VERSION} · ${platform()} · mode: ${mode}`,
+    '',
+    'Write a GitHub issue for this problem. Output exactly:',
+    'TITLE: <concise title under 80 characters>',
+    '---',
+    '<issue body in GitHub-flavored markdown>',
+    '',
+    'The body must contain: ## Description, ## Observed Behavior, ## Expected Behavior, ## Steps to Reproduce',
+    'Do not invent details not present in the provided context.',
+  ].join('\n')
+}
+
+async function processQueueItem(
+  item: { path: string; record: IssueQueueRecord },
+  candidates: Array<'claude' | 'codex'>,
+  opts: { dryRun?: boolean; yes?: boolean; mode: string },
+): Promise<void> {
+  const { record } = item
+  console.log(chalk.bold(`\n  Queue item: ${record.pr_url}`))
+  console.log(chalk.dim(`    ${record.user_anticipation}`))
+  console.log(chalk.dim(`    ${record.current_status}`))
+  console.log()
+
+  const prompt = buildQueueItemPrompt(record, opts.mode)
+  let agentOutput: string | undefined
+
+  for (let i = 0; i < candidates.length; i++) {
+    const agent = candidates[i] as 'claude' | 'codex'
+    const reason = i === 0 ? 'primary' : `fallback — ${candidates[i - 1]} failed`
+    console.log(chalk.dim(`  drafting with ${agent} (${reason})...`))
+    try {
+      agentOutput = agent === 'claude'
+        ? await runWithClaude(prompt)
+        : await runWithCodex(prompt)
+      break
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const hasNext = i < candidates.length - 1
+      console.error(chalk.yellow(`  ✗ ${agent} failed: ${msg}${hasNext ? ' — trying next...' : ''}`))
+    }
+  }
+
+  if (agentOutput === undefined) {
+    console.error(chalk.yellow('  ✗ All agents failed — skipping this queue item'))
+    return
+  }
+
+  const draftParsed = parseDraft(agentOutput)
+  if (!draftParsed) {
+    console.error(chalk.yellow('  ✗ Unexpected output format — skipping'))
+    return
+  }
+
+  const cleanDraft = sanitizeDraftContent(draftParsed.title, draftParsed.body)
+  printDraft(cleanDraft.title, cleanDraft.body)
+
+  if (opts.dryRun) {
+    console.log(chalk.dim('  (dry run — not submitting)'))
+    return
+  }
+
+  if (!opts.yes) {
+    const confirmed = await ask(`  Submit to ${ISSUE_REPO}? [y/N]: `)
+    if (!/^y(es)?$/i.test(confirmed)) {
+      console.log('  Skipped.')
+      return
+    }
+  }
+
+  const labels = ['bug', 'workflow-skip']
+  await submitIssue(cleanDraft.title, cleanDraft.body, labels)
+  markQueueItemDone(item.path)
+}
+
 export async function runIssue(opts: {
   since?: string
   dryRun?: boolean
   yes?: boolean
   config?: string
   opportunities?: boolean
+  fromQueue?: boolean
 }): Promise<void> {
   const since = opts.since ?? defaultSince()
+
+  // --- Queue processing mode (--from-queue) ---
+  if (opts.fromQueue) {
+    const queue = loadIssueQueue()
+    if (queue.length === 0) {
+      console.log(chalk.dim('  Issue queue is empty — nothing to process.'))
+      return
+    }
+
+    console.log(chalk.bold(`\n  Processing ${queue.length} queued issue record${queue.length !== 1 ? 's' : ''}...\n`))
+
+    const config = loadConfig(opts.config)
+    const candidates: Array<'claude' | 'codex'> = []
+    try {
+      const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
+      candidates.push(sel.agent)
+    } catch {
+      candidates.push('claude')
+    }
+    const fallback = (['claude', 'codex'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
+    if (fallback) candidates.push(fallback)
+
+    for (const item of queue) {
+      await processQueueItem(item, candidates, { dryRun: opts.dryRun, yes: opts.yes, mode: config.mode })
+    }
+    return
+  }
 
   if (!existsSync(LOG_DIR)) {
     console.error(chalk.yellow('No logs found. Run `crosscheck watch` or `crosscheck serve` first.'))
@@ -532,4 +646,148 @@ async function submitIssue(title: string, body: string, labels: string[]): Promi
   }
 
   console.log(chalk.green(`\n  ✓ issue created → ${issueUrl}`))
+  console.log(chalk.dim('  Thank you for your support — your feedback helps improve crosscheck! 🙏'))
+}
+
+// ── Watch idle integration ────────────────────────────────────────────────────
+// Called by the watch command when no PR activity is detected for the configured
+// idle threshold. Runs an opportunity analysis and walks the user through a
+// double-confirmation flow before filing a GitHub issue.
+
+export async function runIssueFromWatchIdle(opts: {
+  since?: string
+  config?: string
+  dryRun?: boolean
+}): Promise<void> {
+  if (!process.stdin.isTTY) return
+
+  const since = opts.since ?? defaultSince()
+  const days = daysBetween(since)
+
+  // Step 1: Initial consent — ask before spending tokens on AI analysis.
+  const consentAnswer = await ask(
+    '\n  crosscheck has been idle — would you like me to analyze logs and create an improvement ticket? [y/N]: ',
+  )
+  if (!/^y(es)?$/i.test(consentAnswer)) {
+    console.log(chalk.dim('  Skipped.'))
+    return
+  }
+
+  const harness = loadIssueHarness(process.cwd())
+  if (!harness) {
+    console.log(chalk.yellow('  ✗ ISSUE.md harness not found — skipping opportunity analysis.'))
+    return
+  }
+
+  console.log(chalk.dim(`\n  Loading logs for opportunity analysis (last ${days} day${days !== 1 ? 's' : ''})...`))
+  const allEntries = loadRawLogEntries(since)
+  if (allEntries.length === 0) {
+    console.log(chalk.dim('  No log events found — nothing to analyze.'))
+    return
+  }
+
+  let config
+  try {
+    config = loadConfig(opts.config)
+  } catch {
+    config = loadConfig()
+  }
+
+  const prompt = buildOpportunityPrompt(harness, allEntries, days, config.mode)
+
+  const candidates: Array<'claude' | 'codex'> = []
+  try {
+    const sel = selectOptimizeAgent(config, buildDiagnoseReport(since, LOG_DIR))
+    candidates.push(sel.agent)
+  } catch {
+    candidates.push('claude')
+  }
+  const fallback = (['claude', 'codex'] as const).find(v => !candidates.includes(v) && config.vendors[v].enabled)
+  if (fallback) candidates.push(fallback)
+
+  let agentOutput: string | undefined
+  for (let i = 0; i < candidates.length; i++) {
+    const agent = candidates[i] as 'claude' | 'codex'
+    const reason = i === 0 ? 'selected by optimize logic' : `fallback — ${candidates[i - 1]} failed`
+    console.log(chalk.dim(`  Analyzing with ${agent} (${reason})...`))
+    try {
+      agentOutput = agent === 'claude'
+        ? await runWithClaude(prompt)
+        : await runWithCodex(prompt)
+      break
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const hasNext = i < candidates.length - 1
+      console.error(chalk.yellow(`  ✗ ${agent} failed: ${msg}${hasNext ? ' — trying next agent...' : ''}`))
+    }
+  }
+
+  if (agentOutput === undefined) {
+    console.error(chalk.yellow('  ✗ All configured agents failed — try again later.'))
+    return
+  }
+
+  const draftParsed = parseDraft(agentOutput)
+  if (!draftParsed) {
+    console.error(chalk.yellow('  ✗ Unexpected output format from agent — skipping.'))
+    return
+  }
+
+  const cleanDraft = sanitizeDraftContent(draftParsed.title, draftParsed.body)
+
+  // Step 2: Show draft summary and ask for first confirmation.
+  console.log('\n  Here is the draft ticket:')
+  printDraft(cleanDraft.title, cleanDraft.body)
+
+  if (opts.dryRun) {
+    console.log(chalk.dim('  (dry run — not submitting)'))
+    return
+  }
+
+  const firstConfirm = await ask(`  Submit this ticket to ${ISSUE_REPO}? [y/N]: `)
+  if (!/^y(es)?$/i.test(firstConfirm)) {
+    console.log(chalk.dim('  Cancelled.'))
+    return
+  }
+
+  // Step 3: Show summary again and ask final double-confirmation.
+  const width = Math.min(process.stdout.columns ?? 80, 80)
+  const bar = '─'.repeat(width)
+  console.log(`\n  ${chalk.bold('Final summary:')}\n  ${chalk.dim(bar)}`)
+  console.log(`  ${chalk.bold(cleanDraft.title)}`)
+  console.log(`  ${chalk.dim(bar)}`)
+  const bodyPreview = cleanDraft.body.split('\n').slice(0, 5).map(l => `  ${l}`).join('\n')
+  console.log(bodyPreview)
+  if (cleanDraft.body.split('\n').length > 5) console.log(chalk.dim('  ...'))
+  console.log(`  ${chalk.dim(bar)}\n`)
+
+  const finalConfirm = await ask(`  Confirm submission to ${ISSUE_REPO}? [y/N]: `)
+  if (!/^y(es)?$/i.test(finalConfirm)) {
+    console.log(chalk.dim('  Submission cancelled.'))
+    return
+  }
+
+  // Use a local submit that never calls process.exit — the caller is a long-running
+  // watch session and an issue-filing failure must not terminate it.
+  const labels = draftParsed.labels ?? ['improvement']
+  const ghArgs = [
+    'issue', 'create',
+    '--repo', ISSUE_REPO,
+    '--title', cleanDraft.title,
+    '--body', cleanDraft.body,
+    ...labels.flatMap(l => ['--label', l]),
+  ]
+  try {
+    const result = await execa('gh', ghArgs, { timeout: 30_000 })
+    const issueUrl = (result.stdout ?? '').trim()
+    console.log(chalk.green(`\n  ✓ Issue created → ${issueUrl}`))
+    console.log(chalk.dim('  Thank you for your support — your feedback helps improve crosscheck! 🙏'))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(chalk.yellow(`  ✗ gh issue create failed: ${msg}`))
+    const escapedTitle = cleanDraft.title.replace(/'/g, "'\\''")
+    const escapedBody = cleanDraft.body.replace(/'/g, "'\\''")
+    const labelsStr = labels.map(l => `--label '${l}'`).join(' ')
+    console.log(chalk.dim(`\n  Run manually: gh issue create --repo ${ISSUE_REPO} --title '${escapedTitle}' --body '${escapedBody}' ${labelsStr}`))
+  }
 }

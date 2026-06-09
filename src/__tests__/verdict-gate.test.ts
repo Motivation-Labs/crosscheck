@@ -46,10 +46,12 @@ describe('hasBlockingFindings', () => {
     expect(hasBlockingFindings(REAL_CRITICAL_REVIEW)).toBe(true)
   })
 
-  it('is true for Codex P0/P1 markers and false for P2/P3 only', () => {
+  it('P0/P1/P2 markers block; P3-only does not', () => {
     expect(hasBlockingFindings('- [P0] data loss')).toBe(true)
     expect(hasBlockingFindings('- [P1] broken auth')).toBe(true)
-    expect(hasBlockingFindings('- [P2] medium\n- [P3] minor')).toBe(false)
+    expect(hasBlockingFindings('- [P2] correctness bug')).toBe(true)
+    expect(hasBlockingFindings('- [P2] medium\n- [P3] minor')).toBe(true)
+    expect(hasBlockingFindings('- [P3] minor nit only')).toBe(false)
   })
 
   it('is false when there is no recognizable Critical section (NEEDS WORK is non-blocking by definition)', () => {

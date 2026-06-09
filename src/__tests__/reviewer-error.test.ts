@@ -76,15 +76,34 @@ describe('classifyReviewerError', () => {
     })
   })
 
-  describe('subprocess_error', () => {
-    it('catches non-timeout / non-limit failures with the generic reason', () => {
+  describe('subprocess_error — auth failures', () => {
+    it('surfaces claude auth login command when claude reports not logged in', () => {
       const err = reviewerErr('claude: not logged in — run claude auth', { exitCode: 1, stderr: 'auth error\nnot logged in' })
+      const out = classifyReviewerError(err)
+      expect(out?.reason).toBe('subprocess_error')
+      expect(out?.summary).toContain('claude auth login')
+      expect(out?.details).toContain('claude auth login')
+      expect(out?.details).toContain('Vendor: `claude`')
+    })
+
+    it('surfaces codex login command when codex reports auth failure', () => {
+      const err = reviewerErr('codex: auth failure — please re-authenticate', { exitCode: 1 })
+      const out = classifyReviewerError(err)
+      expect(out?.reason).toBe('subprocess_error')
+      expect(out?.summary).toContain('codex login')
+      expect(out?.details).toContain('codex login')
+    })
+  })
+
+  describe('subprocess_error — generic', () => {
+    it('catches non-timeout / non-limit / non-auth failures with the generic reason', () => {
+      const err = reviewerErr('claude: internal crash', { exitCode: 1, stderr: 'segfault\ncore dumped' })
       const out = classifyReviewerError(err)
       expect(out?.reason).toBe('subprocess_error')
       expect(out?.summary).toBe('claude reviewer subprocess failed')
       expect(out?.details).toContain('Vendor: `claude`')
       expect(out?.details).toContain('Exit code: 1')
-      expect(out?.details).toContain('not logged in')
+      expect(out?.details).toContain('internal crash')
     })
 
     it('renders the stderr tail (last 5 lines) inside a fenced block when present', () => {

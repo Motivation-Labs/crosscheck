@@ -40,3 +40,23 @@ describe('classifyError — transient errors must not be mislabeled as auth', ()
     expect(classifyError('something nobody anticipated')).toBe('unknown')
   })
 })
+
+describe('classifyError — SSL and auth failure patterns from real failures', () => {
+  it('classifies LibreSSL SSL_ERROR_SYSCALL as network', () => {
+    expect(classifyError(
+      'LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443',
+    )).toBe('network')
+  })
+
+  it('classifies codex auth failure message as auth', () => {
+    expect(classifyError('codex auth failure during fix step — run: codex login')).toBe('auth')
+  })
+
+  it('classifies claude auth failure message as auth', () => {
+    expect(classifyError('claude auth failure during conflict-resolve step — run: claude auth login')).toBe('auth')
+  })
+
+  it('classifies generic auth failure text as auth', () => {
+    expect(classifyError('auth failure: session expired')).toBe('auth')
+  })
+})

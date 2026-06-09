@@ -88,11 +88,12 @@ export function classifyError(message: string): ErrorCategory {
   if (/rate limit|secondary rate|\b429\b/.test(m)) return 'rate_limit'
   if (/\b529\b|overloaded/.test(m)) return 'overloaded'
   if (/maximum budget|budget (?:exhausted|exceeded)|error_max_budget|reached maximum budget/.test(m)) return 'budget'
-  if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token/.test(m)) return 'auth'
+  if (/bad credentials|401|not logged in|not authenticated|github_token|authentication required|token|auth failure/.test(m)) return 'auth'
   if (/admin:org|admin:repo|forbidden|403|insufficient scope|requires.*scope|write:org/.test(m)) return 'permission'
   // Network check must precede timeout: subprocess stderr containing 'fetch failed'
   // would otherwise be shadowed by '--no-timeout' in the CLI command string.
-  if (/fetch failed|econnrefused|enotfound|network error|socket hang|socket timeout/.test(m)) return 'network'
+  // ssl_error_syscall / libressl covers macOS LibreSSL errors on git clone/fetch.
+  if (/fetch failed|econnrefused|enotfound|network error|socket hang|socket timeout|ssl_error_syscall|libressl/.test(m)) return 'network'
   if (/timeout|timed out|etimedout|deadline/.test(m)) return 'timeout'
   if (/exited with code|exit code [^0]|subprocess|command failed/.test(m)) return 'subprocess'
   return 'unknown'

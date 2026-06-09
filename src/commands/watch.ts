@@ -51,6 +51,7 @@ import { classifyReviewerError } from '../lib/reviewer-error.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { runIssueFromWatchIdle } from './issue.js'
 import { PersistentShaSet } from '../lib/sha-cache.js'
 import { PersistentDiffHashMap, computeDiffHash } from '../lib/diff-hash.js'
 import { dedupScopes, type Scope } from '../lib/scopes.js'
@@ -245,11 +246,17 @@ export async function runWatch(opts: WatchOpts = {}) {
   // re-entries for reviews that watch posted itself (as opposed to kickass).
   const reviewedPRShaKeys = new Set<string>()
 
+  // Idle tracking — reset on any PR activity; used by the idle-issue timer.
+  let lastActivityAt = Date.now()
+  let idleAnalysisRunning = false
+  let idleIntervalRef: ReturnType<typeof setInterval> | null = null
+
   async function reviewPR(params: {
     owner: string; repoName: string; prNumber: number; title: string;
     body: string | null; author: string; headSha: string; headRef: string;
     headRepo: string | null; baseRef: string; action: string;
   }): Promise<void> {
+    lastActivityAt = Date.now()  // reset idle timer on any PR event
     const { owner, repoName, prNumber } = params
     const key = `${owner}/${repoName}#${prNumber}@${params.headSha}`
     if (inFlight.has(key)) return
@@ -820,6 +827,7 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   const cleanup = async () => {
     running = false
+    if (idleIntervalRef !== null) clearInterval(idleIntervalRef)
     board.stop()
     stopSmartSwitch()
     console.log('\nCleaning up...')
@@ -908,6 +916,31 @@ export async function runWatch(opts: WatchOpts = {}) {
 
   // Board starts after the banner — all output below is live-updated
   board.start()
+
+  // ── Idle issue timer ─────────────────────────────────────────────────────
+  // When watch has been idle (no PR activity) for the configured duration,
+  // offer to analyze logs and create an improvement ticket.
+  const idleIssueCfg = config.watch?.idle_issue
+  if (idleIssueCfg?.enabled !== false && process.stdin.isTTY) {
+    const idleThresholdMs = (idleIssueCfg?.timeout_min ?? 30) * 60_000
+    idleIntervalRef = setInterval(() => {
+      if (!running) return
+      if (idleAnalysisRunning) return
+      if (inFlight.size > 0) return
+      if (Date.now() - lastActivityAt < idleThresholdMs) return
+      idleAnalysisRunning = true
+      lastActivityAt = Date.now()  // prevent immediate re-trigger
+      board.stop()
+      void runIssueFromWatchIdle({ config: opts.config })
+        .catch(err => {
+          fileLog({ level: 'warn', event: 'idle_issue_flow_error', error: err instanceof Error ? err.message : String(err) })
+        })
+        .finally(() => {
+          idleAnalysisRunning = false
+          if (running) board.start()
+        })
+    }, 60_000)
+  }
 
   // ── Backtrace scan ────────────────────────────────────────────────────────
   if (opts.backtrace === true || (opts.backtrace !== false && config.backtrace.enabled)) {

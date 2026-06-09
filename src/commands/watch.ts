@@ -930,10 +930,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       idleAnalysisRunning = true
       lastActivityAt = Date.now()  // prevent immediate re-trigger
       board.stop()
-      void runIssueFromWatchIdle({ config: opts.config }).finally(() => {
-        idleAnalysisRunning = false
-        board.start()
-      })
+      void runIssueFromWatchIdle({ config: opts.config })
+        .catch(err => {
+          fileLog({ level: 'warn', event: 'idle_issue_flow_error', error: err instanceof Error ? err.message : String(err) })
+        })
+        .finally(() => {
+          idleAnalysisRunning = false
+          board.start()
+        })
     }, 60_000)
   }
 

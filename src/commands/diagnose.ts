@@ -559,6 +559,9 @@ function buildStepRecs(history: StepRecord[], logEvents: PRLogEvent[], nextResul
     if (step === 'review') {
       addRec('pending_review', `Review has not run yet. Trigger it with: ${chalk.cyan(`crosscheck review ${prUrl}`)}`)
     }
+    if (step === 'conflict-resolve') {
+      addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: ${chalk.cyan(`crosscheck run ${prUrl}`)}`)
+    }
   }
 
   return recs
@@ -740,7 +743,7 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   const context = history.length > 0
     ? `PR has ${history.length} step(s) in history (last: ${history[history.length - 1]?.type ?? 'unknown'}). ` +
       (nextResult?.step ? `Expected next step: ${nextResult.step.type}.` : 'Workflow state unclear.')
-    : `No step history found for PR #${number} (${repoKey}).`
+    : 'No step history found for this PR.'
 
   const userAnticipation = nextResult?.step != null
     ? `User expected ${nextResult.step.type} step to execute after the last recorded step.`

@@ -768,5 +768,27 @@ export async function runIssueFromWatchIdle(opts: {
     return
   }
 
-  await submitIssue(cleanDraft.title, cleanDraft.body, draftParsed.labels ?? ['improvement'])
+  // Use a local submit that never calls process.exit — the caller is a long-running
+  // watch session and an issue-filing failure must not terminate it.
+  const labels = draftParsed.labels ?? ['improvement']
+  const ghArgs = [
+    'issue', 'create',
+    '--repo', ISSUE_REPO,
+    '--title', cleanDraft.title,
+    '--body', cleanDraft.body,
+    ...labels.flatMap(l => ['--label', l]),
+  ]
+  try {
+    const result = await execa('gh', ghArgs, { timeout: 30_000 })
+    const issueUrl = (result.stdout ?? '').trim()
+    console.log(chalk.green(`\n  ✓ Issue created → ${issueUrl}`))
+    console.log(chalk.dim('  Thank you for your support — your feedback helps improve crosscheck! 🙏'))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(chalk.yellow(`  ✗ gh issue create failed: ${msg}`))
+    const escapedTitle = cleanDraft.title.replace(/'/g, "'\\''")
+    const escapedBody = cleanDraft.body.replace(/'/g, "'\\''")
+    const labelsStr = labels.map(l => `--label '${l}'`).join(' ')
+    console.log(chalk.dim(`\n  Run manually: gh issue create --repo ${ISSUE_REPO} --title '${escapedTitle}' --body '${escapedBody}' ${labelsStr}`))
+  }
 }

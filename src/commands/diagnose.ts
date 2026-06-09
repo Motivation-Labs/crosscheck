@@ -450,12 +450,15 @@ interface PRLogEvent {
   message?: string
 }
 
-function loadPRLogEvents(repoKey: string, prNumber: number): PRLogEvent[] {
+function loadPRLogEvents(repoKey: string, prNumber: number, since?: string): PRLogEvent[] {
   const events: PRLogEvent[] = []
   if (!existsSync(LOG_DIR)) return events
   const normalizedRepo = repoKey.toLowerCase()
+  const sinceMs = since ? new Date(since).getTime() : 0
   for (const f of readdirSync(LOG_DIR).sort()) {
     if (!f.endsWith('.ndjson')) continue
+    // Fast-path: skip files whose date prefix is before --since
+    if (since && f.replace('.ndjson', '') < since.slice(0, 10)) continue
     const lines = readFileSync(join(LOG_DIR, f), 'utf8').split('\n')
     for (const line of lines) {
       if (!line.trim()) continue
@@ -463,17 +466,17 @@ function loadPRLogEvents(repoKey: string, prNumber: number): PRLogEvent[] {
         const entry = JSON.parse(line) as LogEntry
         const entryRepo = (entry.repo as string | undefined)?.toLowerCase()
         const entryPr = entry.pr as number | undefined
-        if (entryRepo === normalizedRepo && entryPr === prNumber) {
-          events.push({
-            ts: entry.ts,
-            event: entry.event,
-            reason: entry['reason'] as string | undefined,
-            sha: entry['sha'] as string | undefined,
-            reviewer: entry.reviewer,
-            verdict: entry.verdict,
-            message: entry.message,
-          })
-        }
+        if (entryRepo !== normalizedRepo || entryPr !== prNumber) continue
+        if (sinceMs > 0 && new Date(entry.ts).getTime() < sinceMs) continue
+        events.push({
+          ts: entry.ts,
+          event: entry.event,
+          reason: entry['reason'] as string | undefined,
+          sha: entry['sha'] as string | undefined,
+          reviewer: entry.reviewer,
+          verdict: entry.verdict,
+          message: entry.message,
+        })
       } catch { /* skip malformed */ }
     }
   }
@@ -561,7 +564,7 @@ function buildStepRecs(history: StepRecord[], logEvents: PRLogEvent[], nextResul
   return recs
 }
 
-async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: string }): Promise<void> {
+async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: string; config?: string }): Promise<void> {
   const parsed = parsePRUrlForDiagnose(prUrl)
   if (!parsed) {
     console.error(chalk.red('Invalid PR URL. Expected: https://github.com/owner/repo/pull/123'))
@@ -584,13 +587,11 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
     process.exit(1)
   }
 
-  console.log(chalk.bold(`\ncrosscheck diagnose — PR #${number}\n`))
-  console.log(chalk.dim(`  ${prUrl}\n`))
-
   let history: StepRecord[] = []
   let nextResult: NextStepResult | null = null
   let prTitle = ''
   let currentSha = ''
+  let fetchError = ''
 
   try {
     const octokit = createGithubClient(token)
@@ -601,8 +602,38 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
     history = await fetchStepHistory(owner, repo, number, token)
     nextResult = identifyNextWorkflowStep(history, steps, currentSha)
   } catch (err) {
-    console.error(chalk.yellow(`  ⚠ Could not fetch PR data: ${err instanceof Error ? err.message : String(err)}`))
+    fetchError = err instanceof Error ? err.message : String(err)
   }
+
+  const logEvents = loadPRLogEvents(repoKey, number, opts.since)
+  const recs = buildStepRecs(history, logEvents, nextResult, prUrl)
+  const workflowComplete = nextResult?.step === null && history.length > 0
+
+  // ── JSON output mode ─────────────────────────────────────────────────────
+  if (opts.json) {
+    console.log(JSON.stringify({
+      pr: { url: prUrl, number, repo: repoKey, title: prTitle, headSha: currentSha },
+      ...(fetchError && { fetch_error: fetchError }),
+      ...(opts.since && { since: opts.since }),
+      step_history: history.map(r => ({
+        type: r.type, verdict: r.verdict, sha: r.sha, pushedSha: r.pushedSha,
+        round: r.round, reviewer: r.reviewer, createdAt: r.createdAt, source: r.source,
+      })),
+      pending_step: nextResult?.step ? nextResult.step.type : null,
+      workflow_complete: workflowComplete,
+      log_events: logEvents,
+      recommendations: recs,
+    }, null, 2))
+    return
+  }
+
+  // ── Human-readable output ─────────────────────────────────────────────────
+  if (fetchError) {
+    console.error(chalk.yellow(`  ⚠ Could not fetch PR data: ${fetchError}`))
+  }
+
+  console.log(chalk.bold(`\ncrosscheck diagnose — PR #${number}\n`))
+  console.log(chalk.dim(`  ${prUrl}\n`))
 
   const divider = chalk.dim('─'.repeat(68))
 
@@ -646,8 +677,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
   console.log(chalk.dim(`  Legend: ${chalk.yellow('*')} skip  ${chalk.green('✓')} completed  ${chalk.red('✗')} failed  ${chalk.dim('·')} info`))
   console.log(`  ${divider}\n`)
 
-  const logEvents = loadPRLogEvents(repoKey, number)
-
   if (logEvents.length === 0) {
     console.log(chalk.dim('    (no log events found — logs may predate this PR or have been cleared)'))
   } else {
@@ -685,8 +714,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
   console.log(chalk.bold('  Step 03') + chalk.dim(' — Recommendations'))
   console.log(`  ${divider}\n`)
 
-  const recs = buildStepRecs(history, logEvents, nextResult, prUrl)
-
   if (recs.length > 0) {
     for (const rec of recs) {
       console.log(`    ${chalk.yellow('→')} ${rec}`)
@@ -698,7 +725,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
   }
 
   // No recommendations could be generated — save to issue queue and offer to file a ticket.
-  const workflowComplete = nextResult?.step === null && history.length > 0
   if (workflowComplete) {
     const lastVerdict = [...history].reverse().find(r => r.verdict)?.verdict
     console.log(`    ${chalk.green('✓')} No issues detected — workflow completed (${lastVerdict ?? 'no verdict'}).`)

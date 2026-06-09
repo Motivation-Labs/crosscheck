@@ -921,7 +921,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   // When watch has been idle (no PR activity) for the configured duration,
   // offer to analyze logs and create an improvement ticket.
   const idleIssueCfg = config.watch?.idle_issue
-  if (idleIssueCfg?.enabled !== false) {
+  if (idleIssueCfg?.enabled !== false && process.stdin.isTTY) {
     const idleThresholdMs = (idleIssueCfg?.timeout_min ?? 30) * 60_000
     idleIntervalRef = setInterval(() => {
       if (!running) return

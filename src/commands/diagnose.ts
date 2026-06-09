@@ -608,6 +608,21 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
     fetchError = err instanceof Error ? err.message : String(err)
   }
 
+  // ── Early exit on fetch failure ──────────────────────────────────────────
+  if (fetchError) {
+    if (opts.json) {
+      console.log(JSON.stringify({
+        pr: { url: prUrl, number, repo: repoKey },
+        fetch_error: fetchError,
+        ...(opts.since && { since: opts.since }),
+      }, null, 2))
+    } else {
+      console.error(chalk.red(`✗ Could not fetch PR data: ${fetchError}`))
+      console.error(chalk.dim('  Verify your GITHUB_TOKEN and that the PR URL is correct.'))
+    }
+    process.exit(1)
+  }
+
   const logEvents = loadPRLogEvents(repoKey, number, opts.since)
   const recs = buildStepRecs(history, logEvents, nextResult, prUrl)
   const workflowComplete = nextResult?.step === null && history.length > 0
@@ -616,7 +631,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   if (opts.json) {
     console.log(JSON.stringify({
       pr: { url: prUrl, number, repo: repoKey, title: prTitle, headSha: currentSha },
-      ...(fetchError && { fetch_error: fetchError }),
       ...(opts.since && { since: opts.since }),
       step_history: history.map(r => ({
         type: r.type, verdict: r.verdict, sha: r.sha, pushedSha: r.pushedSha,
@@ -631,9 +645,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   }
 
   // ── Human-readable output ─────────────────────────────────────────────────
-  if (fetchError) {
-    console.error(chalk.yellow(`  ⚠ Could not fetch PR data: ${fetchError}`))
-  }
 
   console.log(chalk.bold(`\ncrosscheck diagnose — PR #${number}\n`))
   console.log(chalk.dim(`  ${prUrl}\n`))

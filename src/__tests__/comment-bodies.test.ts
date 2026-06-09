@@ -118,6 +118,25 @@ describe('buildFixAppliedCommentBody', () => {
     })
     expect(body).toContain('Fixed with [Claude Code]')
   })
+
+  it('does not extract list items that appear inside fenced code blocks', () => {
+    const reviewCommentBody = [
+      '- Real issue: missing null check',
+      '```diff',
+      '- old_code()',
+      '+ new_code()',
+      '```',
+      '- Another real issue',
+    ].join('\n')
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 2,
+      reviewCommentBody,
+    })
+    expect(body).toContain('- Real issue: missing null check')
+    expect(body).toContain('- Another real issue')
+    expect(body).not.toContain('- old_code()')
+    expect(body).not.toContain('+ new_code()')
+  })
 })
 
 describe('buildConflictResolvedCommentBody', () => {

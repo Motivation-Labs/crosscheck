@@ -15,7 +15,10 @@ const MAX_ISSUES_LISTED = 8
 function extractIssuePoints(reviewBody: string, max: number): string[] {
   const cleaned = reviewBody.replace(/<!--[\s\S]*?-->/g, '').trim()
   const items: string[] = []
+  let inCodeBlock = false
   for (const line of cleaned.split('\n')) {
+    if (/^```/.test(line.trim())) { inCodeBlock = !inCodeBlock; continue }
+    if (inCodeBlock) continue
     const t = line.trim()
     if (!/^[-*•]\s+\S/.test(t) && !/^\d+\.\s+\S/.test(t)) continue
     const text = t.replace(/^[-*•]\s+/, '').replace(/^\d+\.\s+/, '').trim()

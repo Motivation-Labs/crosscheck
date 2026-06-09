@@ -2,6 +2,18 @@
 
 The first public proof asset should be a real GitHub PR timeline plus a 60-90 second narrated screen recording. The video creates attention, but the public PR is the evidence.
 
+Use the Humanbased field report as the proof-led top of funnel:
+
+```text
+Blog -> README quick start -> fixture PR review -> first useful verdict -> optional fix/recheck -> onboarding/watch
+```
+
+Field report:
+
+```text
+https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/
+```
+
 The intended chain is:
 
 ```text

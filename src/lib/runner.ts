@@ -253,6 +253,10 @@ export interface WorkflowResult {
   // Sum of applied_count across all fix steps; 0 means fix ran but made no
   // changes; undefined means no fix step executed in this run.
   fixAppliedCount?: number
+  // When fixAppliedCount is undefined, the reason the fix step was skipped
+  // (e.g. 'fix_error', 'commit_limit_reached', 'no_vendor', 'fork_pr').
+  // Lets callers distinguish transient errors from structural skips.
+  fixSkipReason?: string
   // Latest review/recheck comment produced by this workflow. Operator loops
   // feed this into the next fix round so fixes target the freshest failed
   // recheck instead of falling back to the original review comment.
@@ -429,6 +433,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
   // release the SHA as `failure` rather than `success` in that case.
   let fixPushedShaRequiresRecheck: string | null = null
+  let lastFixSkipReason: string | undefined
 
   // workflow_complete event accumulators. Each step the runner dispatches is
   // recorded in stepsRun (including ones that get logged as step_skipped —
@@ -507,30 +512,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       try {
         await runReviewWithVendor(reviewer)
       } catch (err: unknown) {
-        if (!isSubscriptionLimitError(err)) throw err
+        const isReconnect = err instanceof Error && /reconnect/i.test(err.message)
+        if (isReconnect) {
+          fileLog({ level: 'warn', event: 'review_reconnect_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
+          log(chalk.yellow(`⚠  codex connection dropped — retrying in 30s...`))
+          await new Promise<void>(r => setTimeout(r, 30_000))
+          await runReviewWithVendor(reviewer)
+        } else if (!isSubscriptionLimitError(err)) {
+          throw err
+        } else {
+          const failedVendor = reviewer
+          const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
+          const reason = err instanceof Error ? err.message : String(err)
+          ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
 
-        const failedVendor = reviewer
-        const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
-        const reason = err instanceof Error ? err.message : String(err)
-        ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+          if (!fallbackVendor) throw err
 
-        if (!fallbackVendor) throw err
-
-        fileLog({
-          level: 'warn',
-          event: 'vendor_fallback',
-          repo: `${owner}/${repoName}`,
-          pr: prNumber,
-          step: step.name,
-          step_type: effectiveType,
-          failed_vendor: failedVendor,
-          fallback_vendor: fallbackVendor,
-          reason: reason.slice(0, 300),
-        })
-        log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
-        reviewer = fallbackVendor
-        onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
-        await runReviewWithVendor(reviewer)
+          fileLog({
+            level: 'warn',
+            event: 'vendor_fallback',
+            repo: `${owner}/${repoName}`,
+            pr: prNumber,
+            step: step.name,
+            step_type: effectiveType,
+            failed_vendor: failedVendor,
+            fallback_vendor: fallbackVendor,
+            reason: reason.slice(0, 300),
+          })
+          log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
+          reviewer = fallbackVendor
+          onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+          await runReviewWithVendor(reviewer)
+        }
       }
 
       // First attempt timed out but the delayed retry succeeded — surface a
@@ -615,6 +628,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     } else if (effectiveType === 'fix') {
       const skipFix = (reason: string) => {
+        lastFixSkipReason = reason
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { skipped: true }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
@@ -669,10 +683,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
       // don't count [crosscheck] commits from previously merged PRs.
+      // Crazy/halfcrazy mode doubles the cap since it deliberately loops.
       const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
+      const effectiveCommitLimit = ctx.roundMode ? MAX_CROSSCHECK_COMMITS * 2 : MAX_CROSSCHECK_COMMITS
 
-      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
+      if (existingCount >= effectiveCommitLimit) {
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`))
         skipFix('commit_limit_reached')
         continue
       }
@@ -1087,6 +1103,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   return {
     verdict: verdict ?? null,
     fixAppliedCount,
+    ...(fixAppliedCount === undefined && lastFixSkipReason !== undefined && { fixSkipReason: lastFixSkipReason }),
     ...(latestReviewResult?.commentBody && {
       latestReviewComment: {
         body: latestReviewResult.commentBody,

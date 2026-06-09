@@ -159,16 +159,16 @@ crosscheck init
 
 ## Step 2 — Get one useful review
 
-Before running continuously, verify end-to-end with one low-risk PR:
+Before using a production PR, run the public fixture from the Humanbased field report:
+
+```bash
+crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
+```
+
+This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. Use `--reviewer claude` if Claude Code is your authenticated reviewer. Once the fixture produces a useful verdict, run the same command against one low-risk PR from your own repo:
 
 ```bash
 crosscheck review https://github.com/owner/repo/pull/123 --reviewer codex
-```
-
-This clones the PR branch, runs Codex review against the base branch, and posts a comment to the PR. If Claude Code is your authenticated reviewer, use:
-
-```bash
-crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 ```
 
 If this step fails, fix the specific auth, clone, reviewer, or comment-posting error before enabling `watch` or `serve`.

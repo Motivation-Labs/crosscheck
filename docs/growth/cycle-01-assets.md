@@ -16,6 +16,8 @@ Let a new user prove Crosscheck on one controlled PR before connecting it to a r
 
 ```bash
 npm install -g @humanbased/crosscheck
+gh auth login
+codex login --device-auth
 crosscheck status
 crosscheck onboard
 crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
@@ -135,34 +137,35 @@ Please share:
 ### X / LinkedIn post draft
 
 ```text
-AI coding agents are fast enough to create a new failure mode: PRs that look done before they are safe to merge.
+We analyzed 295 agentic PRs from Humanbased's own monorepo.
 
-Crosscheck adds an independent Review -> Fix -> Recheck loop around Claude Code and Codex.
+The lesson was not "AI review everything harder."
 
-One agent writes. Another reviews. The author fixes. The reviewer checks again.
+It was: route review strength based on PR shape, keep review/fix/recheck visible, and measure where agentic workflows actually fail.
 
-Install:
+That's why we built Crosscheck.
+
+Read the field report:
+https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/
+
+Try the fixture:
 npm install -g @humanbased/crosscheck
-
-Built by Humanbased for complete agentic software delivery.
+crosscheck review https://github.com/humanbased-ai/crosscheck-proof-fixture/pull/1 --reviewer codex
 ```
 
 ### Hacker News / Show HN draft
 
 ```text
-Show HN: Crosscheck - a Review -> Fix -> Recheck loop for agent-written PRs
+We published a field report from 295 agentic PRs at Humanbased.
 
-AI coding agents often produce PRs that look finished before they are actually merge-ready. Crosscheck is an open-source CLI that runs an independent review/fix/recheck workflow using the agent CLIs developers already have, such as Claude Code and Codex.
+The useful finding was that agentic code review needs to be treated as a workflow: review routing, fix loops, rechecks, and post-merge measurement. A single "AI reviewer comment" is too shallow.
 
-The goal is not to replace engineers or auto-merge code. It is to add a practical safety loop around agent-authored PRs: review the patch, send findings back for repair, then recheck the result.
+Crosscheck is the open-source CLI we built from that work. It runs a Review -> Fix -> Recheck loop through Claude Code or Codex.
 
-Install:
-npm install -g @humanbased/crosscheck
+Blog:
+https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/
 
-I would especially like feedback from people already using agents to create PRs:
-- What breaks in first setup?
-- Does the review comment catch something useful?
-- Would review-only mode be enough to start?
+I'm especially looking for feedback from people already using coding agents: can you get one useful review verdict on the fixture PR in under 10 minutes?
 ```
 
 ### Reddit / Discord-style post draft

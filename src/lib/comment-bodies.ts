@@ -7,6 +7,23 @@ import { CROSSCHECK_REPO_URL } from './product.js'
 // Cap the file list at this length to keep comment bodies readable when a
 // resolve touches many files.
 const MAX_FILES_LISTED = 20
+const MAX_FILES_IN_FIX = 10
+const MAX_ISSUES_LISTED = 8
+
+// Extract the first N list items from a review comment body to surface what
+// issues the fix addressed. Strips annotation tags before scanning.
+function extractIssuePoints(reviewBody: string, max: number): string[] {
+  const cleaned = reviewBody.replace(/<!--[\s\S]*?-->/g, '').trim()
+  const items: string[] = []
+  for (const line of cleaned.split('\n')) {
+    const t = line.trim()
+    if (!/^[-*•]\s+\S/.test(t) && !/^\d+\.\s+\S/.test(t)) continue
+    const text = t.replace(/^[-*•]\s+/, '').replace(/^\d+\.\s+/, '').trim()
+    if (text.length > 0 && text.length < 200) items.push(text)
+    if (items.length >= max) break
+  }
+  return items
+}
 
 export interface FixAppliedCommentInput {
   owner: string
@@ -14,26 +31,53 @@ export interface FixAppliedCommentInput {
   sha: string
   appliedCount: number
   reviewCommentId?: number
+  /** Files written by the fix step. Rendered as a bullet list. */
+  changedFiles?: string[]
+  /** Which vendor ran the fix ('claude' | 'codex'). Controls attribution link. */
+  vendor?: string
+  /** Body of the review comment the fix addressed. Issue points are extracted and listed. */
+  reviewCommentBody?: string
 }
 
 export function buildFixAppliedCommentBody(input: FixAppliedCommentInput): string {
-  const { owner, repo, sha, appliedCount, reviewCommentId } = input
+  const { owner, repo, sha, appliedCount, reviewCommentId, changedFiles, vendor, reviewCommentBody } = input
   const shortSha = sha.slice(0, 7)
   const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`
   const backlink = reviewCommentId
     ? ` addressing the [code review](#issuecomment-${reviewCommentId})`
     : ''
   const plural = appliedCount !== 1 ? 's' : ''
-  return [
+
+  const lines: string[] = [
     '### ✅ Auto-fix applied',
     '',
     `Pushed [\`${shortSha}\`](${commitUrl})${backlink}: **${appliedCount} change${plural} applied**.`,
-    '',
-    '---',
-    `_Applied by Claude Code via [Crosscheck](${CROSSCHECK_REPO_URL})._`,
-    '',
-    '<!-- crosscheck: fix_applied -->',
-  ].join('\n')
+  ]
+
+  if (reviewCommentBody) {
+    const issues = extractIssuePoints(reviewCommentBody, MAX_ISSUES_LISTED)
+    if (issues.length > 0) {
+      lines.push('', '**Issues addressed:**')
+      for (const issue of issues) lines.push(`- ${issue}`)
+    }
+  }
+
+  if (changedFiles && changedFiles.length > 0) {
+    lines.push('', '**Files changed:**')
+    const shown = changedFiles.slice(0, MAX_FILES_IN_FIX)
+    const remainder = changedFiles.length - shown.length
+    for (const f of shown) lines.push(`- \`${f}\``)
+    if (remainder > 0) lines.push(`- _...and ${remainder} more_`)
+  }
+
+  const isClaude = !vendor || vendor === 'claude'
+  const vendorAttribution = isClaude
+    ? `_Fixed with [Claude Code](https://claude.ai/code) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+    : `_Fixed with [OpenAI Codex](https://openai.com/codex) via [Crosscheck](${CROSSCHECK_REPO_URL})_`
+
+  lines.push('', '---', vendorAttribution, '', '<!-- crosscheck: fix_applied -->')
+
+  return lines.join('\n')
 }
 
 // Prominent banner prepended to a review comment when the first review attempt

@@ -39,6 +39,85 @@ describe('buildFixAppliedCommentBody', () => {
     expect(body).not.toContain('issuecomment-')
     expect(body).not.toContain('addressing the')
   })
+
+  it('lists changed files under a "Files changed:" section', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 2,
+      changedFiles: ['src/auth.ts', 'src/utils/config.ts'],
+    })
+    expect(body).toContain('**Files changed:**')
+    expect(body).toContain('- `src/auth.ts`')
+    expect(body).toContain('- `src/utils/config.ts`')
+  })
+
+  it('truncates file list at 10 and shows a "...and N more" tail', () => {
+    const files = Array.from({ length: 13 }, (_, i) => `src/file-${i}.ts`)
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 13, changedFiles: files,
+    })
+    expect(body).toContain('- `src/file-9.ts`')
+    expect(body).not.toContain('- `src/file-10.ts`')
+    expect(body).toContain('- _...and 3 more_')
+  })
+
+  it('extracts bullet-point issues from the review comment body', () => {
+    const reviewCommentBody = [
+      '### Review',
+      '',
+      '- Missing null check in `auth.ts:42`',
+      '- Unused import `React` in `App.tsx`',
+      '1. Use `const` instead of `let` for config',
+    ].join('\n')
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 3,
+      reviewCommentBody,
+    })
+    expect(body).toContain('**Issues addressed:**')
+    expect(body).toContain('- Missing null check in `auth.ts:42`')
+    expect(body).toContain('- Unused import `React` in `App.tsx`')
+    expect(body).toContain('- Use `const` instead of `let` for config')
+  })
+
+  it('strips annotation tags before extracting issues', () => {
+    const reviewCommentBody = '<!-- crosscheck: origin=claude -->\n- Real issue here'
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1,
+      reviewCommentBody,
+    })
+    expect(body).toContain('- Real issue here')
+    expect(body).not.toContain('origin=claude')
+  })
+
+  it('omits the issues section when the review body has no list items', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1,
+      reviewCommentBody: 'Looks good overall. Minor style issues only.',
+    })
+    expect(body).not.toContain('**Issues addressed:**')
+  })
+
+  it('uses Claude Code attribution for claude vendor (default)', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1, vendor: 'claude',
+    })
+    expect(body).toContain('Fixed with [Claude Code]')
+    expect(body).not.toContain('OpenAI Codex')
+  })
+
+  it('uses OpenAI Codex attribution for codex vendor', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1, vendor: 'codex',
+    })
+    expect(body).toContain('Fixed with [OpenAI Codex]')
+    expect(body).not.toContain('Claude Code')
+  })
+
+  it('defaults to Claude Code attribution when vendor is omitted', () => {
+    const body = buildFixAppliedCommentBody({
+      owner: 'o', repo: 'r', sha: 'a'.repeat(40), appliedCount: 1,
+    })
+    expect(body).toContain('Fixed with [Claude Code]')
+  })
 })
 
 describe('buildConflictResolvedCommentBody', () => {

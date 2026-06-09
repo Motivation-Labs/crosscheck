@@ -740,8 +740,4 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; config?: 
   console.log()
   console.log(chalk.dim('  Run `crosscheck issue --from-queue` to file a GitHub ticket for this.'))
   console.log()
-
-  // Auto-invoke issue queue processing
-  const { runIssue } = await import('./issue.js')
-  await runIssue({ fromQueue: true })
 }

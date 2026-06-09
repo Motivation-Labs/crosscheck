@@ -177,6 +177,12 @@ post_review:
       pr_title: "fix: address CR issues in #{original_pr_title}"
       label: cr-autofix         # GitHub label applied to the fix PR
 
+# ─── Watch ───────────────────────────────────────────────────────────────────
+# watch:
+#   idle_issue:
+#     enabled: true       # when watch is idle for timeout_min minutes, prompt to file an improvement ticket
+#     timeout_min: 30     # minutes of no PR activity before the idle prompt fires (min: 5)
+
 # ─── Backtrace ───────────────────────────────────────────────────────────────
 # On startup, scan all open PRs in the monitored scope and review any that have
 # never received a [crosscheck] comment. Ensures coverage for PRs opened while

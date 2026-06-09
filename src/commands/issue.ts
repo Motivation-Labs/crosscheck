@@ -331,7 +331,6 @@ async function processQueueItem(
 
   if (opts.dryRun) {
     console.log(chalk.dim('  (dry run — not submitting)'))
-    markQueueItemDone(item.path)
     return
   }
 

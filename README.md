@@ -14,22 +14,52 @@
   <img src="./assets/screenshot-watch.png" alt="crosscheck watch — live pipeline view" width="860" />
 </p>
 
-**Stop merging AI slop. Crosscheck turns agent-written PRs into merge-ready patches with a configurable Review -> Fix -> Recheck pipeline.**
+**Your agents ship fast. Crosscheck makes sure they ship right.**
 
-AI coding agents are fast, but they can still ship regressions, half-finished fixes, brittle edge cases, and "early victory" PRs that look done before they are solid. Crosscheck adds an independent safety loop: let one agent write the patch, let another review it, send the findings back to the author, then recheck the result before merge.
+AI coding agents create PRs faster than review habits can absorb. The failure mode isn't broken builds — it's *early victory*: patches that pass CI, look complete, and still hide regressions, brittle edge cases, or half-finished fixes.
 
-Define the workflow in `workflow.yml`: review-only, review + fix, or the full review + fix + recheck cycle. Each step runs through the `claude` or `codex` CLI against your existing subscriptions — no API keys, no per-review cost.
+Crosscheck adds an independent Review → Fix → Recheck loop. One agent writes the patch. Another reviews it. Findings go back to the author to repair. The result gets rechecked before merge. The PR moves toward genuinely merge-ready — not just "looks green."
 
-Built by [Humanbased](https://github.com/humanbased-ai) as a showcase of practical engineering craft for the agentic coding era.
+No new hosted service. No per-review API bill. Crosscheck runs through the `claude` and `codex` CLIs you already have — your existing subscriptions, your machine or server.
 
-Read the field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/). It explains why Humanbased built Crosscheck after analyzing 295 agentic PRs and retained Crosscheck logs from real internal workflow.
+Built by [Humanbased](https://github.com/humanbased-ai). Read the field report: [What 295 Agentic PRs Taught Us About Code Review](https://blog.humanbased.ai/posts/agentic-pr-quality-crosscheck/) — 295 agentic PRs analyzed, real Crosscheck logs included.
 
 ## Why crosscheck?
 
-- **Combats AI slop before merge** — catches code regressions, incomplete fixes, hallucinated assumptions, and brittle "looks green" patches.
-- **Uses independent reviewers** — route Claude-authored PRs to Codex, Codex-authored PRs to Claude, or run a single-vendor loop when that is what you have.
-- **Closes the loop** — review findings can become a fix step and then a recheck step, so the PR moves toward real merge readiness instead of another comment thread.
-- **Runs on your machine or server** — no new hosted code review service, no per-review API bill, no extra infrastructure to trust.
+**Agent velocity without lowering the merge bar.**
+
+- **Independent eyes, not self-review** — route Claude-authored PRs to Codex and vice versa. Self-review is exactly where early-victory failures hide.
+- **Review → Fix → Recheck, not just comments** — findings return to the author agent for repair; a clean recheck follows before merge. PRs move forward, not sideways.
+- **No new vendor** — runs through the `claude` and `codex` CLIs you already pay for. No per-review bill, no extra trust surface.
+- **Configurable for any team size** — review-only mode, review + fix, or the full loop. Personal laptop via `watch`, always-on server via `serve`, one-shot via `review`.
+
+## Who uses crosscheck
+
+| Persona | Problem | How crosscheck helps |
+|---|---|---|
+| **Solo agentic builder** | Same agent that wrote the code may self-approve incomplete work | Independent reviewer from a different vendor, on your machine |
+| **Technical founder** | AI PRs look done before delivering stable value | Closes the loop: review finding → agent fix → clean recheck |
+| **Engineering lead** | Agent use is hard to supervise or standardize | Configurable workflow, review-only mode, and a visible PR audit trail |
+| **OSS maintainer** | Review bandwidth is scarce; comments must be actionable | One-shot `crosscheck review` posts concrete findings directly on the PR |
+
+### Common workflows
+
+```bash
+# Catch regressions before merging a solo PR
+crosscheck run <pr-url>
+
+# Continuous review on every incoming agent PR
+crosscheck serve            # always-on team server
+
+# Review stale PRs from a queue
+crosscheck scan && crosscheck kickass
+
+# One-shot review of a specific PR
+crosscheck review <pr-url>
+
+# Loop until the agent produces an approved patch
+crosscheck run <pr-url> --crazy
+```
 
 ---
 

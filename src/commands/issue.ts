@@ -662,6 +662,8 @@ export async function runIssueFromWatchIdle(opts: {
   config?: string
   dryRun?: boolean
 }): Promise<void> {
+  if (!process.stdin.isTTY) return
+
   const since = opts.since ?? defaultSince()
   const days = daysBetween(since)
 

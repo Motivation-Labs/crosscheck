@@ -926,13 +926,14 @@ export async function runWatch(opts: WatchOpts = {}) {
     idleIntervalRef = setInterval(() => {
       if (!running) return
       if (idleAnalysisRunning) return
+      if (inFlight.size > 0) return
       if (Date.now() - lastActivityAt < idleThresholdMs) return
       idleAnalysisRunning = true
       lastActivityAt = Date.now()  // prevent immediate re-trigger
       board.stop()
       void runIssueFromWatchIdle({ config: opts.config }).finally(() => {
         idleAnalysisRunning = false
-        board.start()
+        if (running) board.start()
       })
     }, 60_000)
   }

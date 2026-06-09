@@ -118,6 +118,17 @@ export const BacktraceConfigSchema = z.object({
   enabled: z.boolean().default(false),
 })
 
+export const WatchIdleIssueSchema = z.object({
+  // When watch has been idle (no PR activity) for timeout_min minutes, analyze logs
+  // and offer to create a GitHub improvement ticket. Set enabled: false to disable.
+  enabled: z.boolean().default(true),
+  timeout_min: z.number().int().min(5).default(30),
+})
+
+export const WatchConfigSchema = z.object({
+  idle_issue: WatchIdleIssueSchema.default({}),
+})
+
 export const PostReviewDeliverySchema = z.object({
   // pull_request → opens a fix PR targeting the original branch (human approves before merge)
   // commit       → pushes fixes directly onto the original PR branch
@@ -187,6 +198,7 @@ export const ConfigSchema = z.object({
   logs: LogsConfigSchema.default({}),
   impact: ImpactConfigSchema.default({}),
   backtrace: BacktraceConfigSchema.default({}),
+  watch: WatchConfigSchema.default({}),
   post_review: PostReviewConfigSchema.default({}),
   display: DisplayConfigSchema.default({}),
   brand: BrandConfigSchema.default({}),
@@ -205,3 +217,4 @@ export type PostReviewFixConfig = z.infer<typeof PostReviewFixSchema>
 export type DisplayConfig = z.infer<typeof DisplayConfigSchema>
 export type DisplayTheme = z.infer<typeof DisplayThemeSchema>
 export type BacktraceConfig = z.infer<typeof BacktraceConfigSchema>
+export type WatchConfig = z.infer<typeof WatchConfigSchema>

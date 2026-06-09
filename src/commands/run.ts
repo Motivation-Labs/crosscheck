@@ -490,6 +490,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
         let loopRound = 1
         let loopSha = sha
         let consecutiveNoProgress = 0
+        let consecutiveFixErrors = 0
 
         // Continue when the verdict hasn't met the stop condition OR when the
         // initial workflow applied fixes that still need a follow-up recheck.
@@ -564,7 +565,7 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
 
           // Fix step was structurally skipped — head won't advance so looping cannot make progress.
-          // Transient errors (fix_error, vendor_limit) are retried on the next round;
+          // Transient errors (fix_error, vendor_limit) are retried on the next round up to 3 times;
           // structural skips (fork_pr, commit_limit_reached, no_vendor) stop the loop immediately.
           if (fixAppliedCount === undefined) {
             const transientSkip = ['fix_error', 'vendor_limit'].includes(workflowResult.fixSkipReason ?? '')
@@ -573,8 +574,16 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
               console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
               break
             }
+            consecutiveFixErrors++
+            if (consecutiveFixErrors >= 3) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'fix_error_limit', mode, round: loopRound, skip_reason: workflowResult.fixSkipReason })
+              console.log(chalk.red(`✗  fix errored ${consecutiveFixErrors} consecutive rounds (${workflowResult.fixSkipReason}) — stopping`))
+              break
+            }
             fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'fix_error_transient', mode, round: loopRound, skip_reason: workflowResult.fixSkipReason })
-            console.log(chalk.yellow(`⚠  fix errored in round ${loopRound} (${workflowResult.fixSkipReason}) — continuing`))
+            console.log(chalk.yellow(`⚠  fix errored in round ${loopRound} (${workflowResult.fixSkipReason}) — retrying (${consecutiveFixErrors}/3)`))
+          } else {
+            consecutiveFixErrors = 0
           }
 
           // Explicit stop when the recheck satisfies the condition, so the

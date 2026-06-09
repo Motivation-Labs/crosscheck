@@ -696,6 +696,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       onPhaseChange(`${vendor} fixing...`, { phase: 'fixing' })
       const fixStepStart = Date.now()
       let appliedCount = 0
+      let fixChangedFiles: string[] = []
       let fixTokensUsed: number | undefined
       let fixErr: unknown = undefined
       let activeVendor = vendor
@@ -715,7 +716,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       }
 
       try {
-        ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(vendor))
+        ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed } = await runFix(vendor))
       } catch (err) {
         logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor }, err)
         const fallbackVendor = resolveLimitFallbackVendor(vendor, effectiveType, config)
@@ -727,7 +728,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           log(chalk.yellow(`⚠  ${vendor} fix failed — falling back to ${fallbackVendor}...`))
           fileLog({ level: 'warn', event: 'fix_vendor_fallback', repo: `${owner}/${repoName}`, pr: prNumber, from: vendor, to: fallbackVendor, ...(isSubscriptionLimitError(err) && { reason: 'vendor_limit' }) })
           try {
-            ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(fallbackVendor))
+            ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed } = await runFix(fallbackVendor))
             activeVendor = fallbackVendor
           } catch (fallbackErr) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
@@ -746,7 +747,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
         await new Promise<void>(resolve => setTimeout(resolve, FIX_RETRY_DELAY_MS))
         onPhaseChange(`${activeVendor} fixing (retry)...`, { phase: 'fixing' })
         try {
-          ;({ appliedCount, tokensUsed: fixTokensUsed } = await runFix(activeVendor))
+          ;({ appliedCount, changedFiles: fixChangedFiles, tokensUsed: fixTokensUsed } = await runFix(activeVendor))
           fileLog({ level: 'info', event: 'fix_retry_succeeded', repo: `${owner}/${repoName}`, pr: prNumber })
           fixErr = undefined
         } catch (retryErr) {
@@ -833,6 +834,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
           const body = buildFixAppliedCommentBody({
             owner, repo: repoName, sha: newSha, appliedCount,
             reviewCommentId,
+            changedFiles: fixChangedFiles,
+            vendor: activeVendor,
+            reviewCommentBody,
           })
           await octokit.rest.issues.createComment({ owner, repo: repoName, issue_number: prNumber, body })
           fileLog({ level: 'info', event: 'fix_applied_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber, sha: newSha })

@@ -120,8 +120,8 @@ export const BacktraceConfigSchema = z.object({
 
 export const WatchIdleIssueSchema = z.object({
   // When watch has been idle (no PR activity) for timeout_min minutes, analyze logs
-  // and offer to create a GitHub improvement ticket. Set enabled: false to disable.
-  enabled: z.boolean().default(true),
+  // and offer to create a GitHub improvement ticket. Opt-in: set enabled: true to enable.
+  enabled: z.boolean().default(false),
   timeout_min: z.number().int().min(5).default(30),
 })
 

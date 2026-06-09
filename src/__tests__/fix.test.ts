@@ -172,15 +172,16 @@ describe('runCodexFixStep', () => {
 
   afterEach(() => { vi.clearAllMocks() })
 
-  it('returns appliedCount=0 when codex makes no file changes', async () => {
+  it('returns appliedCount=0 and empty changedFiles when codex makes no file changes', async () => {
     const { runCodexFixStep } = await import('../reviewers/fix.js')
     execSyncMock.mockReturnValue('')
     const result = await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '')
     expect(result.appliedCount).toBe(0)
+    expect(result.changedFiles).toEqual([])
     expect(result.tokensUsed).toBeUndefined()
   })
 
-  it('returns appliedCount matching changed file count from git diff', async () => {
+  it('returns appliedCount and changedFiles matching git diff output', async () => {
     const { runCodexFixStep } = await import('../reviewers/fix.js')
     execSyncMock.mockImplementation((cmd: unknown) => {
       if (String(cmd).includes('--name-only')) return 'src/foo.ts\nsrc/bar.ts'
@@ -188,6 +189,7 @@ describe('runCodexFixStep', () => {
     })
     const result = await runCodexFixStep('/tmp/repo', 'main', 'My PR', 'Fix the bug', '')
     expect(result.appliedCount).toBe(2)
+    expect(result.changedFiles).toEqual(['src/foo.ts', 'src/bar.ts'])
   })
 
   it('throws a helpful message on codex auth failure', async () => {

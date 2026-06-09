@@ -180,7 +180,7 @@ post_review:
 # ─── Watch ───────────────────────────────────────────────────────────────────
 # watch:
 #   idle_issue:
-#     enabled: true       # when watch is idle for timeout_min minutes, prompt to file an improvement ticket
+#     enabled: false      # opt-in: set to true to prompt when watch is idle for timeout_min minutes
 #     timeout_min: 30     # minutes of no PR activity before the idle prompt fires (min: 5)
 
 # ─── Backtrace ───────────────────────────────────────────────────────────────

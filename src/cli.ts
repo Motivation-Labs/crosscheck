@@ -149,7 +149,8 @@ program
   .description('Analyze review logs — surface failure patterns, error trends, and improvement suggestions')
   .option('--json', 'output full report as JSON')
   .option('--since <date>', 'only analyze logs from this date onward (YYYY-MM-DD)')
-  .action((opts: { json?: boolean; since?: string }) => void runDiagnose(opts))
+  .option('--pr <url>', 'analyze a specific PR: show step history, log events, skips, and recommendations')
+  .action((opts: { json?: boolean; since?: string; pr?: string }) => void runDiagnose(opts))
 
 program
   .command('optimize')
@@ -178,6 +179,7 @@ program
   .option('-y, --yes', 'skip interactive questions and confirmation')
   .option('-c, --config <path>', 'config file path')
   .option('--opportunities', 'analyze logs for reliability patterns and improvement opportunities instead of error patterns')
-  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string; opportunities?: boolean }) => void runIssue(opts))
+  .option('--from-queue', 'process pending issue records saved by `diagnose --pr` when no recommendations were generated')
+  .action((opts: { since?: string; dryRun?: boolean; yes?: boolean; config?: string; opportunities?: boolean; fromQueue?: boolean }) => void runIssue(opts))
 
 program.parse()

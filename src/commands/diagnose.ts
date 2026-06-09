@@ -550,17 +550,17 @@ function buildStepRecs(history: StepRecord[], logEvents: PRLogEvent[], nextResul
   if (nextResult?.step != null) {
     const step = nextResult.step.type
     if (step === 'fix') {
-      addRec('pending_fix', `Fix step is pending. Run manually: ${chalk.cyan(`crosscheck run ${prUrl} --steps fix`)}`)
+      addRec('pending_fix', `Fix step is pending. Run manually: crosscheck run ${prUrl} --steps fix`)
       addRec('pending_fix_watch', 'Or ensure `crosscheck watch` is running and listening to this repo.')
     }
     if (step === 'recheck') {
-      addRec('pending_recheck', `Recheck is pending. Run manually: ${chalk.cyan(`crosscheck run ${prUrl} --steps recheck`)}`)
+      addRec('pending_recheck', `Recheck is pending. Run manually: crosscheck run ${prUrl} --steps recheck`)
     }
     if (step === 'review') {
-      addRec('pending_review', `Review has not run yet. Trigger it with: ${chalk.cyan(`crosscheck review ${prUrl}`)}`)
+      addRec('pending_review', `Review has not run yet. Trigger it with: crosscheck review ${prUrl}`)
     }
     if (step === 'conflict-resolve') {
-      addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: ${chalk.cyan(`crosscheck run ${prUrl}`)}`)
+      addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: crosscheck run ${prUrl}`)
     }
   }
 

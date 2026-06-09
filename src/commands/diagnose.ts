@@ -559,6 +559,9 @@ function buildStepRecs(history: StepRecord[], logEvents: PRLogEvent[], nextResul
     if (step === 'review') {
       addRec('pending_review', `Review has not run yet. Trigger it with: ${chalk.cyan(`crosscheck review ${prUrl}`)}`)
     }
+    if (step === 'conflict-resolve') {
+      addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: ${chalk.cyan(`crosscheck run ${prUrl}`)}`)
+    }
   }
 
   return recs

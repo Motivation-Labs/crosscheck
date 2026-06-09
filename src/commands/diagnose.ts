@@ -550,14 +550,17 @@ function buildStepRecs(history: StepRecord[], logEvents: PRLogEvent[], nextResul
   if (nextResult?.step != null) {
     const step = nextResult.step.type
     if (step === 'fix') {
-      addRec('pending_fix', `Fix step is pending. Run manually: ${chalk.cyan(`crosscheck run ${prUrl} --steps fix`)}`)
+      addRec('pending_fix', `Fix step is pending. Run manually: crosscheck run ${prUrl} --steps fix`)
       addRec('pending_fix_watch', 'Or ensure `crosscheck watch` is running and listening to this repo.')
     }
     if (step === 'recheck') {
-      addRec('pending_recheck', `Recheck is pending. Run manually: ${chalk.cyan(`crosscheck run ${prUrl} --steps recheck`)}`)
+      addRec('pending_recheck', `Recheck is pending. Run manually: crosscheck run ${prUrl} --steps recheck`)
     }
     if (step === 'review') {
-      addRec('pending_review', `Review has not run yet. Trigger it with: ${chalk.cyan(`crosscheck review ${prUrl}`)}`)
+      addRec('pending_review', `Review has not run yet. Trigger it with: crosscheck review ${prUrl}`)
+    }
+    if (step === 'conflict-resolve') {
+      addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: crosscheck run ${prUrl}`)
     }
     if (step === 'conflict-resolve') {
       addRec('pending_conflict_resolve', `PR has merge conflicts that must be resolved before the workflow can continue. Resolve the conflicts, push, and re-run: ${chalk.cyan(`crosscheck run ${prUrl}`)}`)
@@ -608,6 +611,21 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
     fetchError = err instanceof Error ? err.message : String(err)
   }
 
+  // ── Early exit on fetch failure ──────────────────────────────────────────
+  if (fetchError) {
+    if (opts.json) {
+      console.log(JSON.stringify({
+        pr: { url: prUrl, number, repo: repoKey },
+        fetch_error: fetchError,
+        ...(opts.since && { since: opts.since }),
+      }, null, 2))
+    } else {
+      console.error(chalk.red(`✗ Could not fetch PR data: ${fetchError}`))
+      console.error(chalk.dim('  Verify your GITHUB_TOKEN and that the PR URL is correct.'))
+    }
+    process.exit(1)
+  }
+
   const logEvents = loadPRLogEvents(repoKey, number, opts.since)
   const recs = buildStepRecs(history, logEvents, nextResult, prUrl)
   const workflowComplete = nextResult?.step === null && history.length > 0
@@ -616,7 +634,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   if (opts.json) {
     console.log(JSON.stringify({
       pr: { url: prUrl, number, repo: repoKey, title: prTitle, headSha: currentSha },
-      ...(fetchError && { fetch_error: fetchError }),
       ...(opts.since && { since: opts.since }),
       step_history: history.map(r => ({
         type: r.type, verdict: r.verdict, sha: r.sha, pushedSha: r.pushedSha,
@@ -631,9 +648,6 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   }
 
   // ── Human-readable output ─────────────────────────────────────────────────
-  if (fetchError) {
-    console.error(chalk.yellow(`  ⚠ Could not fetch PR data: ${fetchError}`))
-  }
 
   console.log(chalk.bold(`\ncrosscheck diagnose — PR #${number}\n`))
   console.log(chalk.dim(`  ${prUrl}\n`))
@@ -743,7 +757,7 @@ async function runDiagnoseForPR(prUrl: string, opts: { json?: boolean; since?: s
   const context = history.length > 0
     ? `PR has ${history.length} step(s) in history (last: ${history[history.length - 1]?.type ?? 'unknown'}). ` +
       (nextResult?.step ? `Expected next step: ${nextResult.step.type}.` : 'Workflow state unclear.')
-    : `No step history found for PR #${number} (${repoKey}).`
+    : 'No step history found for this PR.'
 
   const userAnticipation = nextResult?.step != null
     ? `User expected ${nextResult.step.type} step to execute after the last recorded step.`

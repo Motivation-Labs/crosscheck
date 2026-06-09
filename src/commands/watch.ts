@@ -921,7 +921,7 @@ export async function runWatch(opts: WatchOpts = {}) {
   // When watch has been idle (no PR activity) for the configured duration,
   // offer to analyze logs and create an improvement ticket.
   const idleIssueCfg = config.watch?.idle_issue
-  if (idleIssueCfg?.enabled !== false) {
+  if (idleIssueCfg?.enabled !== false && process.stdin.isTTY) {
     const idleThresholdMs = (idleIssueCfg?.timeout_min ?? 30) * 60_000
     idleIntervalRef = setInterval(() => {
       if (!running) return
@@ -931,10 +931,14 @@ export async function runWatch(opts: WatchOpts = {}) {
       idleAnalysisRunning = true
       lastActivityAt = Date.now()  // prevent immediate re-trigger
       board.stop()
-      void runIssueFromWatchIdle({ config: opts.config }).finally(() => {
-        idleAnalysisRunning = false
-        if (running) board.start()
-      })
+      void runIssueFromWatchIdle({ config: opts.config })
+        .catch(err => {
+          fileLog({ level: 'warn', event: 'idle_issue_flow_error', error: err instanceof Error ? err.message : String(err) })
+        })
+        .finally(() => {
+          idleAnalysisRunning = false
+          if (running) board.start()
+        })
     }, 60_000)
   }
 

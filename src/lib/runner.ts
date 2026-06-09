@@ -14,7 +14,7 @@ import { runConflictResolveStep, findConflictedFiles } from '../reviewers/confli
 import { parseVerdict, prependVerdictToComment, NULL_VERDICT_WARNING, applySeverityGate, SEVERITY_GATE_NOTE } from '../lib/verdict.js'
 import { createGithubClient, postReviewComment, getLastCrossCheckCommentId, getLastCrossCheckReviewComment } from '../github/client.js'
 import { acquireRemoteLock, releaseRemoteLock } from '../github/review-status.js'
-import { log as fileLog, logError } from '../lib/logger.js'
+import { log as fileLog, logError, classifyError } from '../lib/logger.js'
 import { buildCommitTrailers } from '../lib/annotation.js'
 import { resolveClaudeModel, resolveCodexModel } from '../lib/review-models.js'
 import { buildStepIdentityFields } from '../lib/event-fields.js'
@@ -22,6 +22,7 @@ import { buildFixAppliedCommentBody, buildConflictResolvedCommentBody, buildRetr
 import { loadWorkflow, evaluateWhen, type StepResult } from '../lib/workflow.js'
 import type { PRPhase } from '../lib/board.js'
 import { isSubscriptionLimitError } from '../lib/smart-switch.js'
+import { tierTimeoutMs } from '../reviewers/tier-timeouts.js'
 
 const MAX_CROSSCHECK_COMMITS = 5
 const FIX_RETRY_DELAY_MS = 2 * 60 * 1000
@@ -98,6 +99,8 @@ export interface WorkflowCompleteInputs {
   round?: number
   trigger?: WorkflowTrigger
   qualityTier?: string
+  workflowError?: unknown
+  failedStep?: string
   now?: number  // injectable for testing total_duration_ms; defaults to Date.now()
 }
 
@@ -121,6 +124,10 @@ export function buildWorkflowCompleteEvent(
   const lastStep = inputs.stepsRun.length > 0 ? inputs.stepsRun[inputs.stepsRun.length - 1] : null
   const endedReason: WorkflowEndedReason = inputs.workflowFailed ? 'error' : 'completed'
   const now = inputs.now ?? Date.now()
+  const rawErrorMessage = inputs.workflowError instanceof Error ? inputs.workflowError.message : inputs.workflowError !== undefined ? String(inputs.workflowError) : undefined
+  const errorMessage = rawErrorMessage !== undefined && rawErrorMessage.length > 500
+    ? `${rawErrorMessage.slice(0, 500)} …[truncated]`
+    : rawErrorMessage
 
   const totalTokens = stepValues.reduce((s, r) => s + (r.tokens_used ?? 0), 0)
   // Only emit split fields when at least one step actually recorded them — avoid
@@ -146,6 +153,8 @@ export function buildWorkflowCompleteEvent(
     ...(inputs.qualityTier !== undefined && { quality_tier: inputs.qualityTier }),
     ...(inputs.round !== undefined && { round: inputs.round }),
     ...(inputs.trigger !== undefined && { trigger: inputs.trigger }),
+    ...(inputs.failedStep !== undefined && { failed_step: inputs.failedStep }),
+    ...(errorMessage !== undefined && { error_message: errorMessage, error_category: classifyError(rawErrorMessage ?? '') }),
   }
 }
 
@@ -244,6 +253,10 @@ export interface WorkflowResult {
   // Sum of applied_count across all fix steps; 0 means fix ran but made no
   // changes; undefined means no fix step executed in this run.
   fixAppliedCount?: number
+  // When fixAppliedCount is undefined, the reason the fix step was skipped
+  // (e.g. 'fix_error', 'commit_limit_reached', 'no_vendor', 'fork_pr').
+  // Lets callers distinguish transient errors from structural skips.
+  fixSkipReason?: string
   // Latest review/recheck comment produced by this workflow. Operator loops
   // feed this into the next fix round so fixes target the freshest failed
   // recheck instead of falling back to the original review comment.
@@ -413,11 +426,14 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   // mid-workflow (process.exit there bypasses our finally below).
   const pushedShasNeedingRelease: string[] = ctx.pushedShas ?? []
   let workflowFailed = false
+  let workflowError: unknown = undefined
+  let failedStep: string | undefined = undefined
   // When a fix commits and a structural review/recheck step follows, we acquire
   // the remote lock on the pushed SHA. Track it here so the finally can detect
   // whether the recheck was actually skipped (by `when`, no_reviewer, etc.) and
   // release the SHA as `failure` rather than `success` in that case.
   let fixPushedShaRequiresRecheck: string | null = null
+  let lastFixSkipReason: string | undefined
 
   // workflow_complete event accumulators. Each step the runner dispatches is
   // recorded in stepsRun (including ones that get logged as step_skipped —
@@ -426,11 +442,13 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   const workflowId = randomUUID()
   const workflowStart = Date.now()
   const stepsRun: string[] = []
+  let currentStepName: string | undefined
 
   emitPRComplexity(ctx, triggerField)
 
   try {
   for (const step of steps) {
+    currentStepName = step.name
     stepsRun.push(step.name)
     const effectiveType = getEffectiveStepType(step.type, ctx.isRecheckRun === true)
 
@@ -494,30 +512,38 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       try {
         await runReviewWithVendor(reviewer)
       } catch (err: unknown) {
-        if (!isSubscriptionLimitError(err)) throw err
+        const isReconnect = err instanceof Error && /reconnect/i.test(err.message)
+        if (isReconnect) {
+          fileLog({ level: 'warn', event: 'review_reconnect_retry', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity })
+          log(chalk.yellow(`⚠  codex connection dropped — retrying in 30s...`))
+          await new Promise<void>(r => setTimeout(r, 30_000))
+          await runReviewWithVendor(reviewer)
+        } else if (!isSubscriptionLimitError(err)) {
+          throw err
+        } else {
+          const failedVendor = reviewer
+          const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
+          const reason = err instanceof Error ? err.message : String(err)
+          ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
 
-        const failedVendor = reviewer
-        const fallbackVendor = resolveLimitFallbackVendor(failedVendor, effectiveType, config)
-        const reason = err instanceof Error ? err.message : String(err)
-        ctx.onVendorLimit?.(failedVendor, fallbackVendor, reason, step.name)
+          if (!fallbackVendor) throw err
 
-        if (!fallbackVendor) throw err
-
-        fileLog({
-          level: 'warn',
-          event: 'vendor_fallback',
-          repo: `${owner}/${repoName}`,
-          pr: prNumber,
-          step: step.name,
-          step_type: effectiveType,
-          failed_vendor: failedVendor,
-          fallback_vendor: fallbackVendor,
-          reason: reason.slice(0, 300),
-        })
-        log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
-        reviewer = fallbackVendor
-        onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
-        await runReviewWithVendor(reviewer)
+          fileLog({
+            level: 'warn',
+            event: 'vendor_fallback',
+            repo: `${owner}/${repoName}`,
+            pr: prNumber,
+            step: step.name,
+            step_type: effectiveType,
+            failed_vendor: failedVendor,
+            fallback_vendor: fallbackVendor,
+            reason: reason.slice(0, 300),
+          })
+          log(chalk.yellow(`⚠  ${failedVendor} hit a usage limit — switching ${effectiveType} step to ${fallbackVendor}`))
+          reviewer = fallbackVendor
+          onPhaseChange(`${reviewer} ${isRecheck ? 'rechecking' : 'reviewing'}...`, { phase: startPhase })
+          await runReviewWithVendor(reviewer)
+        }
       }
 
       // First attempt timed out but the delayed retry succeeded — surface a
@@ -531,8 +557,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       if (parsed.verdict === null) {
         fileLog({ level: 'warn', event: 'verdict_parse_failed', repo: `${owner}/${repoName}`, pr: prNumber, reviewer, ...stepIdentity, output_length: rawReview.length })
       }
-      // Severity gate: a NEEDS WORK review with no blocking (Critical/High) finding is
-      // approved-with-comments so warning-only reviews stop driving the fix/recheck loop.
+      // Severity gate: NEEDS WORK with only P3 nits is downgraded to APPROVE so
+      // suggestion-only reviews don't drive the fix/recheck loop. P2 (correctness)
+      // and above keep NEEDS WORK and require human attention before merge.
       const gate = applySeverityGate(parsed.verdict, clean)
       const verdict = gate.verdict
       if (gate.downgraded) {
@@ -601,6 +628,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
 
     } else if (effectiveType === 'fix') {
       const skipFix = (reason: string) => {
+        lastFixSkipReason = reason
         onPhaseChange('', { phase: 'fixed', fixCount: 0 })
         results[step.name] = { skipped: true }
         fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repoName}`, pr: prNumber, step: step.name, reason })
@@ -655,10 +683,12 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       // Guard: don't push more than MAX_CROSSCHECK_COMMITS per PR.
       // Scope to commits ahead of base so long-lived branches (e.g. staging)
       // don't count [crosscheck] commits from previously merged PRs.
+      // Crazy/halfcrazy mode doubles the cap since it deliberately loops.
       const existingCount = countCrosscheckCommitsForPR(tmpDir, pr.base.ref)
+      const effectiveCommitLimit = ctx.roundMode ? MAX_CROSSCHECK_COMMITS * 2 : MAX_CROSSCHECK_COMMITS
 
-      if (existingCount >= MAX_CROSSCHECK_COMMITS) {
-        log(chalk.yellow(`⚠  PR #${prNumber}: ${MAX_CROSSCHECK_COMMITS} [crosscheck] commits already — stopping auto-fix`))
+      if (existingCount >= effectiveCommitLimit) {
+        log(chalk.yellow(`⚠  PR #${prNumber}: ${effectiveCommitLimit} [crosscheck] commits already — stopping auto-fix`))
         skipFix('commit_limit_reached')
         continue
       }
@@ -671,16 +701,17 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
       let fixErr: unknown = undefined
       let activeVendor = vendor
 
+      const tierMs = tierTimeoutMs(config.quality.tier)
       const runFix = async (v: 'claude' | 'codex') => {
         if (v === 'codex') {
           return runCodexFixStep(
             tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec),
+            codexFixModel, ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.codex.timeout_sec) ?? tierMs,
           )
         }
         return runFixStep(
           tmpDir, pr.base.ref, pr.title, reviewCommentBody, step.instructions ?? '',
-          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec),
+          config, 'default', ctx.overrideTimeoutMs ?? vendorTimeoutMs(config.vendors.claude.timeout_sec) ?? tierMs,
         )
       }
 
@@ -701,6 +732,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             activeVendor = fallbackVendor
           } catch (fallbackErr) {
             logError({ repo: `${owner}/${repoName}`, pr: prNumber, phase: 'fix', attempt: 1, vendor: fallbackVendor }, fallbackErr)
+            activeVendor = fallbackVendor  // retry uses the fallback vendor since primary already failed
             fixErr = fallbackErr
           }
         } else {
@@ -737,6 +769,9 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
             fileLog({ level: 'info', event: 'fix_failed_comment_posted', repo: `${owner}/${repoName}`, pr: prNumber })
           } catch { /* best-effort notification */ }
         }
+        // The review was already posted — treat fix failure as a skipped step so the
+        // workflow completes with the review's verdict rather than exiting non-zero and
+        // releasing the remote lock as a workflow failure.
         continue
       }
 
@@ -1072,6 +1107,7 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   return {
     verdict: verdict ?? null,
     fixAppliedCount,
+    ...(fixAppliedCount === undefined && lastFixSkipReason !== undefined && { fixSkipReason: lastFixSkipReason }),
     ...(latestReviewResult?.commentBody && {
       latestReviewComment: {
         body: latestReviewResult.commentBody,
@@ -1081,6 +1117,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
   }
   } catch (err) {
     workflowFailed = true
+    workflowError = err
+    failedStep = currentStepName
     throw err
   } finally {
     if (pushedShasNeedingRelease.length > 0 || fixPushedShaRequiresRecheck !== null) {
@@ -1130,6 +1168,8 @@ export async function runWorkflow(ctx: WorkflowContext): Promise<WorkflowResult>
     fileLog(buildWorkflowCompleteEvent({
       owner, repoName, prNumber,
       workflowId, workflowStart, stepsRun, results, workflowFailed,
+      workflowError,
+      failedStep,
       round: ctx.round,
       trigger: ctx.trigger,
       qualityTier: config.quality.tier,

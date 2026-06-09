@@ -208,3 +208,58 @@ describe('runCodexFixStep', () => {
     ).rejects.toThrow('network timeout')
   })
 })
+
+describe('runFixStep timeout defaults', () => {
+  let execSyncMock: ReturnType<typeof vi.fn>
+  let execaMock: ReturnType<typeof vi.fn>
+
+  beforeEach(async () => {
+    vi.resetModules()
+    const childProcess = await import('child_process')
+    execSyncMock = vi.mocked(childProcess.execSync) as ReturnType<typeof vi.fn>
+    const execa = await import('execa')
+    execaMock = vi.mocked(execa.execa) as ReturnType<typeof vi.fn>
+    execSyncMock.mockReturnValue('')
+    execaMock.mockResolvedValue({ stdout: 'NO_CHANGES', stderr: '' } as never)
+  })
+
+  afterEach(() => { vi.clearAllMocks() })
+
+  const minimalConfig = (tier: 'fast' | 'balanced' | 'thorough') =>
+    ({ quality: { tier } }) as import('../config/schema.js').Config
+
+  it('uses tierTimeoutMs(balanced) = 600s when no explicit timeoutMs is given', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'))
+    const opts = execaMock.mock.calls[0][2] as { timeout?: number }
+    expect(opts.timeout).toBe(600_000)
+  })
+
+  it('uses tierTimeoutMs(thorough) = 1200s for thorough tier', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('thorough'))
+    const opts = execaMock.mock.calls[0][2] as { timeout?: number }
+    expect(opts.timeout).toBe(1_200_000)
+  })
+
+  it('uses tierTimeoutMs(fast) = 300s for fast tier', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('fast'))
+    const opts = execaMock.mock.calls[0][2] as { timeout?: number }
+    expect(opts.timeout).toBe(300_000)
+  })
+
+  it('respects an explicit timeoutMs override', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'), 'default', 45_000)
+    const opts = execaMock.mock.calls[0][2] as { timeout?: number }
+    expect(opts.timeout).toBe(45_000)
+  })
+
+  it('passes undefined timeout when timeoutMs=0 (no-cap mode)', async () => {
+    const { runFixStep } = await import('../reviewers/fix.js')
+    await runFixStep('/tmp/repo', 'main', 'My PR', 'Review', '', minimalConfig('balanced'), 'default', 0)
+    const opts = execaMock.mock.calls[0][2] as { timeout?: number }
+    expect(opts.timeout).toBeUndefined()
+  })
+})

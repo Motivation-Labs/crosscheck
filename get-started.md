@@ -517,7 +517,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 Runs the configured workflow against a single PR in one pass: review → fix → recheck. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
-For autonomous multi-round cycling (fix→recheck repeated up to `max_rounds` without human pushes), use `crosscheck watch` or `crosscheck serve` instead — those re-trigger automatically on each pushed fix commit. To loop unconditionally in a single `run` session, use `--crazy` (loop until `APPROVE`) or `--half-crazy` (loop until not `BLOCK`).
+For autonomous multi-round cycling (fix→recheck repeated up to `max_rounds` without human pushes), use `crosscheck watch` — it re-triggers automatically on each pushed fix commit and respects the `max_rounds` cap. To loop unconditionally in a single `run` session, use `--crazy` (loop until `APPROVE`) or `--half-crazy` (loop until not `BLOCK`).
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123

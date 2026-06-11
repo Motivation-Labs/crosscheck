@@ -484,9 +484,19 @@ export async function runWatch(opts: WatchOpts = {}) {
         // so the pre-workflow hash may not represent the content that was actually
         // reviewed. Caching the stale hash would cause a later force-push back to
         // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
+        // Capture the fix commit SHA independently of diff-hash availability.
+        // fixCommitSha must be set even when newDiffHash is null (e.g. shallow
+        // clone, base-branch fetch skipped) so the auto-loop can still fire after
+        // a successful commit-mode fix in those environments.
+        const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
         let fixCommitSha: string | null = null
+        if (fixAppliedCount && deliveryMode === 'commit') {
+          try {
+            const headSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+            if (headSha !== params.headSha) fixCommitSha = headSha
+          } catch { /* fall back — skip auto-loop this cycle */ }
+        }
         if (newDiffHash) {
-          const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
           // For non-commit delivery with an applied fix the checkout may be on a fix
           // branch; computeDiffHash would return the post-fix diff, not the original PR
           // diff. Caching that under prKey corrupts future no_diff_change checks for the
@@ -501,13 +511,7 @@ export async function runWatch(opts: WatchOpts = {}) {
               // When a fix was applied the HEAD advanced; cache the new SHA so the
               // auto-loop call on that SHA correctly sees prev.sha === headSha and
               // skips the no_diff_change guard (which would otherwise block round 2+).
-              let reviewedSha = params.headSha
-              if (fixAppliedCount) {
-                try {
-                  reviewedSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-                  if (reviewedSha !== params.headSha) fixCommitSha = reviewedSha
-                } catch { /* fall back to original SHA */ }
-              }
+              const reviewedSha = fixCommitSha ?? params.headSha
               diffHashes.upsert(prKey, { sha: reviewedSha, hash: reviewedHash })
             }
           }
@@ -531,14 +535,19 @@ export async function runWatch(opts: WatchOpts = {}) {
         // GitHub matches before scheduling to guard against the PR advancing
         // concurrently while the recheck was running.
         if (verdict && verdict !== 'APPROVE' && fixCommitSha) {
-          const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
           if (deliveryMode === 'commit') {
             const allSteps = loadWorkflow(process.cwd())
             const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
             const maxRounds = fixRecheckSteps.length > 0
               ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
               : 1
-            if (round <= maxRounds) {
+            // Also allow when round === maxRounds but the current run had no recheck
+            // step (workflow.yml has fix but not recheck). The next auto_loop invocation
+            // will run only the synthetic recheck; it pushes no new commit so the outer
+            // fixCommitSha guard prevents any further scheduling after that recheck.
+            const effectiveSteps = resolvedSteps ?? allSteps
+            const ranRecheck = effectiveSteps.some(s => s.type === 'recheck')
+            if (round < maxRounds || !ranRecheck) {
               let prHeadSha: string | null = null
               try {
                 const { data: freshPR } = await lockOctokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })

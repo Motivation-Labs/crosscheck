@@ -478,22 +478,30 @@ export async function runWatch(opts: WatchOpts = {}) {
         // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
         let fixCommitSha: string | null = null
         if (newDiffHash) {
-          let reviewedHash: string | null = null
-          try {
-            reviewedHash = computeDiffHash(tmpDir, params.baseRef)
-          } catch { /* base unavailable post-workflow — skip cache update */ }
-          if (reviewedHash) {
-            // When a fix was applied the HEAD advanced; cache the new SHA so the
-            // auto-loop call on that SHA correctly sees prev.sha === headSha and
-            // skips the no_diff_change guard (which would otherwise block round 2+).
-            let reviewedSha = params.headSha
-            if (fixAppliedCount && effectiveConfig.post_review.auto_fix.delivery.mode === 'commit') {
-              try {
-                reviewedSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
-                if (reviewedSha !== params.headSha) fixCommitSha = reviewedSha
-              } catch { /* fall back to original SHA */ }
+          const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
+          // For non-commit delivery with an applied fix the checkout may be on a fix
+          // branch; computeDiffHash would return the post-fix diff, not the original PR
+          // diff. Caching that under prKey corrupts future no_diff_change checks for the
+          // original PR. Only update the cache when no fix was applied, or delivery is
+          // commit (fix stays on the same branch/checkout).
+          if (!fixAppliedCount || deliveryMode === 'commit') {
+            let reviewedHash: string | null = null
+            try {
+              reviewedHash = computeDiffHash(tmpDir, params.baseRef)
+            } catch { /* base unavailable post-workflow — skip cache update */ }
+            if (reviewedHash) {
+              // When a fix was applied the HEAD advanced; cache the new SHA so the
+              // auto-loop call on that SHA correctly sees prev.sha === headSha and
+              // skips the no_diff_change guard (which would otherwise block round 2+).
+              let reviewedSha = params.headSha
+              if (fixAppliedCount) {
+                try {
+                  reviewedSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+                  if (reviewedSha !== params.headSha) fixCommitSha = reviewedSha
+                } catch { /* fall back to original SHA */ }
+              }
+              diffHashes.upsert(prKey, { sha: reviewedSha, hash: reviewedHash })
             }
-            diffHashes.upsert(prKey, { sha: reviewedSha, hash: reviewedHash })
           }
         }
         board.completePR(key, {

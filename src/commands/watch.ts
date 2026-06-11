@@ -391,6 +391,22 @@ export async function runWatch(opts: WatchOpts = {}) {
                 }
               }
               resolvedSteps = steps
+            } else if (nextResult.step.type === 'recheck') {
+              // identifyNextWorkflowStep returned a synthetic recheck (fixedCurrentSha
+              // path) but the type 'recheck' is not in allSteps, so nextStepIdx === -1.
+              // Build resolvedSteps directly here so runWorkflow uses
+              // DEFAULT_RECHECK_INSTRUCTIONS rather than falling back to a coerced
+              // review step with review instructions.
+              const deliveryMode = config.post_review.auto_fix.delivery.mode
+              if (deliveryMode === 'commit') {
+                const reviewStep = allSteps.find(s => s.type === 'review')
+                if (reviewStep) {
+                  resolvedSteps = [{
+                    ...reviewStep, name: 'recheck', type: 'recheck' as const, reviewer,
+                    when: undefined, instructions: DEFAULT_RECHECK_INSTRUCTIONS,
+                  }]
+                }
+              }
             }
           }
         } catch {

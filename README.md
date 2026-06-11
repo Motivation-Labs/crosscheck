@@ -232,7 +232,7 @@ crosscheck review <pr-url> --reviewer openai    # alias for Codex
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against one PR in a single pass: review → fix → recheck. Use `--crazy` or `--half-crazy` to loop autonomously until approved or unblocked. For continuous multi-round cycling without flags, use `crosscheck watch` or `crosscheck serve` — those re-trigger on each pushed fix commit and respect `max_rounds`.
+Runs the full configured workflow against one PR in a single pass: review → fix → recheck. Use `--crazy` or `--half-crazy` to loop autonomously until approved or unblocked. For continuous multi-round cycling without flags, use `crosscheck watch` — it re-triggers on each pushed fix commit and respects `max_rounds`.
 
 ```bash
 crosscheck run <pr-url>

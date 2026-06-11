@@ -335,10 +335,17 @@ export async function runWatch(opts: WatchOpts = {}) {
       // Exception: comment-triggered runs must always do live detection —
       // reviewedPRKeys is SHA-agnostic and would misroute a kickass review
       // annotation for a new SHA as a recheck run instead of routing to fix.
+      // auto_loop runs also skip the session fast-path so history detection
+      // picks the correct starting step (fix, not recheck); round is instead
+      // incremented from prRoundCounts to match the completed round count.
       let isRecheckRun = params.action === 'comment'
         ? reviewedPRShaKeys.has(key)    // SHA-specific: already processed this exact sha
+        : params.action === 'auto_loop'
+        ? false                          // always use history detection for auto-loop rounds
         : reviewedPRKeys.has(prKey)     // session fast-path for webhook/backtrace events
-      let round = isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
+      let round = params.action === 'auto_loop'
+        ? (prRoundCounts.get(prKey) ?? 1) + 1
+        : isRecheckRun ? (prRoundCounts.get(prKey) ?? 1) + 1 : 1
       let resolvedSteps: WorkflowStep[] | undefined
       let detectedReviewComment: { id?: number; body: string } | undefined
 
@@ -480,7 +487,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             // auto-loop call on that SHA correctly sees prev.sha === headSha and
             // skips the no_diff_change guard (which would otherwise block round 2+).
             let reviewedSha = params.headSha
-            if (fixAppliedCount) {
+            if (fixAppliedCount && effectiveConfig.post_review.auto_fix.delivery.mode === 'commit') {
               try {
                 reviewedSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
                 if (reviewedSha !== params.headSha) fixCommitSha = reviewedSha
@@ -523,12 +530,11 @@ export async function runWatch(opts: WatchOpts = {}) {
               } catch { /* skip auto-loop if PR head is unverifiable */ }
               if (prHeadSha === fixCommitSha) {
                 fileLog({ level: 'info', event: 'auto_loop_triggered', repo: `${owner}/${repoName}`, pr: prNumber, round, maxRounds, verdict, nextSha: fixCommitSha })
-                setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'synchronize' }))
+                setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'auto_loop' }))
               }
             }
           }
         }
-</old>
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)

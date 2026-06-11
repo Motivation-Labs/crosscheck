@@ -1378,7 +1378,7 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 
 `max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
 
-`max_rounds` is enforced by `crosscheck watch` and `crosscheck serve` — they re-trigger on each pushed fix commit and count completed rounds. `crosscheck run` runs one pass; use `--crazy` or `--half-crazy` for looping within a single `run` session.
+`max_rounds` is enforced by `crosscheck watch` — it re-triggers on each pushed fix commit and counts completed rounds. `crosscheck run` runs one pass; use `--crazy` or `--half-crazy` for looping within a single `run` session. (`crosscheck serve` does not yet implement autonomous looping; use `watch` for `max_rounds > 1`.)
 
 ### Can I disable the auto-fix step?
 

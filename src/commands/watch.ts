@@ -538,7 +538,7 @@ export async function runWatch(opts: WatchOpts = {}) {
             const maxRounds = fixRecheckSteps.length > 0
               ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
               : 1
-            if (round < maxRounds) {
+            if (round <= maxRounds) {
               let prHeadSha: string | null = null
               try {
                 const { data: freshPR } = await lockOctokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })

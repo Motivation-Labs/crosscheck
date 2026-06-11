@@ -440,7 +440,7 @@ export async function runWatch(opts: WatchOpts = {}) {
         board.updatePR(key, { prLoc })
         stopHeartbeat = startRemoteLockHeartbeat(lockOctokit, owner, repoName, params.headSha)
 
-        const { verdict } = await runWorkflow({
+        const { verdict, fixAppliedCount } = await runWorkflow({
           owner, repoName, prNumber, pr,
           tmpDir, token, config: effectiveConfig, origin,
           reviewStart,
@@ -469,12 +469,25 @@ export async function runWatch(opts: WatchOpts = {}) {
         // so the pre-workflow hash may not represent the content that was actually
         // reviewed. Caching the stale hash would cause a later force-push back to
         // the pre-mutation diff to be skipped incorrectly as `no_diff_change`.
+        let fixCommitSha: string | null = null
         if (newDiffHash) {
           let reviewedHash: string | null = null
           try {
             reviewedHash = computeDiffHash(tmpDir, params.baseRef)
           } catch { /* base unavailable post-workflow — skip cache update */ }
-          if (reviewedHash) diffHashes.upsert(prKey, { sha: params.headSha, hash: reviewedHash })
+          if (reviewedHash) {
+            // When a fix was applied the HEAD advanced; cache the new SHA so the
+            // auto-loop call on that SHA correctly sees prev.sha === headSha and
+            // skips the no_diff_change guard (which would otherwise block round 2+).
+            let reviewedSha = params.headSha
+            if (fixAppliedCount) {
+              try {
+                reviewedSha = execSync('git rev-parse HEAD', { cwd: tmpDir, encoding: 'utf8' }).trim()
+                if (reviewedSha !== params.headSha) fixCommitSha = reviewedSha
+              } catch { /* fall back to original SHA */ }
+            }
+            diffHashes.upsert(prKey, { sha: reviewedSha, hash: reviewedHash })
+          }
         }
         board.completePR(key, {
           elapsedMs: Date.now() - reviewStart,
@@ -485,6 +498,21 @@ export async function runWatch(opts: WatchOpts = {}) {
         notifyReviewSuccess(reviewer, bLog)
         stopHeartbeat()
         await releaseRemoteLock(lockOctokit, owner, repoName, params.headSha, 'success')
+        // Auto-loop: if verdict is non-APPROVE, fixes were applied, and max_rounds
+        // allows another iteration, trigger the next round directly. This makes
+        // max_rounds behave as an autonomous fix→recheck cycle count rather than
+        // requiring a human push to start each subsequent round.
+        if (verdict && verdict !== 'APPROVE' && fixCommitSha) {
+          const allSteps = loadWorkflow(process.cwd())
+          const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+          const maxRounds = fixRecheckSteps.length > 0
+            ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
+            : 1
+          if (round < maxRounds) {
+            fileLog({ level: 'info', event: 'auto_loop_triggered', repo: `${owner}/${repoName}`, pr: prNumber, round, maxRounds, verdict, nextSha: fixCommitSha })
+            setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'synchronize' }))
+          }
+        }
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)

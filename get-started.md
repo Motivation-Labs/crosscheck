@@ -402,7 +402,7 @@ crosscheck onboard --reconfigure  # re-run setup even if config already exists
 
 The `review → fix → re-check` option writes a `~/.crosscheck/workflow.yml` with all three pipeline steps configured.
 
-**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many fix/recheck rounds Crosscheck can run before stopping.
+**Step 8 — Fix -> recheck rounds.** When the full loop is selected, choose how many autonomous fix→recheck cycles Crosscheck can run before stopping. Each cycle is one fix commit followed by one recheck: `review → fix¹ → recheck¹ → fix² → recheck² → …`. Crosscheck drives these cycles automatically — no human push needed between rounds. A round stops early when the recheck returns `APPROVE`. The cap prevents runaway loops when issues resist automated fixing.
 
 **Step 9 — Auto conflict-resolve.** Optionally add a merge-conflict resolution step before review.
 
@@ -515,7 +515,7 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
+Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Each fix→recheck pair is one autonomous cycle: fix commits, recheck evaluates, and if the verdict is still non-`APPROVE` and rounds remain, the next cycle starts automatically. `max_rounds` caps the total number of fix→recheck cycles; with `max_rounds: 3` the worst case is review → fix¹ → recheck¹ → fix² → recheck² → fix³ → recheck³. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -609,7 +609,7 @@ crosscheck kickass
 
 crosscheck watch
   ├─ issue_comment (type=review) → pick up fix step automatically
-  └─ synchronize   (fix commit)  → pick up recheck step automatically
+  └─ fix commit done → auto-loop to next fix→recheck round (up to max_rounds)
 ```
 
 > **Note:** `ck run <url>` invoked directly (without `--trigger kickass`) runs the **full remaining pipeline** from the detected starting step. The one-step behaviour above applies only when kickass dispatches it.
@@ -617,7 +617,7 @@ crosscheck watch
 `kickass` advances each PR exactly one step using live `detect-step` detection. `watch` owns all continuation via webhooks:
 
 - A posted review fires an `issue_comment` webhook → `watch` starts the fix step.
-- A fix commit fires a `synchronize` webhook → `watch` starts the recheck step.
+- After a fix commit, `watch` automatically triggers the next fix→recheck round (up to `max_rounds` cycles). No human push needed between rounds.
 
 No second `kickass` run is needed. Once `kickass` kicks the first step, the pipeline advances on its own as long as `watch` is running. (Introduced in [#193](https://github.com/Motivation-Labs/crosscheck/pull/193).)
 
@@ -1358,6 +1358,23 @@ tunnel:
 
 crosscheck registers the smee channel URL as your GitHub webhook automatically on first `watch` start. The channel URL never changes, so no re-registration is needed on restart. Unlike `localhost.run`, events are queued while you're offline and replayed when you reconnect.
 
+
+### What does `max_rounds` mean?
+
+`max_rounds` on the `fix` and `recheck` steps controls how many autonomous fix→recheck cycles can run for a single PR before the loop stops.
+
+**Pattern with `max_rounds: 3`:**
+```
+review → fix¹ → recheck¹ → fix² → recheck² → fix³ → recheck³
+```
+
+Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop stops early when:
+- the recheck returns `APPROVE` (done), or
+- `round` reaches `max_rounds` (cap hit — human attention required for remaining issues).
+
+`max_rounds: 1` (the default) runs one cycle: review → fix → recheck. If the recheck still says `NEEDS WORK` or `BLOCK`, the loop stops and the outstanding issues need manual resolution.
+
+`max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
 
 ### Can I disable the auto-fix step?
 

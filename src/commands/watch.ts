@@ -393,7 +393,12 @@ export async function runWatch(opts: WatchOpts = {}) {
               resolvedSteps = steps
             }
           }
-        } catch { /* best-effort — fall back to session-based detection */ }
+        } catch {
+          // best-effort — fall back to session-based detection.
+          // For auto_loop, force isRecheckRun=true so a transient history-fetch
+          // failure does not restart the workflow from the review step.
+          if (params.action === 'auto_loop') isRecheckRun = true
+        }
       }
 
       const reviewStart = Date.now()

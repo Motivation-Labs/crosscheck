@@ -364,7 +364,10 @@ export async function runWatch(opts: WatchOpts = {}) {
           }
           if (nextResult.hasExistingReview) {
             isRecheckRun = nextResult.step.type !== 'review'
-            round = nextResult.round
+            // auto_loop pre-computed the correct incremented round from prRoundCounts;
+            // history detection returns the last recheck's round (unchanged across
+            // iterations), so overwriting here would defeat the max_rounds cap.
+            if (params.action !== 'auto_loop') round = nextResult.round
             detectedReviewComment = nextResult.reviewComment
             const nextStepIdx = allSteps.findIndex(s => s.type === nextResult.step!.type)
             if (nextStepIdx >= 0) {

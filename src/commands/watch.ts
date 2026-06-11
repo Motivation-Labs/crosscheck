@@ -502,17 +502,33 @@ export async function runWatch(opts: WatchOpts = {}) {
         // allows another iteration, trigger the next round directly. This makes
         // max_rounds behave as an autonomous fix→recheck cycle count rather than
         // requiring a human push to start each subsequent round.
+        // Only safe under commit delivery — pull_request delivery leaves the local
+        // checkout on a separate fix branch, so git rev-parse HEAD is not the PR
+        // head and fixCommitSha would be wrong. Also verify the live PR head on
+        // GitHub matches before scheduling to guard against the PR advancing
+        // concurrently while the recheck was running.
         if (verdict && verdict !== 'APPROVE' && fixCommitSha) {
-          const allSteps = loadWorkflow(process.cwd())
-          const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
-          const maxRounds = fixRecheckSteps.length > 0
-            ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
-            : 1
-          if (round < maxRounds) {
-            fileLog({ level: 'info', event: 'auto_loop_triggered', repo: `${owner}/${repoName}`, pr: prNumber, round, maxRounds, verdict, nextSha: fixCommitSha })
-            setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'synchronize' }))
+          const deliveryMode = effectiveConfig.post_review.auto_fix.delivery.mode
+          if (deliveryMode === 'commit') {
+            const allSteps = loadWorkflow(process.cwd())
+            const fixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+            const maxRounds = fixRecheckSteps.length > 0
+              ? Math.min(...fixRecheckSteps.map(s => s.max_rounds ?? 1))
+              : 1
+            if (round < maxRounds) {
+              let prHeadSha: string | null = null
+              try {
+                const { data: freshPR } = await lockOctokit.rest.pulls.get({ owner, repo: repoName, pull_number: prNumber })
+                prHeadSha = freshPR.head.sha
+              } catch { /* skip auto-loop if PR head is unverifiable */ }
+              if (prHeadSha === fixCommitSha) {
+                fileLog({ level: 'info', event: 'auto_loop_triggered', repo: `${owner}/${repoName}`, pr: prNumber, round, maxRounds, verdict, nextSha: fixCommitSha })
+                setImmediate(() => void reviewPR({ ...params, headSha: fixCommitSha!, action: 'synchronize' }))
+              }
+            }
           }
         }
+</old>
       } catch (err: unknown) {
         stopHeartbeat()
         const message = err instanceof Error ? err.message : String(err)

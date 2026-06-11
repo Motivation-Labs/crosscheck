@@ -515,7 +515,9 @@ crosscheck review https://github.com/owner/repo/pull/123 --reviewer claude
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against a single PR: review → (fix → recheck) × `max_rounds`. Each fix→recheck pair is one autonomous cycle: fix commits, recheck evaluates, and if the verdict is still non-`APPROVE` and rounds remain, the next cycle starts automatically. `max_rounds` caps the total number of fix→recheck cycles; with `max_rounds: 3` the worst case is review → fix¹ → recheck¹ → fix² → recheck² → fix³ → recheck³. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
+Runs the configured workflow against a single PR in one pass: review → fix → recheck. Without `--steps`, `detect-step` determines where to resume from live PR history (skipping steps already completed for the current HEAD), then runs all remaining steps from that point. Pass `--steps` explicitly to restrict to specific steps.
+
+For autonomous multi-round cycling (fix→recheck repeated up to `max_rounds` without human pushes), use `crosscheck watch` or `crosscheck serve` instead — those re-trigger automatically on each pushed fix commit. To loop unconditionally in a single `run` session, use `--crazy` (loop until `APPROVE`) or `--half-crazy` (loop until not `BLOCK`).
 
 ```bash
 crosscheck run https://github.com/owner/repo/pull/123
@@ -1375,6 +1377,8 @@ Each cycle is one `[crosscheck]` fix commit followed by one recheck. The loop st
 `max_rounds: 1` (the default) runs one cycle: review → fix → recheck. If the recheck still says `NEEDS WORK` or `BLOCK`, the loop stops and the outstanding issues need manual resolution.
 
 `max_rounds` is a per-step field. Crosscheck uses the minimum across all fix and recheck steps in the workflow, so setting `max_rounds: 3` on both keeps them in sync. Setting it to different values on fix vs recheck is not recommended.
+
+`max_rounds` is enforced by `crosscheck watch` and `crosscheck serve` — they re-trigger on each pushed fix commit and count completed rounds. `crosscheck run` runs one pass; use `--crazy` or `--half-crazy` for looping within a single `run` session.
 
 ### Can I disable the auto-fix step?
 

@@ -127,9 +127,10 @@ program
   .option('--half-crazy', 'loop fix→recheck per PR until verdict is not BLOCK; disables all timeout constraints')
   .option('--halfcrazy', '(deprecated alias for --half-crazy)')
   .option('--timeout <duration>', 'reviewer subprocess timeout, e.g. 300s or 10m (default: 180s for claude, tier-based for codex)')
-  .option('--concurrent [n]', 'run PRs in parallel; omit n for one agent per selected PR, or set a cap (e.g. --concurrent 3)')
-  .option('--stagger <ms>', 'ms delay between concurrent worker starts; default 2000 when --concurrent is set')
-  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true; stagger?: string }) => {
+  .option('--concurrent [n]', 'cap parallel agents; omit n for one agent per PR (default), or set a cap (e.g. --concurrent 3)')
+  .option('--sequential', 'run PRs one at a time instead of in parallel')
+  .option('--stagger <ms>', 'ms delay between concurrent worker starts; default 2000')
+  .action((opts: { force?: boolean; staleAfter?: string; dryRun?: boolean; crazy?: boolean; halfCrazy?: boolean; halfcrazy?: boolean; timeout?: string; concurrent?: string | true; sequential?: boolean; stagger?: string }) => {
     const roundMode = opts.crazy ? 'crazy' : (opts.halfCrazy || opts.halfcrazy) ? 'halfcrazy' : undefined
     const concurrent = opts.concurrent === undefined ? undefined
       : opts.concurrent === true ? 0

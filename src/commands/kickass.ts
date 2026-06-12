@@ -23,8 +23,9 @@ export interface KickassOpts {
   dryRun?: boolean
   roundMode?: 'crazy' | 'halfcrazy'
   timeout?: string
-  concurrent?: number  // parallel agents; 0 = one per selected PR; undefined/1 = sequential
+  concurrent?: number  // parallel agents; undefined/0 = one per selected PR (default); 1 = sequential; N = cap at N
   staggerMs?: number  // ms delay between concurrent worker starts; default 2000 when concurrent > 1
+  sequential?: boolean // force sequential execution (overrides concurrent)
 }
 
 export type KickassAction = 'review' | 'fix' | 'recheck' | 'skip'
@@ -157,10 +158,12 @@ export async function runKickassWithDeps(
       return
     }
 
-    // 0 = one agent per selected PR; undefined/1 = sequential
-    const resolvedConcurrency = opts.concurrent === 0
-      ? selected.length
-      : Math.max(1, opts.concurrent ?? 1)
+    // Default: one agent per selected PR. --sequential or --concurrent 1 forces sequential.
+    const resolvedConcurrency = (opts.sequential || opts.concurrent === 1)
+      ? 1
+      : (opts.concurrent === undefined || opts.concurrent === 0)
+        ? selected.length
+        : Math.max(1, opts.concurrent)
     const resolvedStagger = resolvedConcurrency > 1 ? (opts.staggerMs ?? 2_000) : 0
     if (resolvedConcurrency > 1) {
       console.log(chalk.dim(`\n  running ${resolvedConcurrency} agents in parallel (${resolvedStagger}ms stagger)`))
@@ -561,8 +564,8 @@ function defaultKickassDeps(opts: KickassOpts = {}, board?: PRBoard): KickassDep
     const timeoutArg = timeoutMs != null ? `${Math.round(timeoutMs / 1000)}s` : opts.timeout
     const args = [...invocation.args, ...buildKickassRunArgs(item, opts.roundMode, timeoutArg)]
     // When board is active always pipe so output routes through board.log scrollback.
-    // Without board, pipe only for explicit concurrent mode; sequential streams inline.
-    if (board || opts.concurrent !== undefined) {
+    // Without board, pipe for all modes except explicit sequential (--sequential or --concurrent 1).
+    if (board || !(opts.sequential || opts.concurrent === 1)) {
       try {
         const result = await execa(invocation.command, args, { stdio: 'pipe', all: true })
         return result.all ?? ''

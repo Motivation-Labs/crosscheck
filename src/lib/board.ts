@@ -223,8 +223,18 @@ function buildTheme(cfg: DisplayTheme): Theme {
 // ── PRBoard ───────────────────────────────────────────────────────────────────
 
 const CONN_LOG_MAX = 6  // max connectivity log lines kept in memory
+const COMPACT_CONN_LOG_LINES = 2  // conn log lines shown when the live block must shrink to fit the viewport
 const FOLD_THRESHOLD = 3  // when completed count exceeds this, fold all completed PRs to 1 line
 const WORKSPACE_MAX = 25  // when total slots exceed this, evict oldest completed to scrollback
+
+interface LayoutOpts {
+  foldAll: boolean        // fold every completed slot regardless of FOLD_THRESHOLD
+  connLogLines: number    // how many connectivity log lines to show
+  showTip: boolean
+}
+
+const LAYOUT_NORMAL: LayoutOpts = { foldAll: false, connLogLines: CONN_LOG_MAX, showTip: true }
+const LAYOUT_COMPACT: LayoutOpts = { foldAll: true, connLogLines: COMPACT_CONN_LOG_LINES, showTip: false }
 
 export class PRBoard {
   private slots = new Map<string, PRSlot>()
@@ -604,24 +614,66 @@ export class PRBoard {
     // When the workspace overflows, evict oldest completed slots to scrollback.
     this.evictOverflow()
 
-    const t = this.theme
     const w = process.stdout.columns || 80
+    // The live block must never be taller than the viewport: lines that scroll
+    // out the top cannot be erased on the next frame (cursor-up clamps at the
+    // viewport top), leaving permanent duplicates in scrollback. Reserve one
+    // row for the trailing newline writeLive appends.
+    const budget = (process.stdout.rows || 24) - 1
+
+    const normal = this.renderLayout(w, LAYOUT_NORMAL)
+    if (this.countRenderedLines(normal, w) <= budget) return normal
+
+    let compact = this.renderLayout(w, LAYOUT_COMPACT)
+    // Still too tall: flush oldest completed slots to scrollback until it fits.
+    while (this.countRenderedLines(compact, w) > budget && this.evictOldestCompleted()) {
+      compact = this.renderLayout(w, LAYOUT_COMPACT)
+    }
+    if (this.countRenderedLines(compact, w) <= budget) return compact
+
+    // Only active slots remain and they still overflow (tiny terminal):
+    // drop rows from the top, keeping the most recent activity visible.
+    return this.truncateTop(compact, w, budget)
+  }
+
+  private renderLayout(w: number, opts: LayoutOpts): string {
+    const t = this.theme
     // Use w-1 to prevent the exact-terminal-width cursor wrap ambiguity that
     // causes the first char of the next line to appear at the end of the separator.
     const sep = t.separator('─'.repeat(w - 1))
 
-    const configLines = this.renderConfigPanel()
-    const statsLines = this.renderStatsPanel()
-    const prLines = this.renderPRWorkspace()
-
     return [
-      ...configLines,
+      ...this.renderConfigPanel(),
       sep,
-      ...statsLines,
+      ...this.renderStatsPanel(opts.connLogLines, opts.showTip),
       sep,
-      ...prLines,
+      ...this.renderPRWorkspace(opts.foldAll),
       sep,
     ].join('\n')
+  }
+
+  /** Evict the oldest completed slot to scrollback. Returns false when none left. */
+  private evictOldestCompleted(): boolean {
+    for (const [key, slot] of this.slots) {
+      if (slot.completedAt === undefined) continue
+      this.printStatic(this.renderPRSlotFolded(slot))
+      this.slots.delete(key)
+      return true
+    }
+    return false
+  }
+
+  /** Drop rows from the top until the content (plus an indicator line) fits the budget. */
+  private truncateTop(content: string, w: number, budget: number): string {
+    const lines = content.split('\n')
+    const rowsPer = lines.map(l => Math.max(1, Math.ceil(stripAnsi(l).length / w)))
+    let total = rowsPer.reduce((a, b) => a + b, 0)
+    let start = 0
+    while (start < lines.length - 1 && total > budget - 1) {
+      total -= rowsPer[start]
+      start++
+    }
+    return [this.theme.dim('  …'), ...lines.slice(start)].join('\n')
   }
 
   // ── Panels ─────────────────────────────────────────────────────────────────
@@ -644,7 +696,7 @@ export class PRBoard {
     return lines
   }
 
-  private renderStatsPanel(): string[] {
+  private renderStatsPanel(connLogLines: number, showTip: boolean): string[] {
     const t = this.theme
     const lines: string[] = []
 
@@ -660,10 +712,10 @@ export class PRBoard {
     }
 
     // Connectivity log: already prefixed with timestamps + indent in logConnectivity()
-    const activeConn = this.connLog.filter(l => l.trim())
+    const activeConn = this.connLog.filter(l => l.trim()).slice(-connLogLines)
     lines.push(...activeConn)
 
-    lines.push(this.renderTipLine())
+    if (showTip) lines.push(this.renderTipLine())
 
     return lines
   }
@@ -683,7 +735,7 @@ export class PRBoard {
     return `  ${badge}${formatted}`
   }
 
-  private renderPRWorkspace(): string[] {
+  private renderPRWorkspace(foldAll: boolean): string[] {
     const t = this.theme
     const frame = FRAMES[this.frameIdx]
 
@@ -695,7 +747,7 @@ export class PRBoard {
     for (const slot of this.slots.values()) {
       if (slot.completedAt !== undefined) completedCount++
     }
-    const foldCompleted = completedCount > FOLD_THRESHOLD
+    const foldCompleted = foldAll || completedCount > FOLD_THRESHOLD
 
     const lines: string[] = []
     let prevWasExpanded = false

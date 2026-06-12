@@ -232,7 +232,7 @@ crosscheck review <pr-url> --reviewer openai    # alias for Codex
 
 ### `crosscheck run <pr-url>`
 
-Runs the full configured workflow against one PR: review → (fix → recheck) × `max_rounds`. Same logic as `watch`/`serve`, but triggered manually.
+Runs the full configured workflow against one PR: review → (fix → recheck) × `max_rounds`. Loops autonomously through fix→recheck cycles up to the `max_rounds` value configured in `workflow.yml` (default: 1). Use `--crazy` or `--half-crazy` to loop until approved or unblocked, ignoring `max_rounds`.
 
 ```bash
 crosscheck run <pr-url>

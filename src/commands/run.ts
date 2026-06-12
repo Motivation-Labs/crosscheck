@@ -611,6 +611,72 @@ export async function runRun(prUrl: string, opts: RunOpts = {}) {
           console.log(`  round ${loopRound}  verdict ${verdict ?? '--'} — continuing...`)
         }
 
+      } else {
+        // Autonomous fix→recheck cycling based on max_rounds from workflow.yml
+        const allFixRecheckSteps = allSteps.filter(s => s.type === 'fix' || s.type === 'recheck')
+        const maxRounds = allFixRecheckSteps.length > 0
+          ? Math.min(...allFixRecheckSteps.map(s => s.max_rounds ?? 1))
+          : 1
+        const ranRecheck = filteredSteps.some(s => s.type === 'recheck')
+
+        if (maxRounds > 1 || !ranRecheck) {
+          const fixRecheckSteps = buildFixRecheckSteps(filteredSteps, allSteps, assignedReviewer, stepVendorOverrides)
+          let loopRound = 1
+          let loopSha = sha
+          let hasRechecked = ranRecheck
+
+          while (
+            verdict && verdict !== 'APPROVE' &&
+            fixAppliedCount !== undefined && fixAppliedCount > 0 &&
+            (loopRound < maxRounds || !hasRechecked)
+          ) {
+            loopRound++
+            console.log(chalk.dim(`\n  round ${loopRound}  previous verdict ${verdict ?? '--'} — continuing (max_rounds ${maxRounds})...`))
+
+            const { data: freshPR } = await octokit.rest.pulls.get({ owner, repo, pull_number: number })
+            const freshSha = freshPR.head.sha
+            if (freshSha === loopSha && fixAppliedCount !== undefined && fixAppliedCount !== 0) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_progress', round: loopRound })
+              console.log(chalk.dim(`  head SHA unchanged — no progress, stopping`))
+              break
+            }
+            const acquiredLoopLock = freshSha !== loopSha
+            if (acquiredLoopLock) {
+              loopSha = freshSha
+              stopHeartbeat()
+              if (await checkRemoteLock(octokit, owner, repo, loopSha)) {
+                fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'in_progress_remote', round: loopRound })
+                console.log(chalk.yellow(`⚠  PR #${number} head ${loopSha.slice(0, 7)} is already locked — stopping loop`))
+                break
+              }
+              rememberLoopLock(loopSha)
+              await acquireRemoteLock(octokit, owner, repo, loopSha)
+              stopHeartbeat = startRemoteLockHeartbeat(octokit, owner, repo, loopSha)
+            }
+
+            const loopPR = { ...pr, head: { ...pr.head, sha: loopSha } }
+            workflowResult = await runWorkflow({
+              ...sharedCtx,
+              pr: loopPR,
+              tmpDir,
+              reviewStart: Date.now(),
+              steps: fixRecheckSteps,
+              initialReviewComment: latestReviewComment,
+              round: loopRound,
+            })
+            ;({ verdict, fixAppliedCount } = workflowResult)
+            latestReviewComment = workflowResult.latestReviewComment ?? latestReviewComment
+            hasRechecked = true
+
+            if (acquiredLoopLock) await releaseRememberedLoopLock(loopSha, 'success')
+
+            if (fixAppliedCount === undefined) {
+              fileLog({ level: 'info', event: 'step_skipped', repo: `${owner}/${repo}`, pr: number, reason: 'no_fix_step', round: loopRound })
+              console.log(chalk.dim(`  fix step did not run in round ${loopRound} — stopping`))
+              break
+            }
+          }
+        }
       }
 
       activeSpinner.stop()

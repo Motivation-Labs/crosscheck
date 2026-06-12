@@ -12,16 +12,6 @@ export const CODEX_TIER_MODELS_API: Record<string, string> = {
   thorough: 'o3',
 }
 
-const MODEL_DISPLAY_NAMES: Record<string, string> = {
-  'claude-opus-4-8': 'Opus 4.8',
-  'claude-opus-4-7': 'Opus 4.7',
-  'claude-sonnet-4-6': 'Sonnet 4.6',
-  'claude-haiku-4-5-20251001': 'Haiku 4.5',
-  'o4-mini': 'o4-mini',
-  'o3': 'o3',
-  'gpt-4o-mini': 'gpt-4o-mini',
-}
-
 export function resolveClaudeModel(quality: QualityConfig, vendor?: VendorConfig): string {
   // An explicit vendors.claude.model wins over the tier mapping. The claude CLI
   // accepts --model under both subscription and api-key auth (unlike Codex), so
@@ -37,9 +27,9 @@ export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorCon
 
 // Derives a display name from the regular claude model ID shape:
 // claude-{family}-{major}[-{minor}][-YYYYMMDD]. New models then render
-// nicely without a MODEL_DISPLAY_NAMES entry; the map remains as an
-// override hook for irregular IDs. Returns null when the shape differs
-// (e.g. old-style claude-3-5-sonnet-20241022), falling back to the raw ID.
+// nicely without code changes. Returns null when the shape differs
+// (e.g. old-style claude-3-5-sonnet-20241022 or codex IDs like o4-mini),
+// in which case the raw ID is displayed as-is.
 function claudePrettyName(model: string): string | null {
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model)
   if (!m) return null
@@ -49,7 +39,7 @@ function claudePrettyName(model: string): string | null {
 
 export function modelDisplayName(model: string): string | null {
   if (model === 'default') return null
-  return MODEL_DISPLAY_NAMES[model] ?? claudePrettyName(model) ?? model
+  return claudePrettyName(model) ?? model
 }
 
 // Extracts the model that actually served the session from the claude CLI's

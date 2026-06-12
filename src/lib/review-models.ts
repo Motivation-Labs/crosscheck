@@ -13,6 +13,7 @@ export const CODEX_TIER_MODELS_API: Record<string, string> = {
 }
 
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  'claude-opus-4-8': 'Opus 4.8',
   'claude-opus-4-7': 'Opus 4.7',
   'claude-sonnet-4-6': 'Sonnet 4.6',
   'claude-haiku-4-5-20251001': 'Haiku 4.5',
@@ -37,4 +38,25 @@ export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorCon
 export function modelDisplayName(model: string): string | null {
   if (model === 'default') return null
   return MODEL_DISPLAY_NAMES[model] ?? model
+}
+
+// Extracts the model that actually served the session from the claude CLI's
+// `modelUsage` JSON field (keyed by full model ID). The requested model may be
+// an alias ("opus") or be substituted by the CLI, so this is the ground truth.
+// When several models appear (e.g. a helper model alongside the main one), the
+// one with the most output tokens is the reviewer. Returns null when the field
+// is missing or malformed.
+export function primaryModelFromUsage(modelUsage: unknown): string | null {
+  if (modelUsage === null || typeof modelUsage !== 'object') return null
+  let best: string | null = null
+  let bestTokens = -1
+  for (const [id, usage] of Object.entries(modelUsage)) {
+    const out = (usage as { outputTokens?: unknown } | null)?.outputTokens
+    const tokens = typeof out === 'number' ? out : 0
+    if (tokens > bestTokens) {
+      bestTokens = tokens
+      best = id
+    }
+  }
+  return best
 }

@@ -104,5 +104,7 @@ describe('primaryModelFromUsage', () => {
     expect(primaryModelFromUsage('claude-opus-4-8')).toBeNull()
     expect(primaryModelFromUsage(42)).toBeNull()
     expect(primaryModelFromUsage({})).toBeNull()
+    // Arrays pass typeof === 'object' but their keys are indices, not model IDs
+    expect(primaryModelFromUsage([{ outputTokens: 100 }])).toBeNull()
   })
 })

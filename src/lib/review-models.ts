@@ -49,8 +49,11 @@ export function modelDisplayName(model: string): string | null {
 // one with the most output tokens is the reviewer. Returns null when the field
 // is missing or malformed.
 export function primaryModelFromUsage(modelUsage: unknown): string | null {
-  if (modelUsage === null || typeof modelUsage !== 'object') return null
+  // Arrays pass typeof === 'object' but their Object.entries keys are indices,
+  // not model IDs — reject them explicitly.
+  if (modelUsage === null || typeof modelUsage !== 'object' || Array.isArray(modelUsage)) return null
   let best: string | null = null
+  // -1 (not 0) so the first entry still wins when no entry has numeric tokens.
   let bestTokens = -1
   for (const [id, usage] of Object.entries(modelUsage)) {
     const out = (usage as { outputTokens?: unknown } | null)?.outputTokens

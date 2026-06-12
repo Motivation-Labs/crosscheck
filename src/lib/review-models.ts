@@ -35,9 +35,21 @@ export function resolveCodexModel(quality: QualityConfig, vendor: CodexVendorCon
   return vendor.model || CODEX_TIER_MODELS_API[quality.tier] || CODEX_TIER_MODELS_API.balanced
 }
 
+// Derives a display name from the regular claude model ID shape:
+// claude-{family}-{major}[-{minor}][-YYYYMMDD]. New models then render
+// nicely without a MODEL_DISPLAY_NAMES entry; the map remains as an
+// override hook for irregular IDs. Returns null when the shape differs
+// (e.g. old-style claude-3-5-sonnet-20241022), falling back to the raw ID.
+function claudePrettyName(model: string): string | null {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model)
+  if (!m) return null
+  const family = m[1][0].toUpperCase() + m[1].slice(1)
+  return m[3] ? `${family} ${m[2]}.${m[3]}` : `${family} ${m[2]}`
+}
+
 export function modelDisplayName(model: string): string | null {
   if (model === 'default') return null
-  return MODEL_DISPLAY_NAMES[model] ?? model
+  return MODEL_DISPLAY_NAMES[model] ?? claudePrettyName(model) ?? model
 }
 
 // Extracts the model that actually served the session from the claude CLI's

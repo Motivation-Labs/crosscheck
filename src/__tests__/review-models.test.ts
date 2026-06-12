@@ -64,6 +64,18 @@ describe('review model resolution', () => {
     expect(modelDisplayName('o3')).toBe('o3')
     expect(modelDisplayName('gpt-4o-mini')).toBe('gpt-4o-mini')
   })
+
+  it('derives display names for claude models not in the static map', () => {
+    expect(modelDisplayName('claude-opus-4-9')).toBe('Opus 4.9')
+    expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
+    expect(modelDisplayName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(modelDisplayName('claude-nova-6-2-20270101')).toBe('Nova 6.2')
+  })
+
+  it('falls back to the raw ID for IDs outside the regular claude shape', () => {
+    expect(modelDisplayName('claude-3-5-sonnet-20241022')).toBe('claude-3-5-sonnet-20241022')
+    expect(modelDisplayName('some-custom-model')).toBe('some-custom-model')
+  })
 })
 
 describe('primaryModelFromUsage', () => {
